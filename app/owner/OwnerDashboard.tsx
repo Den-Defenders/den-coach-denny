@@ -158,14 +158,14 @@ export default function OwnerDashboard() {
     {!report && <section className="owner-setup surface">
       <span className="owner-section-label">READY FOR THE DATA</span><h2>{loading ? "Loading owner numbers…" : "The dashboard is ready. Add the verified export."}</h2>
       <p>There are no invented historical or future numbers here. The charts fill when the Security installs export is imported.</p>
-      {!configured && !loading && <p className="notice">The site administrator must set OWNER_DATABASE_URL to the private reporting database before imports can be saved.</p>}
+      {!configured && !loading && <p className="notice">The site administrator must connect the private reporting database before imports can be saved.</p>}
     </section>}
     {!report && <VerifiedReference />}
 
     <div className="owner-stats">
       <Stat label="Revenue pipeline" amount={latest?.revenuePipeline} detail={`${label} · full sold value`} accent="#27b9ab" />
       <Stat label="Cashflow pipeline" amount={latest?.cashflowPipeline} detail="Unpaid balance on those same jobs" accent="#f1b84b" />
-      <Stat label={view === "weekly" ? "Prior week's net cash" : "That day's net cash"} amount={activity?.netCash} detail="Deposits + install payments − refunds" accent="#ee7668" />
+      <Stat label={view === "weekly" ? "Prior week's net cash" : "Last actual day's net cash"} amount={activity?.netCash} detail={`${activity ? dayLabel(activity.date) : "No actual day"} · deposits + install payments − refunds`} accent="#ee7668" />
       <Stat label="Change from prior point" amount={delta} detail="Revenue pipeline, same view" accent="#517ba0" />
     </div>
 
@@ -179,7 +179,7 @@ export default function OwnerDashboard() {
     </div>
 
     <section className="owner-split">
-      <div className="owner-detail surface"><span className="owner-section-label">WHAT MAKES UP CASH</span><h2>{view === "weekly" ? "Prior week's" : "Latest day's"} cash</h2>
+      <div className="owner-detail surface"><span className="owner-section-label">WHAT MAKES UP CASH</span><h2>{view === "weekly" ? "Prior week's" : activity ? `${dayLabel(activity.date)} (last actual day)` : "Last actual day's"} cash</h2>
         <p className="owner-explain">A deposit is cash received for a future installation. The install payment is money collected when the job is installed.</p>
         <div className="owner-breakdown"><span>Deposits received</span><strong>{exactMoney(activity?.deposits)}</strong><span>Install balance payments</span><strong>{exactMoney(activity?.installPayments)}</strong><span>Refunds</span><strong>− {exactMoney(activity?.refunds)}</strong><span className="owner-total">Net cash</span><strong className="owner-total">{exactMoney(activity?.netCash)}</strong></div>
       </div>
