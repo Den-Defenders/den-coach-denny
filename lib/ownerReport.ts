@@ -22,6 +22,7 @@ export type OwnerReport = {
   notes: string[];
   weekly: PeriodRow[];
   daily: PeriodRow[];
+  dailyRolling?: PeriodRow[];
 };
 
 const MONEY = ["revenuePipeline", "cashflowPipeline", "holdRevenue", "holdCashflow",
@@ -85,12 +86,13 @@ export function parseOwnerReport(input: unknown): OwnerReport {
   }
   const weekly = parseRows(raw.weekly, true);
   const daily = parseRows(raw.daily, false);
+  const dailyRolling = raw.dailyRolling === undefined ? undefined : parseRows(raw.dailyRolling, false);
   const pacificParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit",
   }).formatToParts(new Date(raw.generatedAt));
   const piece = (type: string) => pacificParts.find((part) => part.type === type)?.value || "";
   const asOfDay = `${piece("year")}-${piece("month")}-${piece("day")}`;
-  for (const row of [...weekly, ...daily]) {
+  for (const row of [...weekly, ...daily, ...(dailyRolling || [])]) {
     if (row.date > asOfDay && row.quality !== "forecast") {
       throw new Error(`Future row ${row.date} must be labeled forecast.`);
     }
@@ -100,6 +102,6 @@ export function parseOwnerReport(input: unknown): OwnerReport {
   }
   return {
     schemaVersion: 1, generatedAt: raw.generatedAt, source: raw.source,
-    notes: raw.notes as string[], weekly, daily,
+    notes: raw.notes as string[], weekly, daily, ...(dailyRolling ? { dailyRolling } : {}),
   };
 }

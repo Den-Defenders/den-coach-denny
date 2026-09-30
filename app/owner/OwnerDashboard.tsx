@@ -83,6 +83,7 @@ export default function OwnerDashboard() {
   const [configured, setConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<View>("weekly");
+  const [dailyWindow, setDailyWindow] = useState<"rolling" | "yearEnd">("rolling");
   const [year, setYear] = useState(2026);
   const [status, setStatus] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -97,7 +98,7 @@ export default function OwnerDashboard() {
   }
   useEffect(() => { void refresh(); }, []);
 
-  const allRows = view === "weekly" ? report?.weekly || [] : report?.daily || [];
+  const allRows = view === "weekly" ? report?.weekly || [] : (dailyWindow === "rolling" ? report?.dailyRolling || [] : report?.daily || []);
   const rows = allRows.filter((r) => r.date.startsWith(String(year)));
   const actual = rows.filter((r) => r.quality !== "forecast");
   const latest = actual.at(-1);
@@ -106,7 +107,7 @@ export default function OwnerDashboard() {
   const activity = actual.at(-1);
   const previous = actual.at(-2);
   const delta = latest?.revenuePipeline != null && previous?.revenuePipeline != null ? latest.revenuePipeline - previous.revenuePipeline : null;
-  const label = view === "weekly" ? "Monday snapshot · next 3 calendar months" : "Day-end snapshot · through Dec 31";
+  const label = view === "weekly" ? "Monday snapshot · next 3 calendar months" : dailyWindow === "rolling" ? "Day-end snapshot · next 3 calendar months" : "Day-end snapshot · through Dec 31";
   const initialRebuild = report?.generatedAt === "2026-09-28T23:20:22Z";
   const correctedRebuild = report?.generatedAt === "2026-09-28T23:49:51Z";
   const reconciledExport = report?.generatedAt === "2026-09-29T00:20:54Z";
@@ -139,9 +140,14 @@ export default function OwnerDashboard() {
       <div className="owner-segment" role="group" aria-label="Year">
         {[2024,2025,2026,2027].map((y) => <button key={y} className={year === y ? "selected" : ""} onClick={() => setYear(y)}>{y}</button>)}
       </div>
+      {view === "daily" && <div className="owner-segment" role="group" aria-label="Daily pipeline window">
+        <button className={dailyWindow === "rolling" ? "selected" : ""} onClick={() => setDailyWindow("rolling")}>Next 3 months</button>
+        <button className={dailyWindow === "yearEnd" ? "selected" : ""} onClick={() => setDailyWindow("yearEnd")}>Through year-end</button>
+      </div>}
       <span className="owner-scope">{label}</span>
     </section>
 
+    {view === "daily" && dailyWindow === "rolling" && report && !report.dailyRolling && <p className="notice">The next-three-month daily report has not been generated yet. Choose Through year-end to view the current report.</p>}
     {status && <p className="notice" role="status">{status}</p>}
     {initialRebuild && <section className="owner-data-warning surface" aria-label="Data limitations">
       <strong>These are reconstructed numbers, not saved snapshots.</strong>
@@ -199,7 +205,7 @@ export default function OwnerDashboard() {
       </tbody></table></div>
     </section>
 
-    <section className="owner-notes surface"><div><span className="owner-section-label">HOW TO READ THIS</span><h2>Little guide, big clarity</h2><p><strong>Revenue pipeline</strong> = the whole price of qualifying security installs on the calendar. <strong>Cashflow pipeline</strong> = what customers still owe on those same jobs. Neither is today&apos;s cash. <strong>Net cash</strong> = deposits and install payments actually received minus refunds.</p><p>Weekly looks ahead three calendar months from each Monday at 12:00 AM Pacific. Daily looks through December 31 from each day&apos;s close. Hold jobs are separate. Future points stay blank unless marked forecast.</p>
+    <section className="owner-notes surface"><div><span className="owner-section-label">HOW TO READ THIS</span><h2>Little guide, big clarity</h2><p><strong>Revenue pipeline</strong> = the whole price of qualifying security installs on the calendar. <strong>Cashflow pipeline</strong> = what customers still owe on those same jobs. Neither is today&apos;s cash. <strong>Net cash</strong> = deposits and install payments actually received minus refunds.</p><p>Weekly looks ahead three calendar months from each Monday at 12:00 AM Pacific. Daily defaults to the next three calendar months from each day&apos;s close, continuing across year-end. Choose Through year-end to see only installs through December 31; that window naturally reaches zero on December 31. Cash received stays the same in both views. Hold jobs are separate. Future points stay blank unless marked forecast.</p>
       {report && <><p className="owner-source">Source: {report.source} · export created {new Date(report.generatedAt).toLocaleString()}</p><details className="owner-method"><summary>Show all source and forecast notes</summary><ol>{report.notes.map((note, index) => <li key={index}>{note}</li>)}</ol></details></>}</div>
       <div className="owner-import"><label htmlFor="owner-file">Import updated report JSON</label><input id="owner-file" type="file" accept="application/json,.json" disabled={uploading || !configured} onChange={(e) => { const file = e.target.files?.[0]; if (file) void importFile(file); e.currentTarget.value = ""; }} /><small>Owner only · replaces the displayed report with the latest saved version. Previous imports remain in the database.</small></div>
     </section>
