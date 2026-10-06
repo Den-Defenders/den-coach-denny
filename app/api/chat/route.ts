@@ -3,6 +3,10 @@ import { NextResponse } from "next/server";
 import { COACH_CHAT_SYSTEM_PROMPT } from "@/app/lib/coachChatPrompt";
 import { auth0 } from "@/lib/auth0";
 import { connectServiceTitanMcp } from "@/lib/serviceTitanMcp";
+import {
+  filterToolsForDenny,
+  isToolAllowedForDenny,
+} from "@/lib/mcpToolPolicy";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -70,7 +74,19 @@ export async function POST(req: Request) {
 
     const mcpToolList = await mcpClient.listTools();
 
-    const openAiTools = mcpToolList.tools.map((tool) => ({
+    // READ-ONLY allow-list. The MCP server may advertise write tools to
+    // privileged users; the CSR chat must never see or call them.
+    const { allowed: allowedTools, hidden: hiddenTools } =
+      filterToolsForDenny(mcpToolList.tools);
+
+    if (hiddenTools.length > 0) {
+      console.info(
+        "Denny chat hid MCP tools not on the read-only allow-list:",
+        hiddenTools.join(", ")
+      );
+    }
+
+    const openAiTools = allowedTools.map((tool) => ({
       type: "function" as const,
       function: {
         name: tool.name,
@@ -87,11 +103,15 @@ export async function POST(req: Request) {
         role: "system",
         content: `${COACH_CHAT_SYSTEM_PROMPT}
 
-You also have access to live ServiceTitan MCP tools.
+You also have access to live, READ-ONLY ServiceTitan MCP tools.
 
 Use those tools whenever the user asks about customers, jobs, appointments,
 technicians, estimates, invoices, payments, projects, or other ServiceTitan
 information.
+
+You cannot change anything in ServiceTitan from this chat. If the user asks
+you to add a note, book, move or cancel something, explain that this chat is
+read-only and they should make the change in ServiceTitan directly.
 
 Never claim you checked ServiceTitan unless you actually used a tool.`,
       },
@@ -132,6 +152,26 @@ Never claim you checked ServiceTitan unless you actually used a tool.`,
 
       for (const toolCall of toolCalls) {
         if (toolCall.type !== "function") {
+          continue;
+        }
+
+        // Second gate: refuse any tool the model names that is not on the
+        // read-only allow-list, even if it somehow appeared in the tool list.
+        if (!isToolAllowedForDenny(toolCall.function.name)) {
+          console.warn(
+            "Denny chat refused a tool call outside the read-only allow-list:",
+            toolCall.function.name
+          );
+
+          messages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({
+              error: "TOOL_NOT_ALLOWED",
+              message: `The tool "${toolCall.function.name}" is not available in this read-only chat.`,
+            }),
+          });
+
           continue;
         }
 
