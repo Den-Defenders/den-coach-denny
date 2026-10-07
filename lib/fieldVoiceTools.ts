@@ -21,6 +21,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DennyAccess } from "@/lib/access";
 import { callMcpJson, callMcpWriteJson, McpToolError, type McpClient } from "@/lib/mcpJson";
 import { claimNoteConfirmation } from "@/lib/teamStore";
+import { searchSlackForCustomer } from "@/lib/slackSearch";
 
 // ---------------------------------------------------------------------------
 // Tool definitions handed to the OpenAI realtime (voice) session
@@ -81,6 +82,27 @@ export const FIELD_VOICE_TOOL_DEFINITIONS = [
         customer_name: { type: "string", description: "Customer name." },
         phone: { type: "string", description: "Customer phone number." },
         customer_id: { type: "integer", description: "ServiceTitan customer ID, when already known (for example from a list of matches)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "get_customer_communications",
+    description:
+      "Everything said with or about a customer: phone call recordings (transcribed), text messages both ways (ServiceTitan texts and Hatch), and Slack messages from public channels that mention the customer. Use for any question like 'what did the customer say', 'did they call', 'what texts went back and forth', 'what's been said in Slack', or anything not answered by the 360. Can take 20-60 seconds when calls need transcribing.",
+    parameters: {
+      type: "object",
+      properties: {
+        customer_id: { type: "integer", description: "ServiceTitan customer ID, if known from an earlier lookup." },
+        address: { type: "string", description: "Street address, if no customer_id." },
+        customer_name: { type: "string", description: "Customer name, if no customer_id." },
+        phone: { type: "string", description: "Customer phone number, if no customer_id." },
+        include: {
+          type: "array",
+          items: { type: "string", enum: ["calls", "texts", "slack"] },
+          description: "Which sources to read. Default: all three. Ask only for what the question needs to keep it fast.",
+        },
       },
       additionalProperties: false,
     },
@@ -537,9 +559,12 @@ async function buildCustomer360(ctx: FieldVoiceContext, customerId: number, focu
   return result;
 }
 
-async function getCustomer360(ctx: FieldVoiceContext, args: Record<string, unknown>) {
+type CustomerResolution = { customerId: number } | { error: string } | { multipleMatches: unknown[]; instruction: string };
+
+/** Turn a customer_id, address, phone or name into exactly one ServiceTitan customer ID. */
+async function resolveCustomer(ctx: FieldVoiceContext, args: Record<string, unknown>, toolName: string): Promise<CustomerResolution> {
   const customerId = Number(args.customer_id);
-  if (Number.isSafeInteger(customerId) && customerId > 0) return buildCustomer360(ctx, customerId);
+  if (Number.isSafeInteger(customerId) && customerId > 0) return { customerId };
 
   const address = typeof args.address === "string" ? args.address.trim() : "";
   const name = typeof args.customer_name === "string" ? args.customer_name.trim() : "";
@@ -558,10 +583,178 @@ async function getCustomer360(ctx: FieldVoiceContext, args: Record<string, unkno
         customerName: customer.customerName,
         address: customer.matches?.find((match) => match.serviceAddress)?.serviceAddress || customer.billingAddress || null,
       })),
-      instruction: "Read the matches briefly and ask which customer they mean, then call get_customer_360 again with that customer_id.",
+      instruction: `Read the matches briefly and ask which customer they mean, then call ${toolName} again with that customer_id.`,
     };
   }
-  return buildCustomer360(ctx, customers[0].customerId);
+  return { customerId: customers[0].customerId };
+}
+
+async function getCustomer360(ctx: FieldVoiceContext, args: Record<string, unknown>) {
+  const resolved = await resolveCustomer(ctx, args, "get_customer_360");
+  if (!("customerId" in resolved)) return resolved;
+  return buildCustomer360(ctx, resolved.customerId);
+}
+
+// ---------------------------------------------------------------------------
+// Communications: calls (transcribed), texts, Slack
+// ---------------------------------------------------------------------------
+
+const MAX_COMMS_CHARACTERS = 40_000;
+
+type TimelineMessage = { when: string; at: number; source: string; direction: string; from?: string; text: string };
+
+function lastTen(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  return digits.length >= 10 ? digits.slice(-10) : "";
+}
+
+/** First array of objects found in a tool result (tool shapes differ). */
+function recordsOf(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) return result.filter((item) => item && typeof item === "object") as Record<string, unknown>[];
+  if (!result || typeof result !== "object") return [];
+  for (const key of ["messages", "rows", "data", "items", "results", "records", "conversation", "history"]) {
+    const value = (result as Record<string, unknown>)[key];
+    if (Array.isArray(value) && value.length && typeof value[0] === "object") return value as Record<string, unknown>[];
+  }
+  for (const value of Object.values(result as Record<string, unknown>)) {
+    if (Array.isArray(value) && value.length && value[0] && typeof value[0] === "object") return value as Record<string, unknown>[];
+  }
+  return [];
+}
+
+function pickField(record: Record<string, unknown>, pattern: RegExp, prefer?: RegExp): string | null {
+  const keys = Object.keys(record).filter((key) =>
+    pattern.test(key) && !/id$/i.test(key) && typeof record[key] === "string" && String(record[key]).trim()
+  );
+  const key = (prefer && keys.find((candidate) => prefer.test(candidate))) || keys[0];
+  return key ? String(record[key]) : null;
+}
+
+function toTimeline(records: Record<string, unknown>[], source: string, fallbackDirection: string, timeZone: string): TimelineMessage[] {
+  const out: TimelineMessage[] = [];
+  for (const record of records) {
+    const text = pickField(record, /body|message|text|content/i, /body/i);
+    const stamp = pickField(record, /(created ?on|created_?at|received_?at|sent ?on|sent_?at|timestamp|date|time)$/i, /received|created/i);
+    if (!text || !stamp) continue;
+    const at = Date.parse(stamp.includes("T") || stamp.includes("Z") ? stamp : `${stamp} UTC`);
+    if (!Number.isFinite(at)) continue;
+    const directionRaw = pickField(record, /direction/i);
+    out.push({
+      at,
+      when: new Intl.DateTimeFormat("en-US", { timeZone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(at)),
+      source,
+      direction: directionRaw ? directionRaw.toLowerCase() : fallbackDirection,
+      from: pickField(record, /(sent ?by|sender|actor|user|agent)/i) || undefined,
+      text: shortText(text, 500) || "",
+    });
+  }
+  return out;
+}
+
+async function getCustomerCommunications(ctx: FieldVoiceContext, args: Record<string, unknown>) {
+  const resolved = await resolveCustomer(ctx, args, "get_customer_communications");
+  if (!("customerId" in resolved)) return resolved;
+  const { customerId } = resolved;
+
+  const wanted = new Set(
+    Array.isArray(args.include) && args.include.length
+      ? (args.include as unknown[]).map(String)
+      : ["calls", "texts", "slack"]
+  );
+
+  const [search, contacts, jobsResult] = await Promise.all([
+    settle(callMcpJson<CustomerSearch>(ctx.client, "search_customers", { query: String(customerId), searchType: "customerId" }), "customer"),
+    settle(callMcpJson<Contacts>(ctx.client, "get_customer_contacts", { customerId }), "contacts"),
+    settle(callMcpJson<{ jobs?: CustomerJob[] }>(ctx.client, "get_customer_jobs", { customerId, pageSize: 10 }), "jobs"),
+  ]);
+  const customer = "customers" in search ? search.customers?.[0] : undefined;
+  const customerName = customer?.customerName || null;
+  const address = customer?.matches?.find((match) => match.serviceAddress)?.serviceAddress || customer?.billingAddress || null;
+
+  const phones = "unavailable" in contacts ? [] : [...new Set(
+    [...(contacts.mobilePhones || []), ...(contacts.phones || [])].map((phone) => lastTen(phone.number)).filter(Boolean)
+  )].slice(0, 2);
+  const jobs = ("jobs" in jobsResult ? jobsResult.jobs || [] : [])
+    .slice()
+    .sort((a, b) => Date.parse(b.createdOn || "") - Date.parse(a.createdOn || ""));
+  const earliest = jobs.length ? jobs[jobs.length - 1].createdOn?.slice(0, 10) : undefined;
+
+  const tasks: Record<string, Promise<unknown>> = {};
+
+  if (wanted.has("calls")) {
+    tasks.calls = phones.length
+      ? settle(withTimeout(callMcpJson(ctx.client, "get_servicetitan_customer_call_360", {
+          phone: phones[0],
+          customerId,
+          ...(customerName ? { customerName } : {}),
+          maxCalls: 10,
+          maxNewTranscriptions: 3, // newest untranscribed recordings; transcripts are cached for next time
+          maxTranscriptCharactersPerCall: 4000,
+        }, 170_000), 170_000, "calls"), "calls")
+      : Promise.resolve({ unavailable: "no phone number on file" });
+  }
+
+  if (wanted.has("texts")) {
+    tasks.texts = (async () => {
+      if (!phones.length) return { unavailable: "no phone number on file" };
+      const perPhone = await Promise.all(phones.map(async (phone) => {
+        const [sent, inbound, hatchSearch] = await Promise.all([
+          settle(callMcpJson(ctx.client, "get_servicetitan_sms_sent_history", { phone, maxResults: 40, ...(earliest ? { startDate: earliest } : {}) }), "ServiceTitan texts sent"),
+          settle(callMcpJson(ctx.client, "get_servicetitan_inbound_sms_history", { phone, maxResults: 40 }), "ServiceTitan texts received"),
+          settle(callMcpJson<{ contacts?: Record<string, unknown>[] }>(ctx.client, "hatch_stored_search_contacts", { phone, maxResults: 20 }), "Hatch contacts"),
+        ]);
+        const hatchIds = ("contacts" in hatchSearch ? hatchSearch.contacts || [] : [])
+          .map((contact) => contact.hatchContactId ?? contact.contactId ?? contact.id)
+          .filter((id) => id !== undefined && id !== null)
+          .slice(0, 2);
+        const hatch = await Promise.all(hatchIds.map((hatchContactId) =>
+          settle(callMcpJson(ctx.client, "hatch_stored_conversation_history", { hatchContactId, maxMessages: 80 }), "Hatch messages")
+        ));
+        return [
+          ...toTimeline(recordsOf(sent), "ServiceTitan text", "outbound", ctx.timeZone),
+          ...toTimeline(recordsOf(inbound), "ServiceTitan text", "inbound", ctx.timeZone),
+          ...hatch.flatMap((conversation) => toTimeline(recordsOf(conversation), "Hatch", "unknown", ctx.timeZone)),
+        ];
+      }));
+      const all = perPhone.flat().sort((a, b) => b.at - a.at);
+      const unique = all.filter((message, index) =>
+        all.findIndex((other) => other.text === message.text && Math.abs(other.at - message.at) < 60_000) === index
+      );
+      return {
+        newestFirst: unique.slice(0, 60).map(({ at: _at, ...rest }) => { void _at; return rest; }),
+        totalFound: unique.length,
+        note: "Inbound ServiceTitan texts are only archived from Sept 12, 2026 on. Earlier customer replies may exist in ServiceTitan but are not available here.",
+      };
+    })();
+  }
+
+  if (wanted.has("slack")) {
+    const terms: string[] = [];
+    if (address) {
+      const street = address.split(",")[0].trim().split(/\s+/).slice(0, 2).join(" "); // "7953 Kyle"
+      if (/^\d+\s+\S+/.test(street)) terms.push(street);
+    }
+    if (customerName) terms.push(customerName.replace(/\s*&\s*/g, " and "));
+    if (phones[0]) terms.push(`${phones[0].slice(0, 3)}-${phones[0].slice(3, 6)}-${phones[0].slice(6)}`, phones[0]);
+    if (jobs[0]?.jobNumber) terms.push(jobs[0].jobNumber);
+    tasks.slack = settle(searchSlackForCustomer(terms, ctx.timeZone, 15), "Slack");
+  }
+
+  const names = Object.keys(tasks);
+  const values = await Promise.all(names.map((name) => tasks[name]));
+  const result: Record<string, unknown> = { customerId, customerName, address };
+  names.forEach((name, index) => { result[name] = name === "calls" ? compact(values[index], 0, 4000, 10) : values[index]; });
+
+  // Keep the voice payload bounded: trim transcripts first, then texts.
+  if (JSON.stringify(result).length > MAX_COMMS_CHARACTERS && result.calls) {
+    result.calls = compact(values[names.indexOf("calls")], 0, 1500, 8);
+  }
+  if (JSON.stringify(result).length > MAX_COMMS_CHARACTERS && result.texts && typeof result.texts === "object") {
+    const texts = result.texts as { newestFirst?: unknown[] };
+    if (Array.isArray(texts.newestFirst)) texts.newestFirst = texts.newestFirst.slice(0, 25);
+  }
+  result.howToAnswer = "Answer the exact question from these sources and say where it came from (call on <date>, text on <date>, Slack #channel). Transcripts are speech-to-text and can be wrong on names and numbers.";
+  return result;
 }
 
 async function getNextCustomer(ctx: FieldVoiceContext, args: Record<string, unknown>) {
@@ -867,6 +1060,8 @@ export async function runFieldVoiceTool(
       return getNextCustomer(ctx, args);
     case "get_customer_360":
       return getCustomer360(ctx, args);
+    case "get_customer_communications":
+      return getCustomerCommunications(ctx, args);
     case "find_sales_appointment_options":
       return findSalesOptions(ctx, args);
     case "add_job_note":
