@@ -49,6 +49,10 @@ a { color: inherit; }
 .nav-listen { background: linear-gradient(135deg, #f7aa27, #ffc14d); color: var(--navy); }
 .nav-schedule { background: linear-gradient(135deg, #ef3037, #ff4a42); }
 .nav-owner { background: linear-gradient(135deg, #0d6980, #238da0); }
+.nav-talk { background: linear-gradient(135deg, #0b7f79, #159d96); }
+.nav-team { background: linear-gradient(135deg, #3b4a5a, #56697c); }
+.sign-out-link { margin-left: 6px; padding-left: 10px; border-left: 1px solid var(--line); color: var(--muted); font-weight: 650; font-size: 14px; text-decoration: none; }
+.sign-out-link:hover { color: var(--coral); }
 .nav-icon { width: 36px; height: 36px; display: grid; place-items: center; flex: 0 0 auto; }
 .nav-icon svg { width: 32px; height: 32px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .nav-home .nav-icon svg { fill: currentColor; stroke-width: 0; }
@@ -312,4 +316,46 @@ a { color: inherit; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+}
+
+/* Team page (owner only) */
+.team-page { display: grid; gap: 14px; }
+.team-form, .team-list { padding: clamp(18px, 3vw, 30px); }
+.team-form h2, .team-list h2 { margin: 0 0 16px; font-family: var(--display); text-transform: uppercase; font-size: 28px; }
+.team-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.team-grid label { display: grid; gap: 6px; font-weight: 700; }
+.team-grid label > span { font-size: 14px; color: var(--muted); }
+.team-grid input, .team-grid select { min-height: 46px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; font: inherit; background: #fff; color: var(--ink); }
+.team-grid input:focus, .team-grid select:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 4px rgba(53,189,181,.14); }
+.team-grid .team-check { display: flex; align-items: center; gap: 10px; align-self: end; min-height: 46px; }
+.team-check input { width: 20px; height: 20px; min-height: 0; }
+.team-hint { color: var(--muted); line-height: 1.45; }
+.team-table { width: 100%; border-collapse: collapse; font-size: 15px; }
+.team-table th, .team-table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.team-table th { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .4px; }
+.team-inactive td { color: var(--muted); }
+.team-actions { white-space: nowrap; }
+.team-link { border: 0; background: none; color: var(--teal-dark); font-weight: 750; cursor: pointer; padding: 4px 6px; }
+.team-link:hover { color: var(--coral); }
+
+/* Talk with Coach Denny (field voice) */
+.talk-page { display: grid; gap: 14px; }
+.talk-hero { display: grid; grid-template-columns: 1fr 260px; gap: 20px; align-items: center; padding: clamp(24px, 4vw, 46px); color: #fff; border-radius: 22px; background: radial-gradient(circle at 70% 30%, rgba(53,189,181,.35), transparent 30%), linear-gradient(120deg, var(--navy-deep), #075c70); box-shadow: var(--shadow); }
+.talk-hero h1 { font-size: clamp(38px, 5vw, 64px); }
+.talk-hero h1 span { color: var(--teal); }
+.talk-hero p { font-size: 18px; line-height: 1.45; opacity: .92; }
+.talk-hero img { width: 100%; height: auto; }
+.talk-panel { padding: clamp(18px, 3vw, 30px); display: grid; gap: 14px; }
+.talk-examples { display: flex; flex-wrap: wrap; gap: 8px; }
+.talk-examples span { padding: 8px 12px; border-radius: 999px; background: #eefaf9; border: 1px solid #cce9e6; font-weight: 650; font-size: 14px; }
+.talk-status { font-weight: 700; }
+.talk-log { display: grid; gap: 8px; max-height: 420px; overflow-y: auto; padding: 4px; }
+.talk-line { padding: 10px 14px; border-radius: 12px; line-height: 1.4; }
+.talk-line-you { background: #f2f5f7; justify-self: end; max-width: 85%; }
+.talk-line-denny { background: #eefaf9; border: 1px solid #cce9e6; max-width: 85%; }
+.talk-line-lookup { color: var(--muted); font-size: 14px; font-style: italic; }
+.talk-error { color: #8a0000; white-space: pre-wrap; }
+@media (max-width: 760px) {
+  .talk-hero { grid-template-columns: 1fr; }
+  .talk-hero img { display: none; }
 }

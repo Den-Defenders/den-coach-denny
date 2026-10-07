@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { auth0 } from "./lib/auth0";
+import { isPathAllowed, landingPathFor, resolveAccess } from "./lib/access";
 
 export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
@@ -21,7 +22,24 @@ export async function proxy(request: NextRequest) {
   const session = await auth0.getSession(request);
 
   if (session) {
-    return authResponse;
+    // Role check: sales reps and installers only reach the Scheduler and
+    // Talk with Denny; the Team page and Owner Dashboard are owner-only.
+    const access = await resolveAccess(session);
+
+    if (access && isPathAllowed(access.role, pathname)) {
+      return authResponse;
+    }
+
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json(
+        { error: "Your Den Coach Denny role does not include this feature." },
+        { status: 403 }
+      );
+    }
+
+    return NextResponse.redirect(
+      new URL(landingPathFor(access?.role ?? "disabled"), request.url)
+    );
   }
 
   // API requests receive an authorization error instead of a login webpage.

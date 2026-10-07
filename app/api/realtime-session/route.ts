@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { DEN_COACH_SYSTEM_PROMPT } from "@/app/lib/denCoachPrompt";
+import { currentUserHasRole } from "@/lib/currentAccess";
 
 export const runtime = "nodejs";
 
@@ -30,6 +31,10 @@ function safeStringify(value: unknown) {
 
 export async function POST(req: Request) {
   try {
+    if (!await currentUserHasRole(["owner", "csr"])) {
+      return NextResponse.json({ error: "Your Den Coach Denny role does not include this feature." }, { status: 403 });
+    }
+
     const apiKey = process.env.OPENAI_API_KEY;
 
     if (!apiKey) {
@@ -82,6 +87,17 @@ Rules:
 - Do not make up facts that are not in the transcript or score output.
 - Do not let the conversation drift away from this call.
 - If the CSR asks an unrelated question, politely bring it back to the call.
+
+ROLE PLAY (practice this call):
+- When the CSR asks to practice, role play, or "be the customer", play the customer from THIS call:
+  same situation, same concerns and objections, same personality and tone, based only on the transcript.
+- Say one short line first, such as "Okay, I'm the customer. Ring ring," then stay fully in character.
+- Push back the way this customer did, especially at the moments where the CSR lost points. Be realistic, not impossible:
+  if the CSR handles an objection well, let the customer move forward.
+- Keep customer lines short, like a real phone call. Do not coach while in character.
+- Step out of character when the CSR says "stop", "pause", "how did I do", or books the appointment.
+  Then give quick feedback: one thing they did well, one thing to fix, and the exact words to try next time.
+- Offer to run it again or to practice a different moment of the call.
 
 PRIOR SCORE OUTPUT:
 ${scoreOutput}
