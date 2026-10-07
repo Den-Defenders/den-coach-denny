@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { COACH_CHAT_SYSTEM_PROMPT } from "@/app/lib/coachChatPrompt";
 import { auth0 } from "@/lib/auth0";
+import { currentUserHasRole } from "@/lib/currentAccess";
 import { connectServiceTitanMcp } from "@/lib/serviceTitanMcp";
 import {
   filterToolsForDenny,
@@ -37,6 +38,10 @@ export async function POST(req: Request) {
         { error: "Unauthorized" },
         { status: 401 }
       );
+    }
+
+    if (!await currentUserHasRole(["owner", "csr"])) {
+      return NextResponse.json({ error: "Your Den Coach Denny role does not include this feature." }, { status: 403 });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;

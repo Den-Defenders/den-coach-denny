@@ -251,8 +251,9 @@ export default function TalkToCoachDenny({
       </h3>
 
       <p style={{ marginTop: 0, opacity: 0.85 }}>
-        Ask Coach Denny questions out loud about this scored call. He will use
-        the transcript and feedback as context.
+        Ask Coach Denny questions out loud about this scored call, or say
+        &ldquo;let&rsquo;s role play&rdquo; and he will play this customer so you can
+        practice. Say &ldquo;how did I do?&rdquo; to get feedback.
       </p>
 
       <div className="voice-actions">

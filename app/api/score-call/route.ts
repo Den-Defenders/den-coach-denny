@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { toFile } from "openai/uploads";
 import { DEN_COACH_SYSTEM_PROMPT } from "@/app/lib/denCoachPrompt";
+import { currentUserHasRole } from "@/lib/currentAccess";
 
 export const runtime = "nodejs";
 
@@ -11,6 +12,10 @@ const openai = new OpenAI({
 
 export async function POST(req: Request) {
   try {
+    if (!await currentUserHasRole(["owner", "csr"])) {
+      return NextResponse.json({ error: "Your Den Coach Denny role does not include this feature." }, { status: 403 });
+    }
+
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
