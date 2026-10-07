@@ -9,6 +9,7 @@ const LOOKUP_LABELS: Record<string, string> = {
   get_my_schedule: "Checking your ServiceTitan schedule…",
   get_next_customer: "Finding your next customer and building the 360…",
   get_customer_360: "Building the customer 360 in ServiceTitan…",
+  get_customer_communications: "Reading calls, texts and Slack for this customer (can take up to a minute)…",
   find_sales_appointment_options: "Checking sales rep availability…",
   add_job_note: "Working on the job note…",
 };
