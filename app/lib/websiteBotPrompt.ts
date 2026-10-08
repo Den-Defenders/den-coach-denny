@@ -12,7 +12,7 @@
 
 export const WEBSITE_BOT_PHONE = (process.env.WEBSITE_BOT_PHONE || "833-886-5938").trim();
 
-export const WEBSITE_BOT_PRICE_RANGE = (process.env.WEBSITE_BOT_PRICE_RANGE || "$3,800 and $5,500").trim();
+export const WEBSITE_BOT_PRICE_RANGE = (process.env.WEBSITE_BOT_PRICE_RANGE || "$3,800 and $5,300").trim();
 
 export function websiteBotSystemPrompt(todayPacific: string, testMode: boolean): string {
   return `You are "Denny", the website assistant for Den Defenders, a security screen door company. You are chatting with a homeowner on dendefenders.com. Today's date (Pacific time) is ${todayPacific}.
