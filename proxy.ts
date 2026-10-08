@@ -12,6 +12,13 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Public website chat bubble (dendefenders.com). No login: the widget file
+  // is plain JavaScript, and /api/website-bot does its own origin check, kill
+  // switch and rate limits (lib/websiteBotGuard.ts). Nothing else is opened.
+  if (pathname === "/chat-widget.js" || pathname === "/api/website-bot") {
+    return NextResponse.next();
+  }
+
   // Let Auth0 handle login, callback, and logout routes.
   const authResponse = await auth0.middleware(request);
 
