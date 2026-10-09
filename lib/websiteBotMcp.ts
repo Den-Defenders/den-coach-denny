@@ -24,6 +24,7 @@ export const WEBSITE_BOT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 
 export const WEBSITE_BOT_WRITE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "book_sales_appointment",
+  "add_job_note", // only to save the chat transcript on the job it just booked
 ]);
 
 const MCP_AUDIENCE = "https://servicetitan-mcp-alpha.vercel.app/mcp";
@@ -319,6 +320,7 @@ export type BookingQualifying = {
 export type BookingResult = {
   ok: boolean;
   code?: string;
+  jobId?: number;
   jobNumber?: string;
   raw?: unknown;
 };
@@ -360,17 +362,33 @@ export async function bookSalesAppointmentFromWebsite(input: {
   try {
     const raw = await callWebsiteBotTool("book_sales_appointment", args, 120_000);
     const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const jobId = typeof record.jobId === "number" ? record.jobId : undefined;
     const jobNumber =
       (typeof record.jobNumber === "string" && record.jobNumber) ||
-      (typeof record.jobId === "number" && String(record.jobId)) ||
-      (record.job && typeof record.job === "object" && typeof (record.job as { jobNumber?: string }).jobNumber === "string"
-        ? (record.job as { jobNumber: string }).jobNumber
-        : undefined);
-    return { ok: true, jobNumber, raw };
+      (jobId ? String(jobId) : undefined);
+    return { ok: true, jobId, jobNumber, raw };
   } catch (error) {
     if (error instanceof WebsiteBotMcpError) {
       return { ok: false, code: error.code };
     }
     throw error;
+  }
+}
+
+/**
+ * Saves the chat transcript as a note on the job the bot just booked.
+ * Best-effort: a failure here never undoes or hides a successful booking.
+ */
+export async function addWebsiteChatNote(jobId: number, text: string): Promise<boolean> {
+  try {
+    await callWebsiteBotTool(
+      "add_job_note",
+      { jobId, text: text.slice(0, 4000), pinToTop: false, dryRun: false, confirm: true },
+      60_000
+    );
+    return true;
+  } catch (error) {
+    console.error("Website bot chat note failed:", error instanceof Error ? error.message : error);
+    return false;
   }
 }
