@@ -1,20 +1,24 @@
 /**
  * app/api/website-bot/route.ts
  *
- * Public chat endpoint behind the dendefenders.com chat bubble (Phase 1).
+ * Public chat endpoint behind the dendefenders.com chat bubble.
  *
  *   - No login. proxy.ts lets this path through; everything else on Denny
  *     still requires Auth0.
  *   - Only accepts requests from the websites in WEBSITE_BOT_ALLOWED_ORIGINS.
  *   - Off unless WEBSITE_BOT_ENABLED=true (the kill switch).
- *   - One tool: find_open_times -> recommend_sales_schedule, reduced to
+ *   - Phase 1 tool: find_open_times -> recommend_sales_schedule, reduced to
  *     dates and arrival windows before the model sees it.
- *   - No booking, no customer lookups, no ServiceTitan writes.
+ *   - Phase 2 tool: prepare_booking -> live slot re-check + MCP dry run ->
+ *     preview + signed ticket. Booking only happens on the separate
+ *     {action:"confirm"} request the widget sends when the visitor clicks
+ *     Confirm, and only when WEBSITE_BOT_BOOKING_ENABLED=true.
  */
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { websiteBotSystemPrompt } from "@/app/lib/websiteBotPrompt";
 import {
+  allowBooking,
   allowLookup,
   allowMessage,
   clientIp,
@@ -22,13 +26,26 @@ import {
   originAllowed,
   websiteBotEnabled,
 } from "@/lib/websiteBotGuard";
-import { findOpenSalesTimes, WebsiteBotConfigError } from "@/lib/websiteBotMcp";
+import {
+  bookSalesAppointmentFromWebsite,
+  findOpenSalesTimes,
+  resolveSlotForBooking,
+  WebsiteBotConfigError,
+} from "@/lib/websiteBotMcp";
+import {
+  bookingEnabled,
+  postBookingToSlack,
+  previewFor,
+  signBookingTicket,
+  validateBookingInput,
+  verifyBookingTicket,
+} from "@/lib/websiteBotBooking";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+export const maxDuration = 180;
 
-const MAX_MESSAGES = 20;
+const MAX_MESSAGES = 24;
 const MAX_MESSAGE_CHARS = 1000;
 const MODEL = process.env.WEBSITE_BOT_MODEL || "gpt-4o-mini";
 
@@ -75,14 +92,8 @@ const FIND_OPEN_TIMES_TOOL = {
       type: "object",
       properties: {
         zip: { type: "string", description: "Visitor's 5-digit ZIP code.", pattern: "^\\d{5}$" },
-        earliestStartTime: {
-          type: "string",
-          description: "Optional earliest acceptable start, 24-hour HH:mm (e.g. 13:00 for 'afternoons').",
-        },
-        latestStartTime: {
-          type: "string",
-          description: "Optional latest acceptable start, 24-hour HH:mm (e.g. 11:00 for 'mornings').",
-        },
+        earliestStartTime: { type: "string", description: "Optional earliest acceptable start, 24-hour HH:mm (e.g. 13:00 for 'afternoons')." },
+        latestStartTime: { type: "string", description: "Optional latest acceptable start, 24-hour HH:mm (e.g. 11:00 for 'mornings')." },
         requestedWeekdays: {
           type: "array",
           items: { type: "string", enum: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] },
@@ -99,6 +110,97 @@ const FIND_OPEN_TIMES_TOOL = {
   },
 };
 
+const PREPARE_BOOKING_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "prepare_booking",
+    description:
+      "Prepare the visitor's consultation booking for their confirmation. Call ONLY after the visitor has chosen one of the times from find_open_times AND you have collected every required detail. The server re-checks the time, builds a preview, and shows the visitor a Confirm button. Nothing is booked until they click it. If the result says MISSING, ask for the listed items one at a time and call again.",
+    parameters: {
+      type: "object",
+      properties: {
+        date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "Chosen date from find_open_times (YYYY-MM-DD)." },
+        arrivalWindow: { type: "string", description: "Chosen arrival window exactly as find_open_times returned it, e.g. '12 PM - 4 PM'." },
+        fullName: { type: "string", description: "Visitor's first and last name." },
+        phone: { type: "string", description: "Mobile phone number, 10 digits." },
+        email: { type: "string", description: "Email address." },
+        street: { type: "string", description: "Street address of the home, including house number." },
+        unit: { type: "string", description: "Apartment or unit, if any." },
+        city: { type: "string" },
+        state: { type: "string", description: "Two-letter state, e.g. CA." },
+        zip: { type: "string", pattern: "^\\d{5}$" },
+        reason: { type: "string", description: "Q1: what had them looking into our products - a specific concern or just upgrading." },
+        priority: { type: "string", description: "Q2: most important - security, appearance, or long-term value." },
+        otherOptions: { type: "string", description: "Q3: looked at other options, or just starting." },
+        timeline: { type: "string", description: "Q4: fairly soon, or gathering options." },
+        entryPoints: { type: "string", description: "Q5: entry points - front, side, back, slider, window." },
+        decisionMakers: { type: "string", description: "Q6: sole decision-maker, or reviewing with someone else (and that they will attend)." },
+        heardAboutUs: { type: "string", description: "How they heard about Den Defenders." },
+        priceRange: { type: "string", description: "The price range you quoted them, e.g. '$3,800-$5,300 per door'." },
+        parking: { type: "string", description: "Gate code, parking or other access instructions. 'None' is fine." },
+        notes: { type: "string", description: "Anything else useful for the design specialist (what they want to secure, colors mentioned, pets)." },
+      },
+      required: ["date", "arrivalWindow", "fullName", "phone", "email", "street", "city", "state", "zip", "decisionMakers"],
+    },
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Confirm: the visitor clicked the button in the preview card
+// ---------------------------------------------------------------------------
+
+async function handleConfirm(body: Record<string, unknown>, origin: string | null, ip: string, testMode: boolean) {
+  if (!bookingEnabled()) {
+    return json({ error: "Online booking isn't turned on yet. Please give us a call to lock in your time." }, 503, origin);
+  }
+  const ticket = verifyBookingTicket(typeof body.token === "string" ? body.token : "");
+  if (!ticket) {
+    return json({ error: "That booking preview has expired. Ask Denny to prepare it again." }, 400, origin);
+  }
+  if (!allowBooking(ticket.sessionId, ip)) {
+    return json({ error: "A booking was already made from this chat. Please call us to make changes." }, 429, origin);
+  }
+
+  const result = await bookSalesAppointmentFromWebsite({
+    slot: ticket.slot,
+    customer: ticket.customer,
+    qualifying: ticket.qualifying,
+    customerNotes: ticket.customerNotes,
+    dryRun: false,
+  });
+
+  if (!result.ok) {
+    console.warn("Website bot booking refused:", result.code);
+    // Never reveal why (e.g. that the customer already exists in ServiceTitan).
+    return json(
+      {
+        booked: false,
+        reply:
+          "I wasn't able to finish the booking online, but your details are safe with us. Please call 800-992-9938 and mention the date and window you chose - the team can usually confirm it right away.",
+      },
+      200,
+      origin
+    );
+  }
+
+  const preview = previewFor(ticket);
+  console.info(`Website bot booked job ${result.jobNumber || "?"} for ${preview.name} on ${preview.date} ${preview.arrivalWindow}`);
+  await postBookingToSlack(ticket, result.jobNumber, testMode);
+
+  return json(
+    {
+      booked: true,
+      reply: `You're all set, ${ticket.customer.name.split(" ")[0]}! Your custom design and security consultation is booked for ${preview.weekday}, ${preview.date}, arrival between ${preview.arrivalWindow}, at ${preview.address}. We'll send a confirmation to ${preview.email}. Please make sure everyone involved in the decision can be there. See you soon!`,
+    },
+    200,
+    origin
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------------------
+
 export async function POST(req: Request) {
   const origin = req.headers.get("origin");
 
@@ -109,113 +211,135 @@ export async function POST(req: Request) {
     return json({ error: "The chat assistant is offline right now. Please give us a call." }, 503, origin);
   }
 
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const sessionId = typeof body.sessionId === "string" && /^[a-z0-9]{8,64}$/i.test(body.sessionId) ? body.sessionId : "anon";
+  const testMode = body.mode === "test";
+  const ip = clientIp(req.headers);
+
+  if (body.action === "confirm") {
+    try {
+      return await handleConfirm(body, origin, ip, testMode);
+    } catch (error) {
+      console.error("Website bot confirm crashed:", error instanceof Error ? error.message : error);
+      return json({ error: "Sorry, something went wrong while booking. Please give us a call." }, 500, origin);
+    }
+  }
+
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     console.error("Website bot: OPENAI_API_KEY missing");
     return json({ error: "The chat assistant is not set up yet." }, 500, origin);
   }
 
-  const body = await req.json().catch(() => ({}));
-  const sessionId = typeof body?.sessionId === "string" && /^[a-z0-9]{8,64}$/i.test(body.sessionId)
-    ? body.sessionId
-    : "anon";
-  const testMode = body?.mode === "test";
-  const messages = cleanMessages(body?.messages);
-
+  const messages = cleanMessages(body.messages);
   if (!messages.length || messages[messages.length - 1].role !== "user") {
     return json({ error: "Missing message." }, 400, origin);
   }
-
-  const ip = clientIp(req.headers);
   if (!allowMessage(sessionId, ip)) {
-    return json(
-      { error: "You've sent a lot of messages. Please give us a call and we'll be glad to help." },
-      429,
-      origin
-    );
+    return json({ error: "You've sent a lot of messages. Please give us a call and we'll be glad to help." }, 429, origin);
   }
 
   const openai = new OpenAI({ apiKey });
+  const canBook = bookingEnabled();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const thread: any[] = [
-    { role: "system", content: websiteBotSystemPrompt(todayPacific(), testMode) },
+    { role: "system", content: websiteBotSystemPrompt(todayPacific(), testMode, canBook) },
     ...messages,
   ];
+  const tools = canBook ? [FIND_OPEN_TIMES_TOOL, PREPARE_BOOKING_TOOL] : [FIND_OPEN_TIMES_TOOL];
+
+  // Set when prepare_booking succeeds; returned to the widget with the reply.
+  let bookingCard: { token: string; preview: ReturnType<typeof previewFor> } | null = null;
 
   try {
-    for (let round = 0; round < 4; round++) {
+    for (let round = 0; round < 5; round++) {
       const completion = await openai.chat.completions.create({
         model: MODEL,
         temperature: 0.3,
-        max_tokens: 400,
+        max_tokens: 450,
         messages: thread,
-        tools: [FIND_OPEN_TIMES_TOOL],
+        tools,
         tool_choice: "auto",
       });
 
       const message = completion.choices?.[0]?.message;
-      if (!message) {
-        return json({ error: "No reply. Please try again." }, 502, origin);
-      }
+      if (!message) return json({ error: "No reply. Please try again." }, 502, origin);
       thread.push(message);
 
       const toolCalls = message.tool_calls || [];
       if (!toolCalls.length) {
-        const reply = message.content?.trim();
-        return json({ reply: reply || "Sorry, could you say that again?" }, 200, origin);
+        const reply = message.content?.trim() || "Sorry, could you say that again?";
+        return json(bookingCard ? { reply, booking: bookingCard } : { reply }, 200, origin);
       }
 
       for (const call of toolCalls) {
         if (call.type !== "function") continue;
-
-        if (call.function.name !== "find_open_times") {
-          thread.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "TOOL_NOT_AVAILABLE" }) });
-          continue;
-        }
-
         let args: Record<string, unknown> = {};
         try { args = JSON.parse(call.function.arguments || "{}"); } catch { args = {}; }
 
-        const zip = typeof args.zip === "string" ? args.zip.trim() : "";
-        if (!/^\d{5}$/.test(zip)) {
-          thread.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "NEED_ZIP", message: "Ask the visitor for a 5-digit ZIP code first." }) });
+        const reply = (content: unknown) =>
+          thread.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(content) });
+
+        if (call.function.name === "find_open_times") {
+          const zip = typeof args.zip === "string" ? args.zip.trim() : "";
+          if (!/^\d{5}$/.test(zip)) { reply({ error: "NEED_ZIP", message: "Ask the visitor for a 5-digit ZIP code first." }); continue; }
+          if (!allowLookup(sessionId)) { reply({ error: "LOOKUP_LIMIT", message: "Availability lookups are limited per chat. Offer the phone number." }); continue; }
+
+          const startedAt = Date.now();
+          try {
+            const availability = await findOpenSalesTimes({
+              location: zip,
+              earliestStartTime: timeArg(args.earliestStartTime),
+              latestStartTime: timeArg(args.latestStartTime),
+              requestedWeekdays: stringArray(args.requestedWeekdays),
+              requestedDates: stringArray(args.requestedDates),
+              maxOptions: 3,
+            });
+            console.info(`Website bot availability for ${zip} (${availability.status}, ${availability.options.length}) in ${Date.now() - startedAt} ms`);
+            reply(availability);
+          } catch (error) {
+            console.error("Website bot availability failed:", error instanceof Error ? error.message : error);
+            reply({ error: error instanceof WebsiteBotConfigError ? "NOT_CONFIGURED" : "LOOKUP_FAILED", message: "Availability could not be checked right now. Apologize briefly and offer the phone number." });
+          }
           continue;
         }
 
-        if (!allowLookup(sessionId)) {
-          thread.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "LOOKUP_LIMIT", message: "Availability lookups are limited per chat. Offer the phone number." }) });
+        if (call.function.name === "prepare_booking" && canBook) {
+          const checked = validateBookingInput(args);
+          if (!checked.ok) { reply({ error: "MISSING", missing: checked.missing, message: "Ask for these one at a time, then call prepare_booking again." }); continue; }
+          if (!allowLookup(sessionId)) { reply({ error: "LOOKUP_LIMIT", message: "Too many scheduling checks in this chat. Offer the phone number." }); continue; }
+
+          const input = checked.value;
+          const fullAddress = `${input.customer.street}${input.customer.unit ? ` #${input.customer.unit}` : ""}, ${input.customer.city}, ${input.customer.state} ${input.customer.zip}`;
+          try {
+            const slot = await resolveSlotForBooking(fullAddress, input.date, input.arrivalWindow);
+            if (!slot) {
+              reply({ error: "SLOT_GONE", message: "That time is no longer open for this address. Apologize and run find_open_times again with the ZIP to offer fresh times." });
+              continue;
+            }
+            const dry = await bookSalesAppointmentFromWebsite({ slot, customer: input.customer, qualifying: input.qualifying, customerNotes: input.customerNotes, dryRun: true });
+            if (!dry.ok) {
+              console.warn("Website bot dry run refused:", dry.code);
+              reply({ error: "CANNOT_BOOK_ONLINE", message: "The booking can't be completed online for this visitor. Do not say why. Say the team will need to finish it by phone and give the phone number." });
+              continue;
+            }
+            const preview = previewFor(input);
+            const token = signBookingTicket({ ...input, slot, sessionId });
+            bookingCard = { token, preview };
+            reply({ status: "PREVIEW_READY", preview, message: "A preview with a Confirm button is now showing to the visitor. Briefly tell them to check the details and press Confirm to book. Do not say it is booked yet." });
+          } catch (error) {
+            console.error("Website bot prepare_booking failed:", error instanceof Error ? error.message : error);
+            reply({ error: "PREPARE_FAILED", message: "Could not prepare the booking right now. Apologize briefly and offer the phone number." });
+          }
           continue;
         }
 
-        const startedAt = Date.now();
-        try {
-          const availability = await findOpenSalesTimes({
-            location: zip,
-            earliestStartTime: timeArg(args.earliestStartTime),
-            latestStartTime: timeArg(args.latestStartTime),
-            requestedWeekdays: stringArray(args.requestedWeekdays),
-            requestedDates: stringArray(args.requestedDates),
-            maxOptions: 3,
-          });
-          console.info(`Website bot availability for ${zip} (${availability.status}, ${availability.options.length}) in ${Date.now() - startedAt} ms`);
-          thread.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(availability) });
-        } catch (error) {
-          const configProblem = error instanceof WebsiteBotConfigError;
-          console.error("Website bot availability failed:", error instanceof Error ? error.message : error);
-          thread.push({
-            role: "tool",
-            tool_call_id: call.id,
-            content: JSON.stringify({
-              error: configProblem ? "NOT_CONFIGURED" : "LOOKUP_FAILED",
-              message: "Availability could not be checked right now. Apologize briefly and offer the phone number.",
-            }),
-          });
-        }
+        reply({ error: "TOOL_NOT_AVAILABLE" });
       }
     }
 
-    return json({ reply: "Let me get a team member to help with that. Please give us a call and we'll sort it out." }, 200, origin);
+    return json({ reply: "Let me get a team member to help with that. Please give us a call at 800-992-9938 and we'll sort it out." }, 200, origin);
   } catch (error) {
     console.error("Website bot crashed:", error instanceof Error ? error.message : error);
     return json({ error: "Sorry, something went wrong on our side. Please try again in a moment." }, 500, origin);

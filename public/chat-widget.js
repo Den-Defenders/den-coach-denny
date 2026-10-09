@@ -73,6 +73,15 @@
     "#ddc-send{background:#1f3a5f;color:#fff;border:none;border-radius:10px;padding:0 16px;font:inherit;font-weight:600;cursor:pointer}",
     "#ddc-send:disabled{opacity:.5;cursor:default}",
     "#ddc-foot{font-size:11px;color:#6b7280;text-align:center;padding:4px 8px 8px;background:#fff}",
+    ".ddc-card{align-self:stretch;background:#fff;border:2px solid #1f3a5f;border-radius:14px;padding:12px 14px}",
+    ".ddc-card h4{margin:0 0 8px;font-size:15px;color:#1f3a5f}",
+    ".ddc-card dl{margin:0 0 10px;display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:14px}",
+    ".ddc-card dt{color:#6b7280}.ddc-card dd{margin:0}",
+    ".ddc-card .ddc-actions{display:flex;gap:8px}",
+    ".ddc-confirm{flex:1;background:#1f8a4c;color:#fff;border:none;border-radius:10px;padding:10px;font:inherit;font-weight:600;cursor:pointer}",
+    ".ddc-confirm:disabled{opacity:.6;cursor:default}",
+    ".ddc-change{background:#fff;color:#1f3a5f;border:1px solid #cfd6df;border-radius:10px;padding:10px 12px;font:inherit;cursor:pointer}",
+    ".ddc-card .ddc-note{font-size:12px;color:#6b7280;margin-top:8px}",
     "@media (max-width:480px){#ddc-panel{right:8px;left:8px;width:auto;bottom:84px}}"
   ].join("");
 
@@ -95,7 +104,7 @@
   panel.innerHTML =
     '<div id="ddc-head"><div><b>Den Defenders</b><small>Ask about security doors &amp; open appointment times</small></div>' +
     '<button id="ddc-close" type="button" aria-label="Close chat">&times;</button></div>' +
-    (isTest ? '<div id="ddc-test">TEST MODE: this chat is being tried out and cannot book appointments yet.</div>' : "") +
+    (isTest ? '<div id="ddc-test">TEST MODE: this chat is being tried out. Appointments booked here are real test bookings.</div>' : "") +
     '<div id="ddc-log"></div>' +
     '<form id="ddc-form"><textarea id="ddc-input" rows="1" placeholder="Type your question..." maxlength="1000"></textarea>' +
     '<button id="ddc-send" type="submit">Send</button></form>' +
@@ -131,6 +140,89 @@
       } else if (!on && existing) {
         existing.parentNode.removeChild(existing);
       }
+    }
+
+    // Booking preview card (Phase 2). The server only books when the visitor
+    // clicks Confirm here; the token is opaque and expires in 15 minutes.
+    function showBookingCard(booking) {
+      var old = log.querySelector(".ddc-card");
+      if (old) old.parentNode.removeChild(old);
+
+      var p = booking.preview || {};
+      var card = document.createElement("div");
+      card.className = "ddc-card";
+
+      var title = document.createElement("h4");
+      title.textContent = "Please confirm your consultation";
+      card.appendChild(title);
+
+      var dl = document.createElement("dl");
+      [["When", (p.weekday || "") + ", " + (p.date || "") + " - arrival " + (p.arrivalWindow || "")],
+       ["Name", p.name || ""],
+       ["Address", p.address || ""],
+       ["Phone", p.phoneLast4 ? "ending in " + p.phoneLast4 : ""],
+       ["Email", p.email || ""]].forEach(function (row) {
+        if (!row[1]) return;
+        var dt = document.createElement("dt"); dt.textContent = row[0];
+        var dd = document.createElement("dd"); dd.textContent = row[1];
+        dl.appendChild(dt); dl.appendChild(dd);
+      });
+      card.appendChild(dl);
+
+      var actions = document.createElement("div");
+      actions.className = "ddc-actions";
+      var confirm = document.createElement("button");
+      confirm.type = "button"; confirm.className = "ddc-confirm"; confirm.textContent = "Confirm booking";
+      var change = document.createElement("button");
+      change.type = "button"; change.className = "ddc-change"; change.textContent = "Change";
+      actions.appendChild(confirm); actions.appendChild(change);
+      card.appendChild(actions);
+
+      var note = document.createElement("div");
+      note.className = "ddc-note";
+      note.textContent = "Nothing is booked until you press Confirm. Everyone involved in the decision should attend.";
+      card.appendChild(note);
+
+      change.addEventListener("click", function () {
+        card.parentNode.removeChild(card);
+        input.value = "I'd like to change something: ";
+        input.focus();
+      });
+
+      confirm.addEventListener("click", function () {
+        if (busy) return;
+        busy = true;
+        confirm.disabled = true; change.disabled = true;
+        confirm.textContent = "Booking...";
+        send.disabled = true;
+
+        fetch(apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "confirm", sessionId: sessionId, mode: mode, token: booking.token })
+        })
+          .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+          .then(function (r) {
+            var text = (r.data && (r.data.reply || r.data.error)) || "Sorry, something went wrong. Please give us a call.";
+            if (r.data && r.data.booked) {
+              card.parentNode.removeChild(card);
+            } else {
+              confirm.textContent = "Confirm booking";
+              confirm.disabled = false; change.disabled = false;
+            }
+            history.push({ role: "assistant", content: text });
+            addMessage("assistant", text);
+          })
+          .catch(function () {
+            confirm.textContent = "Confirm booking";
+            confirm.disabled = false; change.disabled = false;
+            addMessage("assistant", "Sorry, I couldn't reach our server. Please try again in a moment.");
+          })
+          .then(function () { busy = false; send.disabled = false; });
+      });
+
+      log.appendChild(card);
+      log.scrollTop = log.scrollHeight;
     }
 
     function greetOnce() {
@@ -203,6 +295,9 @@
           }
           history.push({ role: "assistant", content: reply });
           addMessage("assistant", reply);
+          if (r.ok && r.data && r.data.booking && r.data.booking.token) {
+            showBookingCard(r.data.booking);
+          }
         })
         .catch(function () {
           setTyping(false);
