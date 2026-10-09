@@ -382,6 +382,28 @@ export async function POST(req: Request) {
           if (!allowLookup(sessionId)) { reply({ error: "LOOKUP_LIMIT", message: "Too many scheduling checks in this chat. Offer the phone number." }); continue; }
 
           const input = checked.value;
+
+          // Safety net: if the model didn't run the returning-customer lookup,
+          // do it here with what we already have, so an existing customer is
+          // booked under their record instead of being refused as a duplicate.
+          let autoMatched = false;
+          if (!input.existing) {
+            try {
+              const auto = await lookupReturningCustomer({
+                phone: input.customer.phone,
+                email: input.customer.email,
+                lastName: input.customer.name.trim().split(/\s+/).pop(),
+                zip: input.customer.zip,
+              });
+              if (auto.status === "matched") {
+                input.existing = { customerId: auto.customer.customerId, locationId: auto.customer.locationId, firstName: auto.customer.firstName };
+                autoMatched = true;
+              }
+            } catch (error) {
+              console.warn("Website bot auto customer lookup skipped:", error instanceof Error ? error.message : error);
+            }
+          }
+
           const fullAddress = `${input.customer.street}${input.customer.unit ? ` #${input.customer.unit}` : ""}, ${input.customer.city}, ${input.customer.state} ${input.customer.zip}`;
           try {
             const slot = await resolveSlotForBooking(fullAddress, input.date, input.arrivalWindow);
@@ -404,7 +426,14 @@ export async function POST(req: Request) {
             const preview = previewFor(input);
             const token = signBookingTicket({ ...input, slot, sessionId });
             bookingCard = { token, preview };
-            reply({ status: "PREVIEW_READY", preview, message: "A preview with a Confirm button is now showing to the visitor. Briefly tell them to check the details and press Confirm to book. Do not say it is booked yet." });
+            reply({
+              status: "PREVIEW_READY",
+              preview,
+              returningCustomer: Boolean(input.existing),
+              message: autoMatched
+                ? `This visitor is an existing customer (${input.existing?.firstName || "returning"}); the booking will go under their record. Welcome them back in one short line, then tell them to check the details and press Confirm. Do not say it is booked yet.`
+                : "A preview with a Confirm button is now showing to the visitor. Briefly tell them to check the details and press Confirm to book. Do not say it is booked yet.",
+            });
           } catch (error) {
             console.error("Website bot prepare_booking failed:", error instanceof Error ? error.message : error);
             reply({ error: "PREPARE_FAILED", message: "Could not prepare the booking right now. Apologize briefly and offer the phone number." });
