@@ -95,6 +95,13 @@ export function allowLookup(sessionId: string): boolean {
   return hit(`lookup:s:${sessionId}`, LIMITS.lookupsPerSessionPerHour, 3_600_000);
 }
 
+/** One booking per chat session, and a small daily cap per IP address. */
+export function allowBooking(sessionId: string, ip: string): boolean {
+  const okSession = hit(`book:s:${sessionId}`, 1, 24 * 3_600_000);
+  const okIp = hit(`book:ip:${ip}`, Number(process.env.WEBSITE_BOT_MAX_BOOKINGS_PER_IP || 3), 24 * 3_600_000);
+  return okSession && okIp;
+}
+
 export function clientIp(headers: Headers): string {
   const forwarded = headers.get("x-forwarded-for") || "";
   const first = forwarded.split(",")[0]?.trim();
