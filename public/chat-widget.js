@@ -31,7 +31,7 @@
   var apiBase = scriptSrc ? scriptSrc.replace(/\/chat-widget\.js.*$/, "") : "";
   var apiUrl = apiBase + "/api/website-bot";
   var mode = (scriptEl && scriptEl.getAttribute("data-mode")) || "live";
-  var isTest = mode === "test";
+  // "test" mode is still passed to the server for logging; nothing visual changes.
 
   // --- State --------------------------------------------------------------
   var history = [];          // [{ role: "user" | "assistant", content: "..." }]
@@ -104,7 +104,7 @@
   panel.innerHTML =
     '<div id="ddc-head"><div><b>Den Defenders</b><small>Ask about security doors &amp; open appointment times</small></div>' +
     '<button id="ddc-close" type="button" aria-label="Close chat">&times;</button></div>' +
-    (isTest ? '<div id="ddc-test">TEST MODE: this chat is being tried out. Appointments booked here are real test bookings.</div>' : "") +
+
     '<div id="ddc-log"></div>' +
     '<form id="ddc-form"><textarea id="ddc-input" rows="1" placeholder="Type your question..." maxlength="1000"></textarea>' +
     '<button id="ddc-send" type="submit">Send</button></form>' +
@@ -153,7 +153,7 @@
       card.className = "ddc-card";
 
       var title = document.createElement("h4");
-      title.textContent = "Please confirm your consultation";
+      title.textContent = p.returning ? "Welcome back! Please confirm your consultation" : "Please confirm your consultation";
       card.appendChild(title);
 
       var dl = document.createElement("dl");
@@ -199,7 +199,7 @@
         fetch(apiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "confirm", sessionId: sessionId, mode: mode, token: booking.token, messages: history.slice(-40) })
+          body: JSON.stringify({ action: "confirm", sessionId: sessionId, mode: mode, token: booking.token, messages: history.slice(-80) })
         })
           .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
           .then(function (r) {
@@ -270,7 +270,7 @@
         sessionId: sessionId,
         mode: mode,
         page: location.href,
-        messages: history.slice(-20)
+        messages: history.slice(-80)
       };
 
       var controller = typeof AbortController !== "undefined" ? new AbortController() : null;

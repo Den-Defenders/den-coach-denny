@@ -30,14 +30,17 @@ import {
   addWebsiteChatNote,
   bookSalesAppointmentFromWebsite,
   findOpenSalesTimes,
+  lookupReturningCustomer,
   resolveSlotForBooking,
   WebsiteBotConfigError,
 } from "@/lib/websiteBotMcp";
 import {
   bookingEnabled,
+  normalizePhone,
   postBookingToSlack,
   previewFor,
   signBookingTicket,
+  signCustomerRef,
   transcriptNote,
   validateBookingInput,
   verifyBookingTicket,
@@ -47,7 +50,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 180;
 
-const MAX_MESSAGES = 24;
+const MAX_MESSAGES = 80;
 const MAX_MESSAGE_CHARS = 1000;
 const MODEL = process.env.WEBSITE_BOT_MODEL || "gpt-4o-mini";
 
@@ -112,6 +115,24 @@ const FIND_OPEN_TIMES_TOOL = {
   },
 };
 
+const LOOKUP_CUSTOMER_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "lookup_returning_customer",
+    description:
+      "Check whether the visitor is an existing Den Defenders customer, using the mobile number or email THEY gave you. Call it as soon as someone says they have bought from us before, or gives a phone/email early in the chat. Returns their first name, what we installed for them, and a customerRef to pass to prepare_booking. If not matched, treat them as new and do not mention the lookup.",
+    parameters: {
+      type: "object",
+      properties: {
+        phone: { type: "string", description: "Mobile number the visitor typed." },
+        email: { type: "string", description: "Email the visitor typed (use when no phone)." },
+        lastName: { type: "string", description: "Visitor's last name if known; helps when a number is shared." },
+        zip: { type: "string", description: "Visitor's ZIP if known; helps when a number is shared." },
+      },
+    },
+  },
+};
+
 const PREPARE_BOOKING_TOOL = {
   type: "function" as const,
   function: {
@@ -123,6 +144,7 @@ const PREPARE_BOOKING_TOOL = {
       properties: {
         date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "Chosen date from find_open_times (YYYY-MM-DD)." },
         arrivalWindow: { type: "string", description: "Chosen arrival window exactly as find_open_times returned it, e.g. '12 PM - 4 PM'." },
+        customerRef: { type: "string", description: "The customerRef returned by lookup_returning_customer, when the visitor was matched. Books under their existing record." },
         fullName: { type: "string", description: "Visitor's first and last name." },
         phone: { type: "string", description: "Mobile phone number, 10 digits." },
         email: { type: "string", description: "Email address." },
@@ -172,6 +194,7 @@ async function handleConfirm(body: Record<string, unknown>, origin: string | nul
     qualifying: ticket.qualifying,
     customerNotes: ticket.customerNotes,
     dryRun: false,
+    existing: ticket.existing,
   });
 
   if (!result.ok) {
@@ -259,7 +282,9 @@ export async function POST(req: Request) {
     { role: "system", content: websiteBotSystemPrompt(todayPacific(), testMode, canBook) },
     ...messages,
   ];
-  const tools = canBook ? [FIND_OPEN_TIMES_TOOL, PREPARE_BOOKING_TOOL] : [FIND_OPEN_TIMES_TOOL];
+  const tools = canBook
+    ? [FIND_OPEN_TIMES_TOOL, LOOKUP_CUSTOMER_TOOL, PREPARE_BOOKING_TOOL]
+    : [FIND_OPEN_TIMES_TOOL, LOOKUP_CUSTOMER_TOOL];
 
   // Set when prepare_booking succeeds; returned to the widget with the reply.
   let bookingCard: { token: string; preview: ReturnType<typeof previewFor> } | null = null;
@@ -317,6 +342,34 @@ export async function POST(req: Request) {
           continue;
         }
 
+        if (call.function.name === "lookup_returning_customer") {
+          const phone = typeof args.phone === "string" ? normalizePhone(args.phone) : null;
+          const email = typeof args.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(args.email.trim()) ? args.email.trim() : null;
+          if (!phone && !email) { reply({ matched: false, message: "Need a valid mobile number or email to check." }); continue; }
+          if (!allowLookup(sessionId)) { reply({ matched: false, message: "Lookup limit reached; treat as a new customer." }); continue; }
+          try {
+            const found = await lookupReturningCustomer({
+              phone: phone || undefined,
+              email: email || undefined,
+              lastName: typeof args.lastName === "string" ? args.lastName.trim() : undefined,
+              zip: typeof args.zip === "string" && /^\d{5}$/.test(args.zip.trim()) ? args.zip.trim() : undefined,
+            });
+            if (!found) { reply({ matched: false, message: "No confident match. Continue as a new customer; do not say you looked them up." }); continue; }
+            reply({
+              matched: true,
+              firstName: found.firstName,
+              products: found.products,
+              lastInstall: found.lastCompleted || null,
+              customerRef: signCustomerRef(found),
+              message: "Welcome them back by first name and mention what we installed (if any). Pass customerRef to prepare_booking. Skip 'how did you hear about us' (use 'Existing customer') and 'other options' (use 'Returning customer'). For rescheduling or canceling an existing appointment, ask them to call the office.",
+            });
+          } catch (error) {
+            console.error("Website bot customer lookup failed:", error instanceof Error ? error.message : error);
+            reply({ matched: false, message: "Lookup unavailable; continue as a new customer." });
+          }
+          continue;
+        }
+
         if (call.function.name === "prepare_booking" && canBook) {
           const checked = validateBookingInput(args);
           if (!checked.ok) { reply({ error: "MISSING", missing: checked.missing, message: "Ask for these one at a time, then call prepare_booking again." }); continue; }
@@ -330,10 +383,16 @@ export async function POST(req: Request) {
               reply({ error: "SLOT_GONE", message: "That time is no longer open for this address. Apologize and run find_open_times again with the ZIP to offer fresh times." });
               continue;
             }
-            const dry = await bookSalesAppointmentFromWebsite({ slot, customer: input.customer, qualifying: input.qualifying, customerNotes: input.customerNotes, dryRun: true });
+            const dry = await bookSalesAppointmentFromWebsite({ slot, customer: input.customer, qualifying: input.qualifying, customerNotes: input.customerNotes, dryRun: true, existing: input.existing });
             if (!dry.ok) {
               console.warn("Website bot dry run refused:", dry.code);
-              reply({ error: "CANNOT_BOOK_ONLINE", message: "The booking can't be completed online for this visitor. Do not say why. Say the team will need to finish it by phone and give the phone number." });
+              const openJob = /OPEN_SALES_JOB|already has an open|open sales job/i.test(String(dry.code || ""));
+              reply({
+                error: "CANNOT_BOOK_ONLINE",
+                message: openJob
+                  ? "It looks like they already have a consultation on the books. Say so warmly and ask them to call the office to reschedule or add to it. Do not give details."
+                  : "The booking can't be completed online for this visitor. Do not say why. Say the team will need to finish it by phone and give the phone number.",
+              });
               continue;
             }
             const preview = previewFor(input);

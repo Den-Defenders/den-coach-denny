@@ -20,6 +20,11 @@ import { connectServiceTitanMcp } from "@/lib/serviceTitanMcp";
 
 export const WEBSITE_BOT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "recommend_sales_schedule",
+  // Returning-customer lookup. Results are reduced to a first name, a short
+  // product list and server-only IDs before the chat model sees anything.
+  "search_customers",
+  "get_customer_jobs",
+  "get_job_invoices",
 ]);
 
 export const WEBSITE_BOT_WRITE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
@@ -336,23 +341,32 @@ export async function bookSalesAppointmentFromWebsite(input: {
   qualifying: BookingQualifying;
   customerNotes?: string;
   dryRun: boolean;
+  /** Set for a returning customer: book under their existing ServiceTitan record. */
+  existing?: { customerId: number; locationId?: number };
 }): Promise<BookingResult> {
   const args: Record<string, unknown> = {
     consultantName: input.slot.consultantName,
     date: input.slot.date,
     startTime: input.slot.startTime,
     arrivalWindow: input.slot.arrivalWindow,
-    newCustomer: {
-      name: input.customer.name,
-      phone: input.customer.phone,
-      phoneType: "MobilePhone",
-      ...(input.customer.email ? { email: input.customer.email } : {}),
-      street: input.customer.street,
-      ...(input.customer.unit ? { unit: input.customer.unit } : {}),
-      city: input.customer.city,
-      state: input.customer.state.toUpperCase(),
-      zip: input.customer.zip,
-    },
+    ...(input.existing
+      ? {
+          customerId: input.existing.customerId,
+          ...(input.existing.locationId ? { locationId: input.existing.locationId } : {}),
+        }
+      : {
+          newCustomer: {
+            name: input.customer.name,
+            phone: input.customer.phone,
+            phoneType: "MobilePhone",
+            ...(input.customer.email ? { email: input.customer.email } : {}),
+            street: input.customer.street,
+            ...(input.customer.unit ? { unit: input.customer.unit } : {}),
+            city: input.customer.city,
+            state: input.customer.state.toUpperCase(),
+            zip: input.customer.zip,
+          },
+        }),
     qualifying: input.qualifying,
     ...(input.customerNotes ? { customerNotes: input.customerNotes.slice(0, 1000) } : {}),
     dryRun: input.dryRun,
@@ -391,4 +405,146 @@ export async function addWebsiteChatNote(jobId: number, text: string): Promise<b
     console.error("Website bot chat note failed:", error instanceof Error ? error.message : error);
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Returning customers
+// ---------------------------------------------------------------------------
+
+/** Server-side facts about a matched customer. customerId never reaches the model. */
+export type ReturningCustomer = {
+  customerId: number;
+  locationId?: number;
+  firstName: string;
+  fullName: string;
+  zip?: string;
+  products: string[];       // e.g. ["Two Panel Sliding Security Door"]
+  lastCompleted?: string;   // "June 2026"
+};
+
+type SearchCustomer = {
+  customerId?: number;
+  customerName?: string;
+  active?: boolean;
+  billingAddress?: string;
+  matches?: { matchType?: string; locationId?: number | null }[];
+};
+
+type CustomerJob = {
+  jobId?: number;
+  status?: string;
+  locationId?: number;
+  total?: number;
+  completedOn?: string | null;
+  createdOn?: string;
+};
+
+function zipOf(address: string | undefined): string | undefined {
+  const m = (address || "").match(/\b(\d{5})(?:-\d{4})?\b\s*$/);
+  return m ? m[1] : undefined;
+}
+
+function firstNameOf(customerName: string): string {
+  // "Anna & Steven Williams" -> "Anna"; "Santiago Saiz" -> "Santiago"
+  const cleaned = customerName.replace(/[&,/]/g, " ").trim();
+  return cleaned.split(/\s+/)[0] || "there";
+}
+
+function monthYear(iso: string | null | undefined): string | undefined {
+  if (!iso) return undefined;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "America/Los_Angeles" }).format(d);
+}
+
+const PRODUCT_WORDS = /door|screen|window|slider|centurion|artisan|storm/i;
+const HARDWARE_WORDS = /handle|deadbolt|threshold|fee|charge|bucks|discount|extension|lock/i;
+
+/**
+ * Find a returning customer by the phone or email THEY typed, tie-breaking on
+ * last name and ZIP when several records share the number. Returns null when
+ * there is no confident single match (the chat then treats them as new).
+ */
+export async function lookupReturningCustomer(input: {
+  phone?: string;
+  email?: string;
+  lastName?: string;
+  zip?: string;
+}): Promise<ReturningCustomer | null> {
+  const query = input.phone || input.email;
+  if (!query) return null;
+
+  const raw = (await callWebsiteBotTool(
+    "search_customers",
+    { query, searchType: input.phone ? "phone" : "auto" },
+    60_000
+  )) as { customers?: SearchCustomer[] };
+
+  let candidates = (raw?.customers || []).filter((c) => c.customerId && c.active !== false && c.customerName);
+  if (!candidates.length) return null;
+
+  if (candidates.length > 1 && input.lastName) {
+    const wanted = input.lastName.toLowerCase();
+    const byName = candidates.filter((c) => (c.customerName || "").toLowerCase().includes(wanted));
+    if (byName.length) candidates = byName;
+  }
+  if (candidates.length > 1 && input.zip) {
+    const byZip = candidates.filter((c) => zipOf(c.billingAddress) === input.zip);
+    if (byZip.length) candidates = byZip;
+  }
+  if (candidates.length !== 1) {
+    console.info(`Website bot customer lookup: ${candidates.length} candidates, not confident`);
+    return null;
+  }
+
+  const customer = candidates[0];
+  const customerId = customer.customerId as number;
+
+  const jobsRaw = (await callWebsiteBotTool("get_customer_jobs", { customerId, pageSize: 50 }, 60_000)) as {
+    jobs?: CustomerJob[];
+  };
+  const jobs = jobsRaw?.jobs || [];
+
+  // Most recent location on file (any non-canceled job wins, newest first).
+  const locationId =
+    jobs.find((j) => j.status !== "Canceled" && j.locationId)?.locationId ??
+    jobs.find((j) => j.locationId)?.locationId ??
+    customer.matches?.find((m) => m.locationId)?.locationId ??
+    undefined;
+
+  // Products: Service-type invoice lines on completed, paid jobs (newest 3).
+  const completed = jobs
+    .filter((j) => j.status === "Completed" && (j.total || 0) > 0 && j.jobId)
+    .sort((a, b) => String(b.completedOn || "").localeCompare(String(a.completedOn || "")))
+    .slice(0, 3);
+
+  const products: string[] = [];
+  for (const job of completed) {
+    try {
+      const inv = (await callWebsiteBotTool("get_job_invoices", { jobId: job.jobId, includeInactive: false }, 60_000)) as {
+        invoices?: { items?: { type?: string; displayName?: string; skuName?: string }[] }[];
+      };
+      for (const invoice of inv?.invoices || []) {
+        for (const item of invoice.items || []) {
+          const name = (item.displayName || item.skuName || "").trim();
+          if (!name || item.type !== "Service") continue;
+          if (!PRODUCT_WORDS.test(name) || HARDWARE_WORDS.test(name)) continue;
+          if (!products.includes(name)) products.push(name);
+        }
+      }
+    } catch (error) {
+      console.warn("Website bot product lookup skipped a job:", error instanceof Error ? error.message : error);
+    }
+    if (products.length >= 3) break;
+  }
+
+  return {
+    customerId,
+    locationId,
+    firstName: firstNameOf(customer.customerName || ""),
+    fullName: (customer.customerName || "").trim(),
+    zip: zipOf(customer.billingAddress),
+    products,
+    lastCompleted: monthYear(completed[0]?.completedOn),
+  };
 }

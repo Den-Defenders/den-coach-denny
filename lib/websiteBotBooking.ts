@@ -17,7 +17,7 @@
  * stateless. It is opaque to the browser, and tampering breaks the signature.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { BookingCustomer, BookingQualifying, ResolvedSlot } from "@/lib/websiteBotMcp";
+import type { BookingCustomer, BookingQualifying, ResolvedSlot, ReturningCustomer } from "@/lib/websiteBotMcp";
 
 export function bookingEnabled(): boolean {
   return (process.env.WEBSITE_BOT_BOOKING_ENABLED || "").trim().toLowerCase() === "true";
@@ -37,12 +37,16 @@ function signingSecret(): string {
 
 const STATES = new Set(["AZ", "CA", "NV", "OR", "TX", "WA", "ID", "UT", "NM", "CO"]);
 
+export type ExistingCustomerRef = { customerId: number; locationId?: number; firstName: string };
+
 export type PreparedBookingInput = {
   customer: BookingCustomer;
   qualifying: BookingQualifying;
   date: string;
   arrivalWindow: string;
   customerNotes?: string;
+  /** Present when the visitor was matched to an existing ServiceTitan customer. */
+  existing?: ExistingCustomerRef;
 };
 
 export type ValidationResult =
@@ -61,6 +65,15 @@ export function normalizePhone(raw: string): string | null {
 
 export function validateBookingInput(args: Record<string, unknown>): ValidationResult {
   const missing: string[] = [];
+
+  // Returning customer: the model passes back the opaque customerRef it got
+  // from lookup_returning_customer. Verify it; never trust a raw ID.
+  let existing: ExistingCustomerRef | undefined;
+  if (typeof args.customerRef === "string" && args.customerRef) {
+    const ref = verifyCustomerRef(args.customerRef);
+    if (!ref) missing.push("a valid customerRef (run lookup_returning_customer again)");
+    else existing = ref;
+  }
 
   const name = str(args.fullName, 100);
   if (name.split(/\s+/).filter(Boolean).length < 2) missing.push("full name (first and last)");
@@ -131,8 +144,45 @@ export function validateBookingInput(args: Record<string, unknown>): ValidationR
       date,
       arrivalWindow,
       customerNotes: str(args.notes, 1000) || undefined,
+      existing,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Signed customer reference (returning customers)
+// ---------------------------------------------------------------------------
+
+const CUSTOMER_REF_LIFETIME_MS = 60 * 60 * 1000;
+
+export function signCustomerRef(customer: ReturningCustomer): string {
+  const payload = b64url(Buffer.from(JSON.stringify({
+    t: "cust",
+    customerId: customer.customerId,
+    locationId: customer.locationId,
+    firstName: customer.firstName,
+    exp: Date.now() + CUSTOMER_REF_LIFETIME_MS,
+  })));
+  const sig = b64url(createHmac("sha256", signingSecret()).update(payload).digest());
+  return `${payload}.${sig}`;
+}
+
+export function verifyCustomerRef(token: string): ExistingCustomerRef | null {
+  const [payload, sig] = (token || "").split(".");
+  if (!payload || !sig) return null;
+  const expected = b64url(createHmac("sha256", signingSecret()).update(payload).digest());
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+      t?: string; customerId?: number; locationId?: number; firstName?: string; exp?: number;
+    };
+    if (data.t !== "cust" || !data.customerId || !data.exp || data.exp < Date.now()) return null;
+    return { customerId: data.customerId, locationId: data.locationId, firstName: data.firstName || "" };
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +228,7 @@ export function verifyBookingTicket(token: string): BookingTicket | null {
 // ---------------------------------------------------------------------------
 
 export type BookingPreview = {
+  returning: boolean;
   name: string;
   address: string;
   date: string;
@@ -195,6 +246,7 @@ export function previewFor(input: PreparedBookingInput): BookingPreview {
     .join(", ")
     .replace(", #", " #");
   return {
+    returning: Boolean(input.existing),
     name: input.customer.name,
     address,
     date: input.date,
@@ -241,7 +293,7 @@ export async function postBookingToSlack(ticket: BookingTicket, jobNumber: strin
     `${testMode ? "[TEST] " : ""}New sales appointment booked from the website chat`,
     `*${p.name}* - ${p.weekday} ${p.date}, arrival ${p.arrivalWindow}`,
     `${p.address}`,
-    `Rep: ${ticket.slot.consultantName}${jobNumber ? ` - Job ${jobNumber}` : ""}`,
+    `Rep: ${ticket.slot.consultantName}${jobNumber ? ` - Job ${jobNumber}` : ""}${ticket.existing ? " - returning customer" : ""}`,
     q.reason ? `Why: ${q.reason}` : "",
     q.entryPoints ? `Entry points: ${q.entryPoints}` : "",
     q.decisionMakers ? `Decision makers: ${q.decisionMakers}` : "",
