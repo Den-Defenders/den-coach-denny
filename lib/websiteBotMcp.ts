@@ -465,14 +465,21 @@ const HARDWARE_WORDS = /handle|deadbolt|threshold|fee|charge|bucks|discount|exte
  * last name and ZIP when several records share the number. Returns null when
  * there is no confident single match (the chat then treats them as new).
  */
+export type LookupOutcome =
+  | { status: "matched"; customer: ReturningCustomer }
+  | { status: "none" }
+  | { status: "ambiguous" }; // several records share the number; need last name or ZIP
+
+const NOT_A_HOMEOWNER = /showroom|office|test|warehouse|den defenders|sample/i;
+
 export async function lookupReturningCustomer(input: {
   phone?: string;
   email?: string;
   lastName?: string;
   zip?: string;
-}): Promise<ReturningCustomer | null> {
+}): Promise<LookupOutcome> {
   const query = input.phone || input.email;
-  if (!query) return null;
+  if (!query) return { status: "none" };
 
   const raw = (await callWebsiteBotTool(
     "search_customers",
@@ -481,7 +488,14 @@ export async function lookupReturningCustomer(input: {
   )) as { customers?: SearchCustomer[] };
 
   let candidates = (raw?.customers || []).filter((c) => c.customerId && c.active !== false && c.customerName);
-  if (!candidates.length) return null;
+  console.info(`Website bot customer lookup: ${candidates.length} raw candidate(s)`);
+  if (!candidates.length) return { status: "none" };
+
+  // Internal records (showroom, office, test accounts) sometimes share a number.
+  if (candidates.length > 1) {
+    const homeowners = candidates.filter((c) => !NOT_A_HOMEOWNER.test(c.customerName || ""));
+    if (homeowners.length) candidates = homeowners;
+  }
 
   if (candidates.length > 1 && input.lastName) {
     const wanted = input.lastName.toLowerCase();
@@ -493,8 +507,8 @@ export async function lookupReturningCustomer(input: {
     if (byZip.length) candidates = byZip;
   }
   if (candidates.length !== 1) {
-    console.info(`Website bot customer lookup: ${candidates.length} candidates, not confident`);
-    return null;
+    console.info(`Website bot customer lookup: ${candidates.length} candidates after tie-break, not confident`);
+    return { status: "ambiguous" };
   }
 
   const customer = candidates[0];
@@ -539,12 +553,15 @@ export async function lookupReturningCustomer(input: {
   }
 
   return {
-    customerId,
-    locationId,
-    firstName: firstNameOf(customer.customerName || ""),
-    fullName: (customer.customerName || "").trim(),
-    zip: zipOf(customer.billingAddress),
-    products,
-    lastCompleted: monthYear(completed[0]?.completedOn),
+    status: "matched",
+    customer: {
+      customerId,
+      locationId,
+      firstName: firstNameOf(customer.customerName || ""),
+      fullName: (customer.customerName || "").trim(),
+      zip: zipOf(customer.billingAddress),
+      products,
+      lastCompleted: monthYear(completed[0]?.completedOn),
+    },
   };
 }

@@ -19,6 +19,7 @@ import { NextResponse } from "next/server";
 import { websiteBotSystemPrompt } from "@/app/lib/websiteBotPrompt";
 import {
   allowBooking,
+  allowCustomerLookup,
   allowLookup,
   allowMessage,
   clientIp,
@@ -120,7 +121,7 @@ const LOOKUP_CUSTOMER_TOOL = {
   function: {
     name: "lookup_returning_customer",
     description:
-      "Check whether the visitor is an existing Den Defenders customer, using the mobile number or email THEY gave you. Call it as soon as someone says they have bought from us before, or gives a phone/email early in the chat. Returns their first name, what we installed for them, and a customerRef to pass to prepare_booking. If not matched, treat them as new and do not mention the lookup.",
+      "Check whether the visitor is an existing Den Defenders customer, using the mobile number or email THEY gave you. Call it as soon as someone says they have bought from us before, or gives a phone/email early in the chat. ALWAYS include lastName and zip too when you know them from the conversation; numbers are sometimes shared between records and those break the tie. Returns their first name, what we installed for them, and a customerRef to pass to prepare_booking. If the result is ambiguous, ask for their last name and call again. If not matched, treat them as new and do not mention the lookup.",
     parameters: {
       type: "object",
       properties: {
@@ -346,15 +347,20 @@ export async function POST(req: Request) {
           const phone = typeof args.phone === "string" ? normalizePhone(args.phone) : null;
           const email = typeof args.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(args.email.trim()) ? args.email.trim() : null;
           if (!phone && !email) { reply({ matched: false, message: "Need a valid mobile number or email to check." }); continue; }
-          if (!allowLookup(sessionId)) { reply({ matched: false, message: "Lookup limit reached; treat as a new customer." }); continue; }
+          if (!allowCustomerLookup(sessionId, ip)) { reply({ matched: false, message: "Lookup limit reached; treat as a new customer." }); continue; }
           try {
-            const found = await lookupReturningCustomer({
+            const outcome = await lookupReturningCustomer({
               phone: phone || undefined,
               email: email || undefined,
               lastName: typeof args.lastName === "string" ? args.lastName.trim() : undefined,
               zip: typeof args.zip === "string" && /^\d{5}$/.test(args.zip.trim()) ? args.zip.trim() : undefined,
             });
-            if (!found) { reply({ matched: false, message: "No confident match. Continue as a new customer; do not say you looked them up." }); continue; }
+            if (outcome.status === "ambiguous") {
+              reply({ matched: false, ambiguous: true, message: "More than one record shares that number. Ask for their last name (and ZIP if you don't have it), then call lookup_returning_customer again with phone + lastName + zip." });
+              continue;
+            }
+            if (outcome.status === "none") { reply({ matched: false, message: "No match. Continue as a new customer; do not say you looked them up." }); continue; }
+            const found = outcome.customer;
             reply({
               matched: true,
               firstName: found.firstName,

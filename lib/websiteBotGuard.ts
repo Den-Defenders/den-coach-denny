@@ -95,6 +95,13 @@ export function allowLookup(sessionId: string): boolean {
   return hit(`lookup:s:${sessionId}`, LIMITS.lookupsPerSessionPerHour, 3_600_000);
 }
 
+/** Returning-customer checks: generous per chat, since visitors retype numbers. */
+export function allowCustomerLookup(sessionId: string, ip: string): boolean {
+  const okSession = hit(`cust:s:${sessionId}`, Number(process.env.WEBSITE_BOT_MAX_CUSTOMER_LOOKUPS_PER_SESSION || 12), 3_600_000);
+  const okIp = hit(`cust:ip:${ip}`, Number(process.env.WEBSITE_BOT_MAX_CUSTOMER_LOOKUPS_PER_IP || 40), 3_600_000);
+  return okSession && okIp;
+}
+
 /** One booking per chat session, and a small daily cap per IP address. */
 export function allowBooking(sessionId: string, ip: string): boolean {
   const okSession = hit(`book:s:${sessionId}`, 1, 24 * 3_600_000);
