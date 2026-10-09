@@ -27,6 +27,7 @@ import {
   websiteBotEnabled,
 } from "@/lib/websiteBotGuard";
 import {
+  addWebsiteChatNote,
   bookSalesAppointmentFromWebsite,
   findOpenSalesTimes,
   resolveSlotForBooking,
@@ -37,6 +38,7 @@ import {
   postBookingToSlack,
   previewFor,
   signBookingTicket,
+  transcriptNote,
   validateBookingInput,
   verifyBookingTicket,
 } from "@/lib/websiteBotBooking";
@@ -115,7 +117,7 @@ const PREPARE_BOOKING_TOOL = {
   function: {
     name: "prepare_booking",
     description:
-      "Prepare the visitor's consultation booking for their confirmation. Call ONLY after the visitor has chosen one of the times from find_open_times AND you have collected every required detail. The server re-checks the time, builds a preview, and shows the visitor a Confirm button. Nothing is booked until they click it. If the result says MISSING, ask for the listed items one at a time and call again.",
+      "Prepare the visitor's consultation booking for their confirmation. Call ONLY after the visitor has chosen one of the times from find_open_times AND you have every required field. Fill the qualifying answers (reason, priority, otherOptions, timeline, entryPoints, decisionMakers, heardAboutUs, priceRange, parking) from what the visitor already said in this conversation; ask only for the ones that were never covered. The server re-checks the time, builds a preview, and shows the visitor a Confirm button. Nothing is booked until they click it. If the result says MISSING, ask for the listed items one at a time and call again.",
     parameters: {
       type: "object",
       properties: {
@@ -140,7 +142,10 @@ const PREPARE_BOOKING_TOOL = {
         parking: { type: "string", description: "Gate code, parking or other access instructions. 'None' is fine." },
         notes: { type: "string", description: "Anything else useful for the design specialist (what they want to secure, colors mentioned, pets)." },
       },
-      required: ["date", "arrivalWindow", "fullName", "phone", "email", "street", "city", "state", "zip", "decisionMakers"],
+      required: [
+        "date", "arrivalWindow", "fullName", "phone", "email", "street", "city", "state", "zip",
+        "reason", "priority", "otherOptions", "timeline", "entryPoints", "decisionMakers", "heardAboutUs", "priceRange", "parking",
+      ],
     },
   },
 };
@@ -185,6 +190,13 @@ async function handleConfirm(body: Record<string, unknown>, origin: string | nul
 
   const preview = previewFor(ticket);
   console.info(`Website bot booked job ${result.jobNumber || "?"} for ${preview.name} on ${preview.date} ${preview.arrivalWindow}`);
+
+  // Save the chat on the job so the office and the rep can read what was said.
+  const transcript = cleanMessages(body.messages);
+  if (result.jobId && transcript.length) {
+    await addWebsiteChatNote(result.jobId, transcriptNote(transcript, preview, testMode));
+  }
+
   await postBookingToSlack(ticket, result.jobNumber, testMode);
 
   return json(

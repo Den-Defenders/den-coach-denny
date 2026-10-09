@@ -199,7 +199,7 @@
         fetch(apiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "confirm", sessionId: sessionId, mode: mode, token: booking.token })
+          body: JSON.stringify({ action: "confirm", sessionId: sessionId, mode: mode, token: booking.token, messages: history.slice(-40) })
         })
           .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
           .then(function (r) {
