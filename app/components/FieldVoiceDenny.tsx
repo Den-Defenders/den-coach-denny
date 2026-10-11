@@ -162,6 +162,8 @@ export default function FieldVoiceDenny() {
       dc.onopen = () => {
         setStatus("connected");
         setStatusText("Live. Ask Denny about your schedule, your next customer, or an address.");
+        // Denny speaks first: greets the person by name (see the session instructions).
+        dc.send(JSON.stringify({ type: "response.create" }));
       };
       dc.onclose = () => setStatusText("Voice chat disconnected.");
       dc.onerror = () => setError("The voice connection had an error.");

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { DEN_COACH_SYSTEM_PROMPT } from "@/app/lib/denCoachPrompt";
 import { currentUserHasRole } from "@/lib/currentAccess";
+import { DENNY_VOICE } from "@/lib/dennyVoice";
 
 export const runtime = "nodejs";
 
@@ -125,7 +126,7 @@ ${transcript}
       },
     },
     output: {
-      voice: "cedar",
+      voice: DENNY_VOICE,
     },
   },
 },
