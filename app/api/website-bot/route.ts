@@ -390,7 +390,7 @@ export async function POST(req: Request) {
 
       const toolCalls = message.tool_calls || [];
       if (!toolCalls.length) {
-        const reply = message.content?.trim() || "Sorry, could you say that again?";
+        const reply = plainText(message.content?.trim() || "Sorry, could you say that again?");
         return json(bookingCard ? { reply, booking: bookingCard } : { reply }, 200, origin);
       }
 
@@ -496,6 +496,13 @@ export async function POST(req: Request) {
             }
           }
 
+          // The model must have actually asked the questions it is answering.
+          const notAsked = unaskedQuestions(messages, Boolean(input.existing));
+          if (notAsked.length) {
+            reply({ error: "MISSING", missing: notAsked, message: "You filled these answers without the visitor telling you. Ask them now, naturally and one or two at a time (not as a numbered list), wait for the answers, then call prepare_booking again with what they actually said." });
+            continue;
+          }
+
           // Returning customer: book at THEIR location for this address only.
           if (input.existing) {
             try {
@@ -567,6 +574,40 @@ export async function POST(req: Request) {
     console.error("Website bot crashed:", error instanceof Error ? error.message : error);
     return json({ error: "Sorry, something went wrong on our side. Please try again in a moment." }, 500, origin);
   }
+}
+
+/** The chat window shows raw text, so drop markdown the model sometimes adds. */
+function plainText(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*\*\s+/gm, "- ");
+}
+
+/**
+ * Qualifying questions the model must not answer on its own. Each counts as
+ * covered when Denny asked it, or the visitor volunteered an answer.
+ */
+function unaskedQuestions(messages: ChatMessage[], returning: boolean): string[] {
+  const asked = (re: RegExp) => messages.some((m) => m.role === "assistant" && re.test(m.content));
+  const said = (re: RegExp) => messages.some((m) => m.role === "user" && re.test(m.content));
+  const missing: string[] = [];
+
+  const priorityAsked = asked(/most important|matters most|top priority|biggest priority|main goal|what are you hoping|security, appearance|appearance,? or/i);
+  const prioritySaid = said(/\b(most important|matters most|mainly|mostly|main thing|priority|curb appeal|looks?|appearance|value|last(s|ing)? long|durab|break-?ins?|burglar|safety|keep (out|bugs)|airflow|fresh air|privacy|pets?)\b/i);
+  if (!priorityAsked && !prioritySaid) missing.push("Q2: what matters most to them - security, appearance, or long-term value");
+
+  const timelineAsked = asked(/how soon|timeline|time ?frame|fairly soon|gathering options|just (looking|researching)|when (are|were) you (hoping|looking|planning)|ready to (move|get started)/i);
+  const timelineSaid = said(/\b(asap|as soon as|soon|right away|immediately|no rush|not in a hurry|this (week|month|year|summer|fall|spring|winter)|next (week|month|year)|in a (few|couple)|within|just (looking|researching|browsing)|gathering|weeks?|months?)\b/i);
+  if (!timelineAsked && !timelineSaid) missing.push("Q4: whether they want to handle this fairly soon or are gathering options");
+
+  if (!returning) {
+    const otherAsked = asked(/other (options|companies|quotes|bids)|shopping around|looked at (any|other)|just starting|compar(e|ing) (options|companies)/i);
+    const otherSaid = said(/\b(quote|quotes|bids?|other compan|another compan|shopping around|compar|just starting|first (one|company|call)|haven'?t looked)\b/i);
+    if (!otherAsked && !otherSaid) missing.push("Q3: whether they've looked at other options or are just starting");
+  }
+  return missing;
 }
 
 function timeArg(value: unknown): string | undefined {
