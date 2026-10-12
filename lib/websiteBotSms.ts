@@ -91,7 +91,7 @@ export async function sendVerificationCode(phone10: string): Promise<SendCodeRes
     console.warn("Twilio Verify send refused:", status, code, String(data.message || "").slice(0, 200));
     if (status === 429 || code === 60203) return { ok: false, reason: "TOO_MANY" }; // max send attempts
     if (code === 60200 || code === 21211 || code === 60205) return { ok: false, reason: "INVALID_NUMBER" }; // bad / landline
-    if (code === 60410 || code === 60605) return { ok: false, reason: "BLOCKED" }; // fraud guard / geo permissions
+    if (code === 60410 || code === 60605 || code === 21608) return { ok: false, reason: "BLOCKED" }; // fraud guard / geo permissions / account not cleared to text yet
     return { ok: false, reason: "FAILED" };
   } catch (error) {
     console.error("Twilio Verify send failed:", error instanceof Error ? error.message : error);

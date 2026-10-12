@@ -167,7 +167,7 @@
       card.appendChild(title);
 
       var dl = document.createElement("dl");
-      [["When", (p.weekday || "") + ", " + (p.date || "") + " - arrival " + (p.arrivalWindow || "")],
+      [["When", (p.weekday || "") + ", " + (p.dateLabel || p.date || "") + " - arrival " + (p.arrivalWindow || "")],
        ["Name", p.name || ""],
        ["Address", p.address || ""],
        ["Phone", p.phoneLast4 ? "ending in " + p.phoneLast4 : ""],

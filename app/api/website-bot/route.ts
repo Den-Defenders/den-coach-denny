@@ -20,7 +20,7 @@
  */
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import { websiteBotSystemPrompt } from "@/app/lib/websiteBotPrompt";
+import { WEBSITE_BOT_PHONE, WEBSITE_BOT_PRICE_RANGE, websiteBotSystemPrompt } from "@/app/lib/websiteBotPrompt";
 import {
   allowBooking,
   allowCodeCheck,
@@ -36,6 +36,7 @@ import {
 import {
   addWebsiteChatNote,
   bookSalesAppointmentFromWebsite,
+  findCustomerLocationAtAddress,
   findOpenSalesTimes,
   lookupReturningCustomer,
   resolveSlotForBooking,
@@ -247,7 +248,7 @@ async function handleConfirm(body: Record<string, unknown>, origin: string | nul
   return json(
     {
       booked: true,
-      reply: `You're all set, ${ticket.customer.name.split(" ")[0]}! Your custom design and security consultation is booked for ${preview.weekday}, ${preview.date}, arrival between ${preview.arrivalWindow}, at ${preview.address}. We'll send a confirmation to ${preview.email}. Please make sure everyone involved in the decision can be there. See you soon!`,
+      reply: `You're all set, ${ticket.customer.name.split(" ")[0]}! Your custom design and security consultation is booked for ${preview.weekday}, ${preview.dateLabel}, arrival between ${preview.arrivalWindow}, at ${preview.address}. We'll send a confirmation to ${preview.email}. Please make sure everyone involved in the decision can be there. See you soon!`,
     },
     200,
     origin
@@ -465,6 +466,15 @@ export async function POST(req: Request) {
 
           const input = checked.value;
 
+          // The price range must really have been quoted in this chat, not
+          // just filled in by the model at booking time.
+          const priceFigure = (WEBSITE_BOT_PRICE_RANGE.match(/\d[\d,]*/) || [""])[0].replace(/,/g, "");
+          const quoted = !priceFigure || messages.some((m) => m.role === "assistant" && m.content.replace(/,/g, "").includes(priceFigure));
+          if (!quoted) {
+            reply({ error: "MISSING", missing: ["quote the price range to the visitor first (say it in a message, then ask if that works for them)"], message: `You have not told the visitor the price range yet. Tell them now ("Most homeowners invest between ${WEBSITE_BOT_PRICE_RANGE} per door, depending on design and options"), ask whether that fits what they had in mind, and only call prepare_booking again after they answer.` });
+            continue;
+          }
+
           // Safety net: if the model didn't run the returning-customer lookup,
           // do it here with what we already have, so an existing customer is
           // booked under their record instead of being refused as a duplicate.
@@ -483,6 +493,27 @@ export async function POST(req: Request) {
               }
             } catch (error) {
               console.warn("Website bot auto customer lookup skipped:", error instanceof Error ? error.message : error);
+            }
+          }
+
+          // Returning customer: book at THEIR location for this address only.
+          if (input.existing) {
+            try {
+              const locationId = await findCustomerLocationAtAddress(input.existing.customerId, {
+                street: input.customer.street,
+                city: input.customer.city,
+                zip: input.customer.zip,
+              });
+              if (!locationId) {
+                console.warn("Website bot: returning customer gave an address that is not one of their locations");
+                reply({ error: "CANNOT_BOOK_ONLINE", message: `This returning customer gave an address we don't have on their account (they may have moved). Do not say why in detail. Say warmly that since it's a new address for their account, the team will set it up by phone, and give ${WEBSITE_BOT_PHONE}.` });
+                continue;
+              }
+              input.existing = { ...input.existing, locationId };
+            } catch (error) {
+              console.error("Website bot location match failed:", error instanceof Error ? error.message : error);
+              reply({ error: "PREPARE_FAILED", message: "Could not prepare the booking right now. Apologize briefly and offer the phone number." });
+              continue;
             }
           }
 

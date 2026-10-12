@@ -411,6 +411,42 @@ export async function addWebsiteChatNote(jobId: number, text: string): Promise<b
 // Returning customers
 // ---------------------------------------------------------------------------
 
+function streetKey(address: string | undefined | null): string {
+  // "7953 Kyle Ct, Citrus Heights, CA, 95610" -> "7953 kyle"
+  const first = String(address || "").split(",")[0].toLowerCase().replace(/[^a-z0-9 ]/g, " ").trim();
+  const words = first.split(/\s+/).filter(Boolean);
+  return words.slice(0, 2).join(" ");
+}
+
+/**
+ * For a returning customer, find THEIR service location at the address the
+ * visitor typed. Returns null when that address isn't one of their locations
+ * (e.g. they moved), so we never book a rep to an old or internal address.
+ */
+export async function findCustomerLocationAtAddress(
+  customerId: number,
+  address: { street: string; city?: string; zip: string }
+): Promise<number | null> {
+  const wanted = streetKey(address.street);
+  if (!/^\d+ \S+/.test(wanted)) return null;
+  const raw = (await callWebsiteBotTool(
+    "search_customers",
+    { query: address.street, searchType: "address" },
+    60_000
+  )) as { customers?: { customerId?: number; matches?: { locationId?: number | null; serviceAddress?: string | null }[] }[] };
+  for (const customer of raw?.customers || []) {
+    if (customer.customerId !== customerId) continue;
+    for (const match of customer.matches || []) {
+      if (!match.locationId || !match.serviceAddress) continue;
+      if (streetKey(match.serviceAddress) !== wanted) continue;
+      const zip = zipOf(match.serviceAddress.replace(/,\s*$/, ""));
+      if (zip && zip !== address.zip) continue;
+      return match.locationId;
+    }
+  }
+  return null;
+}
+
 /** Server-side facts about a matched customer. customerId never reaches the model. */
 export type ReturningCustomer = {
   customerId: number;

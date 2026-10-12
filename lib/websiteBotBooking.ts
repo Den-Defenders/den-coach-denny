@@ -233,6 +233,8 @@ export type BookingPreview = {
   address: string;
   date: string;
   weekday: string;
+  /** "October 15" */
+  dateLabel: string;
   arrivalWindow: string;
   phoneLast4: string;
   email: string;
@@ -251,6 +253,7 @@ export function previewFor(input: PreparedBookingInput): BookingPreview {
     address,
     date: input.date,
     weekday,
+    dateLabel: new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric", timeZone: "UTC" }).format(d),
     arrivalWindow: input.arrivalWindow,
     phoneLast4: input.customer.phone.slice(-4),
     email: input.customer.email || "",
