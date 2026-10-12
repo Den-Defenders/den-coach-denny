@@ -102,6 +102,20 @@ export function allowCustomerLookup(sessionId: string, ip: string): boolean {
   return okSession && okIp;
 }
 
+/** Text-message codes: a few per chat, a small hourly cap per IP (stops SMS-pumping abuse). */
+export function allowCodeSend(sessionId: string, ip: string): boolean {
+  const okSession = hit(`sms:s:${sessionId}`, Number(process.env.WEBSITE_BOT_MAX_SMS_PER_SESSION || 3), 3_600_000);
+  const okIp = hit(`sms:ip:${ip}`, Number(process.env.WEBSITE_BOT_MAX_SMS_PER_IP || 6), 3_600_000);
+  return okSession && okIp;
+}
+
+/** Code checks: Twilio also locks a code after 5 wrong tries. */
+export function allowCodeCheck(sessionId: string, ip: string): boolean {
+  const okSession = hit(`smschk:s:${sessionId}`, 10, 3_600_000);
+  const okIp = hit(`smschk:ip:${ip}`, 30, 3_600_000);
+  return okSession && okIp;
+}
+
 /** One booking per chat session, and a small daily cap per IP address. */
 export function allowBooking(sessionId: string, ip: string): boolean {
   const okSession = hit(`book:s:${sessionId}`, 1, 24 * 3_600_000);

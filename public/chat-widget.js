@@ -82,6 +82,16 @@
     ".ddc-confirm:disabled{opacity:.6;cursor:default}",
     ".ddc-change{background:#fff;color:#1f3a5f;border:1px solid #cfd6df;border-radius:10px;padding:10px 12px;font:inherit;cursor:pointer}",
     ".ddc-card .ddc-note{font-size:12px;color:#6b7280;margin-top:8px}",
+    ".ddc-card .ddc-consent{font-size:11px;line-height:1.35;color:#6b7280;margin-top:8px}",
+    ".ddc-card .ddc-consent a{color:#1f3a5f}",
+    ".ddc-code-row{display:flex;gap:8px;margin-top:4px}",
+    ".ddc-code{flex:1;min-width:0;border:1px solid #cfd6df;border-radius:10px;padding:10px 12px;font:inherit;font-size:18px;letter-spacing:4px;text-align:center}",
+    ".ddc-code:focus{outline:2px solid #1f3a5f;border-color:#1f3a5f}",
+    ".ddc-status{font-size:13px;margin:8px 0 0;color:#1f3a5f}",
+    ".ddc-status.ddc-err{color:#b42318}",
+    ".ddc-links{display:flex;gap:14px;margin-top:8px;font-size:13px}",
+    ".ddc-link{background:none;border:none;padding:0;color:#1f3a5f;text-decoration:underline;cursor:pointer;font:inherit;font-size:13px}",
+    ".ddc-link:disabled{opacity:.5;cursor:default}",
     "@media (max-width:480px){#ddc-panel{right:8px;left:8px;width:auto;bottom:84px}}"
   ].join("");
 
@@ -183,43 +193,189 @@
       note.textContent = "Nothing is booked until you press Confirm. Everyone involved in the decision should attend.";
       card.appendChild(note);
 
-      change.addEventListener("click", function () {
-        card.parentNode.removeChild(card);
+      var sms = booking.sms && booking.sms.required ? booking.sms : null;
+
+      // Status line (errors, "code sent") shared by both steps.
+      var status = document.createElement("div");
+      status.className = "ddc-status";
+      status.style.display = "none";
+      function setStatus(text, isError) {
+        status.textContent = text || "";
+        status.className = "ddc-status" + (isError ? " ddc-err" : "");
+        status.style.display = text ? "block" : "none";
+      }
+
+      function goChange() {
+        card.parentNode && card.parentNode.removeChild(card);
         input.value = "I'd like to change something: ";
         input.focus();
-      });
+      }
+      change.addEventListener("click", goChange);
 
-      confirm.addEventListener("click", function () {
-        if (busy) return;
-        busy = true;
-        confirm.disabled = true; change.disabled = true;
-        confirm.textContent = "Booking...";
-        send.disabled = true;
-
-        fetch(apiUrl, {
+      function post(body) {
+        return fetch(apiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "confirm", sessionId: sessionId, mode: mode, token: booking.token, messages: history.slice(-80) })
-        })
-          .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+          body: JSON.stringify(body)
+        }).then(function (res) {
+          return res.json().then(function (data) { return { ok: res.ok, data: data || {} }; })
+            .catch(function () { return { ok: false, data: {} }; });
+        });
+      }
+
+      // Final step: book it (with the text-code proof when required).
+      function doConfirm(proof, button, resetLabel) {
+        busy = true;
+        send.disabled = true;
+        button.disabled = true;
+        button.textContent = "Booking...";
+        var body = { action: "confirm", sessionId: sessionId, mode: mode, token: booking.token, messages: history.slice(-80) };
+        if (proof) body.proof = proof;
+        return post(body)
           .then(function (r) {
-            var text = (r.data && (r.data.reply || r.data.error)) || "Sorry, something went wrong. Please give us a call.";
-            if (r.data && r.data.booked) {
-              card.parentNode.removeChild(card);
+            var text = r.data.reply || r.data.error || "Sorry, something went wrong. Please give us a call.";
+            if (r.data.booked) {
+              card.parentNode && card.parentNode.removeChild(card);
+              history.push({ role: "assistant", content: text });
+              addMessage("assistant", text);
             } else {
-              confirm.textContent = "Confirm booking";
-              confirm.disabled = false; change.disabled = false;
+              button.textContent = resetLabel;
+              button.disabled = false;
+              history.push({ role: "assistant", content: text });
+              addMessage("assistant", text);
             }
-            history.push({ role: "assistant", content: text });
-            addMessage("assistant", text);
           })
           .catch(function () {
-            confirm.textContent = "Confirm booking";
-            confirm.disabled = false; change.disabled = false;
+            button.textContent = resetLabel;
+            button.disabled = false;
             addMessage("assistant", "Sorry, I couldn't reach our server. Please try again in a moment.");
           })
           .then(function () { busy = false; send.disabled = false; });
-      });
+      }
+
+      if (!sms) {
+        confirm.addEventListener("click", function () {
+          if (busy) return;
+          change.disabled = true;
+          doConfirm(null, confirm, "Confirm booking").then(function () { change.disabled = false; });
+        });
+      } else {
+        // Text-code flow: "Text me a code" -> enter code -> "Verify & book".
+        confirm.textContent = "Text me a code";
+        note.textContent = "We'll text a code to the mobile ending in " + (p.phoneLast4 || "----") +
+          ". Nothing is booked until you enter it. Everyone involved in the decision should attend.";
+
+        var consent = document.createElement("div");
+        consent.className = "ddc-consent";
+        consent.appendChild(document.createTextNode(sms.text || ""));
+        var links = [];
+        if (sms.termsUrl) links.push(["Terms", sms.termsUrl]);
+        if (sms.privacyUrl) links.push(["Privacy Policy", sms.privacyUrl]);
+        links.forEach(function (l, i) {
+          consent.appendChild(document.createTextNode(i === 0 ? " " : " | "));
+          var a = document.createElement("a");
+          a.href = l[1]; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = l[0];
+          consent.appendChild(a);
+        });
+
+        var codeArea = document.createElement("div");
+        codeArea.style.display = "none";
+        var codeRow = document.createElement("div");
+        codeRow.className = "ddc-code-row";
+        var codeInput = document.createElement("input");
+        codeInput.className = "ddc-code";
+        codeInput.type = "text";
+        codeInput.inputMode = "numeric";
+        codeInput.autocomplete = "one-time-code";
+        codeInput.maxLength = 8;
+        codeInput.placeholder = "------";
+        codeInput.setAttribute("aria-label", "Text message code");
+        var verify = document.createElement("button");
+        verify.type = "button"; verify.className = "ddc-confirm"; verify.textContent = "Verify & book";
+        codeRow.appendChild(codeInput); codeRow.appendChild(verify);
+        var linkRow = document.createElement("div");
+        linkRow.className = "ddc-links";
+        var resend = document.createElement("button");
+        resend.type = "button"; resend.className = "ddc-link"; resend.textContent = "Text me a new code";
+        var change2 = document.createElement("button");
+        change2.type = "button"; change2.className = "ddc-link"; change2.textContent = "Change details";
+        linkRow.appendChild(resend); linkRow.appendChild(change2);
+        codeArea.appendChild(codeRow); codeArea.appendChild(linkRow);
+        change2.addEventListener("click", goChange);
+
+        var proof = null; // kept if booking needs a retry after the code passed
+
+        function sendCode(button, label) {
+          if (busy) return;
+          busy = true;
+          button.disabled = true;
+          var oldText = button.textContent;
+          button.textContent = "Sending...";
+          setStatus("");
+          post({ action: "send_code", sessionId: sessionId, mode: mode, token: booking.token })
+            .then(function (r) {
+              if (r.data.sent) {
+                actions.style.display = "none";
+                consent.style.display = "none";
+                codeArea.style.display = "block";
+                setStatus("Code sent to the mobile ending in " + (r.data.phoneLast4 || p.phoneLast4 || "----") + ". It can take a minute to arrive.", false);
+                codeInput.value = "";
+                setTimeout(function () { codeInput.focus(); }, 50);
+              } else {
+                setStatus(r.data.error || "We couldn't send the text. Please try again.", true);
+              }
+            })
+            .catch(function () { setStatus("Sorry, I couldn't reach our server. Please try again.", true); })
+            .then(function () {
+              busy = false;
+              button.disabled = false;
+              button.textContent = label || oldText;
+            });
+        }
+
+        confirm.addEventListener("click", function () { sendCode(confirm, "Text me a code"); });
+        resend.addEventListener("click", function () { sendCode(resend, "Text me a new code"); });
+
+        function verifyAndBook() {
+          if (busy) return;
+          if (proof) { doConfirm(proof, verify, "Verify & book"); return; }
+          var code = (codeInput.value || "").replace(/\D/g, "");
+          if (code.length < 4) { setStatus("Please enter the code from the text.", true); codeInput.focus(); return; }
+          busy = true;
+          verify.disabled = true; resend.disabled = true;
+          verify.textContent = "Checking...";
+          setStatus("");
+          post({ action: "check_code", sessionId: sessionId, mode: mode, token: booking.token, code: code })
+            .then(function (r) {
+              busy = false;
+              if (r.data.verified && r.data.proof) {
+                proof = r.data.proof;
+                codeInput.disabled = true;
+                setStatus("Number confirmed.", false);
+                return doConfirm(proof, verify, "Book now");
+              }
+              verify.textContent = "Verify & book";
+              verify.disabled = false;
+              setStatus(r.data.error || "That code didn't work. Please try again.", true);
+              codeInput.select();
+            })
+            .catch(function () {
+              busy = false;
+              verify.textContent = "Verify & book";
+              verify.disabled = false;
+              setStatus("Sorry, I couldn't reach our server. Please try again.", true);
+            })
+            .then(function () { resend.disabled = false; });
+        }
+        verify.addEventListener("click", verifyAndBook);
+        codeInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); verifyAndBook(); }
+        });
+
+        card.appendChild(codeArea);
+        card.appendChild(consent);
+      }
+      card.appendChild(status);
 
       log.appendChild(card);
       log.scrollTop = log.scrollHeight;

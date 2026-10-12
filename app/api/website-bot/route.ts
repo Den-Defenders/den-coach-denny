@@ -13,12 +13,18 @@
  *     preview + signed ticket. Booking only happens on the separate
  *     {action:"confirm"} request the widget sends when the visitor clicks
  *     Confirm, and only when WEBSITE_BOT_BOOKING_ENABLED=true.
+ *   - Text-message check (WEBSITE_BOT_SMS_VERIFY_ENABLED=true): before the
+ *     confirm, the widget asks for {action:"send_code"} and
+ *     {action:"check_code"}; Twilio Verify texts the phone number inside the
+ *     signed ticket, and confirm then requires the signed proof.
  */
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { websiteBotSystemPrompt } from "@/app/lib/websiteBotPrompt";
 import {
   allowBooking,
+  allowCodeCheck,
+  allowCodeSend,
   allowCustomerLookup,
   allowLookup,
   allowMessage,
@@ -46,6 +52,14 @@ import {
   validateBookingInput,
   verifyBookingTicket,
 } from "@/lib/websiteBotBooking";
+import {
+  checkVerificationCode,
+  sendVerificationCode,
+  signVerifiedProof,
+  smsConsent,
+  smsVerifyEnabled,
+  verifyVerifiedProof,
+} from "@/lib/websiteBotSms";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -185,6 +199,13 @@ async function handleConfirm(body: Record<string, unknown>, origin: string | nul
   if (!ticket) {
     return json({ error: "That booking preview has expired. Ask Denny to prepare it again." }, 400, origin);
   }
+  const token = body.token as string;
+  if (smsVerifyEnabled()) {
+    const proof = typeof body.proof === "string" ? body.proof : "";
+    if (!verifyVerifiedProof(proof, token, ticket.customer.phone)) {
+      return json({ booked: false, needCode: true, error: "Please confirm your mobile number with the text code first." }, 400, origin);
+    }
+  }
   if (!allowBooking(ticket.sessionId, ip)) {
     return json({ error: "A booking was already made from this chat. Please call us to make changes." }, 429, origin);
   }
@@ -234,6 +255,56 @@ async function handleConfirm(body: Record<string, unknown>, origin: string | nul
 }
 
 // ---------------------------------------------------------------------------
+// Text-message code (Twilio Verify) for the preview card
+// ---------------------------------------------------------------------------
+
+const CALL_US = `Please give us a call at 800-992-9938 and the team will lock in your time.`;
+
+async function handleSendCode(body: Record<string, unknown>, origin: string | null, ip: string) {
+  if (!smsVerifyEnabled()) return json({ error: "Text verification is not turned on." }, 400, origin);
+  const ticket = verifyBookingTicket(typeof body.token === "string" ? body.token : "");
+  if (!ticket) return json({ error: "That booking preview has expired. Ask Denny to prepare it again." }, 400, origin);
+  if (!allowCodeSend(ticket.sessionId, ip)) {
+    return json({ error: `We've already sent a few codes. ${CALL_US}` }, 429, origin);
+  }
+  const sent = await sendVerificationCode(ticket.customer.phone);
+  if (sent.ok) {
+    return json({ sent: true, phoneLast4: ticket.customer.phone.slice(-4) }, 200, origin);
+  }
+  const messages: Record<string, string> = {
+    INVALID_NUMBER: "We couldn't text that number. Please press Change and give us a mobile (cell) number that can receive texts.",
+    TOO_MANY: `Too many codes were requested for that number. Please wait 10 minutes, or ${CALL_US.charAt(0).toLowerCase()}${CALL_US.slice(1)}`,
+    BLOCKED: `We couldn't send a code to that number. ${CALL_US}`,
+    NOT_CONFIGURED: `Online booking is having a hiccup. ${CALL_US}`,
+    FAILED: `We couldn't send the text just now. Please try again in a minute, or ${CALL_US.charAt(0).toLowerCase()}${CALL_US.slice(1)}`,
+  };
+  if (sent.reason === "NOT_CONFIGURED") console.error("Website bot: SMS verify is on but Twilio settings are missing.");
+  return json({ sent: false, error: messages[sent.reason] || messages.FAILED }, 200, origin);
+}
+
+async function handleCheckCode(body: Record<string, unknown>, origin: string | null, ip: string) {
+  if (!smsVerifyEnabled()) return json({ error: "Text verification is not turned on." }, 400, origin);
+  const token = typeof body.token === "string" ? body.token : "";
+  const ticket = verifyBookingTicket(token);
+  if (!ticket) return json({ error: "That booking preview has expired. Ask Denny to prepare it again." }, 400, origin);
+  const code = typeof body.code === "string" ? body.code.replace(/\D/g, "") : "";
+  if (!/^\d{4,10}$/.test(code)) return json({ verified: false, error: "Please enter the 6-digit code from the text." }, 200, origin);
+  if (!allowCodeCheck(ticket.sessionId, ip)) return json({ verified: false, error: `Too many tries. ${CALL_US}` }, 429, origin);
+
+  const checked = await checkVerificationCode(ticket.customer.phone, code);
+  if (checked.ok) {
+    return json({ verified: true, proof: signVerifiedProof(token, ticket.customer.phone) }, 200, origin);
+  }
+  const messages: Record<string, string> = {
+    WRONG: "That code doesn't match. Please check the text and try again.",
+    EXPIRED: "That code has expired or was tried too many times. Tap \"Text me a new code\" to get a fresh one.",
+    NOT_CONFIGURED: `Online booking is having a hiccup. ${CALL_US}`,
+    FAILED: "We couldn't check the code just now. Please try again in a moment.",
+  };
+  return json({ verified: false, error: messages[checked.reason] || messages.FAILED }, 200, origin);
+}
+
+// ---------------------------------------------------------------------------
 // Chat
 // ---------------------------------------------------------------------------
 
@@ -251,6 +322,17 @@ export async function POST(req: Request) {
   const sessionId = typeof body.sessionId === "string" && /^[a-z0-9]{8,64}$/i.test(body.sessionId) ? body.sessionId : "anon";
   const testMode = body.mode === "test";
   const ip = clientIp(req.headers);
+
+  if (body.action === "send_code" || body.action === "check_code") {
+    try {
+      return body.action === "send_code"
+        ? await handleSendCode(body, origin, ip)
+        : await handleCheckCode(body, origin, ip);
+    } catch (error) {
+      console.error(`Website bot ${body.action} crashed:`, error instanceof Error ? error.message : error);
+      return json({ error: "Sorry, something went wrong. Please give us a call at 800-992-9938." }, 500, origin);
+    }
+  }
 
   if (body.action === "confirm") {
     try {
@@ -288,7 +370,7 @@ export async function POST(req: Request) {
     : [FIND_OPEN_TIMES_TOOL, LOOKUP_CUSTOMER_TOOL];
 
   // Set when prepare_booking succeeds; returned to the widget with the reply.
-  let bookingCard: { token: string; preview: ReturnType<typeof previewFor> } | null = null;
+  let bookingCard: { token: string; preview: ReturnType<typeof previewFor>; sms?: ReturnType<typeof smsConsent> } | null = null;
 
   try {
     for (let round = 0; round < 5; round++) {
@@ -425,14 +507,18 @@ export async function POST(req: Request) {
             }
             const preview = previewFor(input);
             const token = signBookingTicket({ ...input, slot, sessionId });
-            bookingCard = { token, preview };
+            const sms = smsConsent();
+            bookingCard = sms ? { token, preview, sms } : { token, preview };
+            const pressWhat = sms
+              ? "check the details, then tap \"Text me a code\" and enter the code we text to their mobile to finish booking"
+              : "check the details and press Confirm to book";
             reply({
               status: "PREVIEW_READY",
               preview,
               returningCustomer: Boolean(input.existing),
               message: autoMatched
-                ? `This visitor is an existing customer (${input.existing?.firstName || "returning"}); the booking will go under their record. Welcome them back in one short line, then tell them to check the details and press Confirm. Do not say it is booked yet.`
-                : "A preview with a Confirm button is now showing to the visitor. Briefly tell them to check the details and press Confirm to book. Do not say it is booked yet.",
+                ? `This visitor is an existing customer (${input.existing?.firstName || "returning"}); the booking will go under their record. Welcome them back in one short line, then tell them to ${pressWhat}. Do not say it is booked yet.`
+                : `A preview card is now showing to the visitor. Briefly tell them to ${pressWhat}. Do not say it is booked yet.`,
             });
           } catch (error) {
             console.error("Website bot prepare_booking failed:", error instanceof Error ? error.message : error);
