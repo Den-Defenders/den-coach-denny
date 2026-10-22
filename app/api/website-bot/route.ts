@@ -450,7 +450,7 @@ export async function POST(req: Request) {
               products: found.products,
               lastInstall: found.lastCompleted || null,
               customerRef: signCustomerRef(found),
-              message: "Welcome them back by first name and mention what we installed (if any). Pass customerRef to prepare_booking. Skip 'how did you hear about us' (use 'Existing customer') and 'other options' (use 'Returning customer'). For rescheduling or canceling an existing appointment, ask them to call the office.",
+              message: "If you have NOT already welcomed them back in this chat, welcome them back by first name and mention what we installed (if any); otherwise do not repeat it. The account can be shared (e.g. a couple): if the visitor told you their own name, use THAT name, not firstName. Pass customerRef to prepare_booking. Skip 'how did you hear about us' (use 'Existing customer') and 'other options' (use 'Returning customer'). For rescheduling or canceling an existing appointment, ask them to call the office.",
             });
           } catch (error) {
             console.error("Website bot customer lookup failed:", error instanceof Error ? error.message : error);
@@ -555,7 +555,7 @@ export async function POST(req: Request) {
               preview,
               returningCustomer: Boolean(input.existing),
               message: autoMatched
-                ? `This visitor is an existing customer (${input.existing?.firstName || "returning"}); the booking will go under their record. Welcome them back in one short line, then tell them to ${pressWhat}. Do not say it is booked yet.`
+                ? `This visitor is an existing customer; the booking will go under their record. If you haven't already welcomed them back, do it in one short line using the name they gave you (${input.customer.name.split(" ")[0]}), then tell them to ${pressWhat}. Do not say it is booked yet.`
                 : `A preview card is now showing to the visitor. Briefly tell them to ${pressWhat}. Do not say it is booked yet.`,
             });
           } catch (error) {

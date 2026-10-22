@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { VOICE_ROLES } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { isFieldVoiceToolName, runFieldVoiceTool } from "@/lib/fieldVoiceTools";
 import { McpToolError, openMcpForCurrentUser, type McpClient } from "@/lib/mcpJson";
@@ -14,7 +15,7 @@ export const maxDuration = 300;
  */
 export async function POST(req: Request) {
   const access = await getCurrentAccess();
-  if (!access || !["owner", "sales_rep", "installer"].includes(access.role)) {
+  if (!access || !VOICE_ROLES.includes(access.role)) {
     return NextResponse.json({ error: "Not allowed." }, { status: 403 });
   }
 

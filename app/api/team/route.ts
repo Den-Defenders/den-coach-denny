@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { clearAccessCache } from "@/lib/access";
+import { OWNER_ONLY_ROLES, canManageTeam, clearAccessCache, isFieldRole } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import {
+  findTeamMember,
   isTeamRole,
   isTeamTimeZone,
   listTeamMembers,
@@ -16,13 +17,14 @@ export const dynamic = "force-dynamic";
 
 const NO_STORE = { "Cache-Control": "private, no-store" };
 
-async function requireOwner() {
+/** Owners and managers may use the Team page. */
+async function requireTeamManager() {
   const access = await getCurrentAccess();
-  return access?.role === "owner" ? access : null;
+  return access && canManageTeam(access.role) ? access : null;
 }
 
 export async function GET() {
-  if (!await requireOwner()) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
+  if (!await requireTeamManager()) return NextResponse.json({ error: "Owners and managers only." }, { status: 403, headers: NO_STORE });
   if (!teamDatabaseConfigured()) {
     return NextResponse.json({ error: "Team database is not configured (set OWNER_DATABASE_URL or TEAM_DATABASE_URL)." }, { status: 500, headers: NO_STORE });
   }
@@ -54,8 +56,8 @@ function parseInput(body: unknown): { input?: TeamMemberInput; error?: string } 
     if (!Number.isSafeInteger(id) || id <= 0) return { error: "ServiceTitan technician ID is not valid." };
     stTechnicianId = id;
   }
-  if ((raw.role === "sales_rep" || raw.role === "installer") && !stTechnicianId) {
-    return { error: "Sales reps and installers must be linked to their ServiceTitan technician." };
+  if (isFieldRole(raw.role) && !stTechnicianId) {
+    return { error: "Sales reps, installers and team leads must be linked to their ServiceTitan technician." };
   }
 
   const stTechnicianName = typeof raw.stTechnicianName === "string" && raw.stTechnicianName.trim()
@@ -76,8 +78,8 @@ function parseInput(body: unknown): { input?: TeamMemberInput; error?: string } 
 }
 
 export async function POST(req: Request) {
-  const access = await requireOwner();
-  if (!access) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
+  const access = await requireTeamManager();
+  if (!access) return NextResponse.json({ error: "Owners and managers only." }, { status: 403, headers: NO_STORE });
   if (!teamDatabaseConfigured()) {
     return NextResponse.json({ error: "Team database is not configured." }, { status: 500, headers: NO_STORE });
   }
@@ -86,8 +88,28 @@ export async function POST(req: Request) {
   if (!input) return NextResponse.json({ error }, { status: 400, headers: NO_STORE });
 
   // Do not let an owner lock themselves out from this page.
-  if (access.email && input.email === access.email && (input.role !== "owner" || !input.active)) {
+  if (access.role === "owner" && access.email && input.email === access.email && (input.role !== "owner" || !input.active)) {
     return NextResponse.json({ error: "You can't remove your own owner access." }, { status: 400, headers: NO_STORE });
+  }
+
+  // Managers can manage everyone EXCEPT owners and managers (themselves
+  // included), so nobody can promote their way into the Owner Dashboard.
+  if (access.role !== "owner") {
+    if (OWNER_ONLY_ROLES.includes(input.role)) {
+      return NextResponse.json({ error: "Only an owner can make someone an owner or manager." }, { status: 403, headers: NO_STORE });
+    }
+    if (access.email && input.email === access.email) {
+      return NextResponse.json({ error: "Only an owner can change your own access." }, { status: 403, headers: NO_STORE });
+    }
+    try {
+      const existing = await findTeamMember(input.email);
+      if (existing && OWNER_ONLY_ROLES.includes(existing.role)) {
+        return NextResponse.json({ error: "Only an owner can change an owner or manager." }, { status: 403, headers: NO_STORE });
+      }
+    } catch (lookupError) {
+      console.error("Team lookup before save failed:", lookupError);
+      return NextResponse.json({ error: "Could not check this team member. Nothing was saved." }, { status: 500, headers: NO_STORE });
+    }
   }
 
   try {

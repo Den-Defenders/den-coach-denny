@@ -12,7 +12,7 @@ const openai = new OpenAI({
 
 export async function POST(req: Request) {
   try {
-    if (!await currentUserHasRole(["owner", "csr"])) {
+    if (!await currentUserHasRole(["owner", "manager", "csr"])) {
       return NextResponse.json({ error: "Your Den Coach Denny role does not include this feature." }, { status: 403 });
     }
 

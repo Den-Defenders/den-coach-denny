@@ -1,15 +1,17 @@
 import { notFound } from "next/navigation";
 import DenShell from "@/app/components/DenShell";
-import { canViewOwner } from "@/lib/ownerAccess";
+import { canManageTeam } from "@/lib/access";
+import { getCurrentAccess } from "@/lib/currentAccess";
 import TeamManager from "./TeamManager";
 
 export const dynamic = "force-dynamic";
 
 export default async function TeamPage() {
-  if (!await canViewOwner()) notFound();
+  const access = await getCurrentAccess();
+  if (!access || !canManageTeam(access.role)) notFound();
   return (
     <DenShell title="Team" subtitle="Who can use Den Coach Denny" theme="team">
-      <TeamManager />
+      <TeamManager viewerRole={access.role === "owner" ? "owner" : "manager"} />
     </DenShell>
   );
 }

@@ -3,10 +3,17 @@
  *
  * One place that decides what a signed-in Den Coach Denny user may see.
  *
- *   owner      - everything, plus the Team page and the Owner Dashboard
- *   csr        - Home, Chat, Let Denny Listen, Smart Scheduler (today's CSR app)
- *   sales_rep  - Home, Smart Scheduler, Talk with Denny (voice)
- *   installer  - Home, Smart Scheduler, Talk with Denny (voice)
+ *   owner          - everything, plus the Team page and the Owner Dashboard
+ *   manager        - everything EXCEPT the Owner Dashboard. Can use the Team
+ *                    page but cannot create or change owners or managers.
+ *                    In Talk with Denny can ask about any technician.
+ *   csr            - Home, Chat, Let Denny Listen, Smart Scheduler (today's CSR app)
+ *   sales_rep      - Home, Smart Scheduler, Talk with Denny (voice), own schedule only
+ *   installer      - Home, Smart Scheduler, Talk with Denny (voice), own schedule only
+ *   sales_lead     - like a sales rep, but can ask about (and add notes to jobs
+ *                    of) any technician with the ServiceTitan "Sales" position
+ *   installer_lead - like an installer, but can ask about (and add notes to
+ *                    jobs of) any technician with the ServiceTitan "Installer" position
  *
  * Roles come from the Neon table den_team_members (managed on the /team page).
  * The Auth0 "owner" role claim and OWNER_DASHBOARD_EMAILS still make someone an
@@ -39,10 +46,36 @@ export type DennyAccess = {
   needsEmailVerification?: boolean;
 };
 
-export const FIELD_ROLES: readonly TeamRole[] = ["sales_rep", "installer"];
+export const FIELD_ROLES: readonly TeamRole[] = ["sales_rep", "installer", "sales_lead", "installer_lead"];
 
+/** Field people: their home is Talk with Denny and they must be linked to a ServiceTitan technician. */
 export function isFieldRole(role: AccessRole): boolean {
-  return role === "sales_rep" || role === "installer";
+  return (FIELD_ROLES as readonly string[]).includes(role);
+}
+
+/** Roles that may use Talk with Coach Denny (voice). */
+export const VOICE_ROLES: readonly AccessRole[] = ["owner", "manager", ...FIELD_ROLES];
+
+/** Owners and managers can ask Denny about ANY technician and add notes to any job. */
+export function seesAllTechnicians(role: AccessRole): boolean {
+  return role === "owner" || role === "manager";
+}
+
+/** ServiceTitan technician positions that make up a team lead's crew. */
+export type CrewPosition = "Installer" | "Sales";
+
+export function crewPositionFor(role: AccessRole): CrewPosition | null {
+  if (role === "installer_lead") return "Installer";
+  if (role === "sales_lead") return "Sales";
+  return null;
+}
+
+/** Roles a manager may NOT grant or edit on the Team page (only owners can). */
+export const OWNER_ONLY_ROLES: readonly TeamRole[] = ["owner", "manager"];
+
+/** Who may open the Team page and its APIs. */
+export function canManageTeam(role: AccessRole): boolean {
+  return role === "owner" || role === "manager";
 }
 
 function claimRoles(source: unknown): string[] {
@@ -143,7 +176,7 @@ export async function resolveAccess(session: SessionData | null): Promise<DennyA
 // Route policy
 // ---------------------------------------------------------------------------
 
-const STAFF: readonly AccessRole[] = ["owner", "csr", "sales_rep", "installer"];
+const STAFF: readonly AccessRole[] = ["owner", "manager", "csr", ...FIELD_ROLES];
 
 type Rule = { prefix: string; exact?: boolean; roles: readonly AccessRole[] };
 
@@ -153,13 +186,14 @@ const ROUTE_RULES: Rule[] = [
   { prefix: "/api/owner/access", roles: [...STAFF, "disabled", "unavailable"] },
   { prefix: "/no-access", roles: [...STAFF, "disabled", "unavailable"] },
 
-  { prefix: "/team", roles: ["owner"] },
-  { prefix: "/api/team", roles: ["owner"] },
+  { prefix: "/team", roles: ["owner", "manager"] },
+  { prefix: "/api/team", roles: ["owner", "manager"] },
+  // Owner Dashboard: owners only. Managers are deliberately NOT here.
   { prefix: "/owner", roles: ["owner"] },
   { prefix: "/api/owner", roles: ["owner"] },
 
-  { prefix: "/talk", roles: ["owner", "sales_rep", "installer"] },
-  { prefix: "/api/field-voice", roles: ["owner", "sales_rep", "installer"] },
+  { prefix: "/talk", roles: VOICE_ROLES },
+  { prefix: "/api/field-voice", roles: VOICE_ROLES },
 
   { prefix: "/schedule", roles: STAFF },
   { prefix: "/api/schedule", roles: STAFF },
@@ -170,8 +204,8 @@ const ROUTE_RULES: Rule[] = [
 ];
 
 // Anything not listed above (Chat, Let Denny Listen, their APIs, and any page
-// added later) is CSR/owner only until someone deliberately opens it up.
-const DEFAULT_ROLES: readonly AccessRole[] = ["owner", "csr"];
+// added later) is owner/manager/CSR only until someone deliberately opens it up.
+const DEFAULT_ROLES: readonly AccessRole[] = ["owner", "manager", "csr"];
 
 function matches(rule: Rule, pathname: string): boolean {
   if (rule.exact) return pathname === rule.prefix;
@@ -208,10 +242,14 @@ export function navFor(role: AccessRole): NavKey[] {
   switch (role) {
     case "owner":
       return ["home", "chat", "listen", "schedule", "talk", "owner", "team"];
+    case "manager":
+      return ["home", "chat", "listen", "schedule", "talk", "team"];
     case "csr":
       return ["home", "chat", "listen", "schedule"];
     case "sales_rep":
     case "installer":
+    case "sales_lead":
+    case "installer_lead":
       return ["home", "schedule", "talk"];
     default:
       return [];
