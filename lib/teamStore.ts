@@ -1,15 +1,24 @@
 /**
  * lib/teamStore.ts
  *
- * Neon storage for Den Coach Denny team members: who is a CSR, sales rep,
- * installer or owner, and which ServiceTitan technician each login belongs to.
+ * Neon storage for Den Coach Denny team members: who is an owner, manager, CSR,
+ * sales rep, installer or team lead, and which ServiceTitan technician each
+ * login belongs to.
  *
  * Login itself stays in Auth0. This table only answers "what is this signed-in
  * email allowed to do, and who are they in ServiceTitan?".
  */
 import { neon } from "@neondatabase/serverless";
 
-export const TEAM_ROLES = ["owner", "csr", "sales_rep", "installer"] as const;
+export const TEAM_ROLES = [
+  "owner",
+  "manager",
+  "csr",
+  "sales_rep",
+  "installer",
+  "sales_lead",
+  "installer_lead",
+] as const;
 export type TeamRole = (typeof TEAM_ROLES)[number];
 
 export const TEAM_TIME_ZONES = [
@@ -71,7 +80,8 @@ async function ensureTable(sql: SqlClient) {
       await sql`CREATE TABLE IF NOT EXISTS den_team_members (
         email TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
-        role TEXT NOT NULL CHECK (role IN ('owner', 'csr', 'sales_rep', 'installer')),
+        role TEXT NOT NULL CONSTRAINT den_team_members_role_check
+          CHECK (role IN ('owner', 'manager', 'csr', 'sales_rep', 'installer', 'sales_lead', 'installer_lead')),
         st_technician_id BIGINT,
         st_technician_name TEXT,
         time_zone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
@@ -80,12 +90,36 @@ async function ensureTable(sql: SqlClient) {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_by TEXT NOT NULL
       )`;
+      await upgradeRoleCheck(sql);
     })().catch((error) => {
       tableReady = null;
       throw error;
     });
   }
   await tableReady;
+}
+
+/**
+ * Tables created before the manager / team lead roles existed have a CHECK
+ * that only allows the original four roles. Widen it once. Safe to run on
+ * every cold start: it does nothing when the check already has the new roles.
+ */
+async function upgradeRoleCheck(sql: SqlClient) {
+  const rows = (await sql`SELECT pg_get_constraintdef(oid) AS def
+    FROM pg_constraint
+    WHERE conrelid = 'den_team_members'::regclass AND contype = 'c' AND conname = 'den_team_members_role_check'`) as { def?: string }[];
+  if (rows.length && String(rows[0].def || "").includes("installer_lead")) return;
+  try {
+    await sql.transaction([
+      sql`ALTER TABLE den_team_members DROP CONSTRAINT IF EXISTS den_team_members_role_check`,
+      sql`ALTER TABLE den_team_members ADD CONSTRAINT den_team_members_role_check
+        CHECK (role IN ('owner', 'manager', 'csr', 'sales_rep', 'installer', 'sales_lead', 'installer_lead'))`,
+    ]);
+  } catch (error) {
+    // Another server instance upgraded it at the same moment.
+    const code = (error as { code?: string })?.code;
+    if (code !== "42710") throw error;
+  }
 }
 
 export function normalizeEmail(email: string): string {

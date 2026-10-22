@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { VOICE_ROLES, crewPositionFor, seesAllTechnicians } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { FIELD_VOICE_TOOL_DEFINITIONS, todayFor } from "@/lib/fieldVoiceTools";
 import { DENNY_VOICE } from "@/lib/dennyVoice";
@@ -8,8 +9,11 @@ export const dynamic = "force-dynamic";
 
 const ROLE_LABELS: Record<string, string> = {
   owner: "owner",
+  manager: "manager",
   sales_rep: "sales rep",
   installer: "installer",
+  sales_lead: "sales team lead",
+  installer_lead: "installer team lead",
 };
 
 function weekdayLabel(isoDate: string) {
@@ -20,8 +24,8 @@ function weekdayLabel(isoDate: string) {
 
 export async function POST() {
   const access = await getCurrentAccess();
-  if (!access || !["owner", "sales_rep", "installer"].includes(access.role)) {
-    return NextResponse.json({ error: "Talk with Coach Denny is for installers, sales reps and owners." }, { status: 403 });
+  if (!access || !VOICE_ROLES.includes(access.role)) {
+    return NextResponse.json({ error: "Talk with Coach Denny is for installers, sales reps, team leads, managers and owners." }, { status: 403 });
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
@@ -31,6 +35,22 @@ export async function POST() {
   const today = todayFor(timeZone);
   const linked = Boolean(access.member?.stTechnicianId);
   const firstName = (access.displayName || "").trim().split(/\s+/)[0] || "there";
+  const seesAll = seesAllTechnicians(access.role);
+  const crewPosition = crewPositionFor(access.role);
+  const crewLabel = crewPosition === "Installer" ? "installers" : "sales reps";
+
+  const otherPeopleRule = seesAll
+    ? `- This person is ${access.role === "owner" ? "an owner" : "a manager"}, so they may ask about any technician's schedule or next customer by name (pass technician_name), and add notes to any job.`
+    : crewPosition
+      ? `- This person is a team lead over the ${crewLabel}. They may ask about any of the ${crewLabel}' schedules or next customers by name (pass technician_name), and add notes to jobs on those ${crewLabel}' schedules.
+- If they ask about someone who isn't one of the ${crewLabel}, the tool will say so; explain kindly that they can only pull up their own crew.`
+      : "- If they ask for someone else's schedule, explain kindly that you can only pull up their own schedule. Customer lookups by address are fine.";
+
+  const noteRule = seesAll
+    ? ""
+    : crewPosition
+      ? `- They can add notes to jobs on their own schedule or on any of the ${crewLabel}' schedules (last two weeks to next two weeks). "The job I'm at" always means their own schedule. If the tool says a job isn't on their crew's schedule, tell them the office can add it.`
+      : "- They can only add notes to jobs on their own schedule. If the tool says a job isn't theirs, tell them the office can add it.";
 
   const instructions = `
 Your name is Denny. You're the voice assistant for the Den Defenders field team (security screen doors).
@@ -51,19 +71,17 @@ VOICE AND PERSONALITY
 - If they sound busy or like they're driving, be extra brief.
 ${linked
     ? `Their ServiceTitan technician record is "${access.member?.stTechnicianName || access.displayName}".`
-    : "Their login is not linked to a ServiceTitan technician, so 'my schedule' questions need an owner to link them on the Team page."}
+    : "Their login is not linked to a ServiceTitan technician, so 'my schedule' questions need an owner or manager to link them on the Team page."}
 Today is ${weekdayLabel(today)} (${today}). Their time zone is ${timeZone}; every time the tools return is already in that time zone.
 
 WHO YOU ARE TALKING TO
 - You already know who this is from their login. If they say "this is <name>", greet them; it does not change whose schedule you read.
 - "My schedule" and "my next customer" always mean the signed-in person.
-${access.role === "owner"
-    ? "- This person is an owner, so they may ask about another technician's schedule by name (pass technician_name)."
-    : "- If they ask for someone else's schedule, explain kindly that you can only pull up their own schedule. Customer lookups by address are fine."}
+${otherPeopleRule}
 
 WHAT YOU CAN DO
-- get_my_schedule: their schedule for today, tomorrow, or a date (convert weekday names to YYYY-MM-DD using today's date).
-- get_next_customer: their next customer appointment plus a full customer 360.
+- get_my_schedule: their schedule for today, tomorrow, or a date (convert weekday names to YYYY-MM-DD using today's date). Pass technician_name only when they ask about someone else and the rules above allow it.
+- get_next_customer: their next customer appointment plus a full customer 360 (or another technician's, by technician_name, when allowed).
 - get_customer_360: a full 360 for an address, customer name, or phone number.
 - get_customer_communications: everything said with or about the customer: call recordings (transcribed), texts both ways (ServiceTitan and Hatch), and Slack messages from public channels. Use it for "what did they say", calls, texts, Slack, or any detail the 360 doesn't answer. Only ask for the sources the question needs. If calls need transcribing it can take up to a minute, so tell them "give me a minute, I'm listening to the calls."
 - find_sales_appointment_options: the next times a sales rep can come out to a ZIP code, so they can tell a customer.
@@ -86,7 +104,7 @@ ADDING A NOTE (follow exactly)
 3. Read back: the customer name, the address, and the note. Ask "Should I add it?"
 4. Only if they clearly say yes, call add_job_note again with the same note_text and job details, confirmed=true, and the confirmation_code. If they change anything, go back to step 2.
 5. Tell them whether it was added. Never say a note was added unless the tool says written and verified.
-${access.role === "owner" ? "" : "- They can only add notes to jobs on their own schedule. If the tool says a job isn't theirs, tell them the office can add it."}
+${noteRule}
 - Sales options are recommendations only; the office still has to book them.
 `.trim();
 

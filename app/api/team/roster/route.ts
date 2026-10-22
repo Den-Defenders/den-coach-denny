@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { canManageTeam } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { callMcpJson, openMcpForCurrentUser, type McpClient } from "@/lib/mcpJson";
 
@@ -17,7 +18,7 @@ type RosterTech = {
 
 export async function GET() {
   const access = await getCurrentAccess();
-  if (access?.role !== "owner") return NextResponse.json({ error: "Owners only." }, { status: 403 });
+  if (!access || !canManageTeam(access.role)) return NextResponse.json({ error: "Owners and managers only." }, { status: 403 });
 
   let client: McpClient | null = null;
   try {

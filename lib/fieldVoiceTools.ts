@@ -7,18 +7,21 @@
  * Design rules:
  * - Who "me" is comes from the LOGIN (Team page row), never from what the
  *   person says. "This is Mike" does not change whose schedule is read.
- *   Only owners may ask about another technician by name.
+ *   Owners and managers may ask about any technician by name; team leads
+ *   (installer_lead / sales_lead) may ask about anyone with their crew's
+ *   ServiceTitan position (Installer / Sales). Everyone else: own schedule.
  * - Read-only, with ONE exception: add_job_note. Reads go through the
  *   read-only allow-list (lib/mcpToolPolicy.ts); the note goes through the
  *   separate write path in lib/mcpJson.ts, only after Denny reads the note
  *   back and the person says yes (a signed confirmation code proves the
  *   preview happened). Installers and sales reps may only add notes to jobs
- *   on their own ServiceTitan schedule; owners may add to any job.
+ *   on their own ServiceTitan schedule; team leads also to jobs on their
+ *   crew's schedules; owners and managers may add to any job.
  * - Results are trimmed so the voice model gets what it needs to answer out
  *   loud without huge payloads.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import type { DennyAccess } from "@/lib/access";
+import { crewPositionFor, seesAllTechnicians, type CrewPosition, type DennyAccess } from "@/lib/access";
 import { callMcpJson, callMcpWriteJson, McpToolError, type McpClient } from "@/lib/mcpJson";
 import { claimNoteConfirmation } from "@/lib/teamStore";
 import { searchSlackForCustomer } from "@/lib/slackSearch";
@@ -48,7 +51,7 @@ export const FIELD_VOICE_TOOL_DEFINITIONS = [
         },
         technician_name: {
           type: "string",
-          description: "OWNERS ONLY: another technician's name. Leave empty for the signed-in person.",
+          description: "Another technician's name, ONLY when the person asks about someone else (owners and managers: anyone; team leads: their crew). Leave empty for the signed-in person.",
         },
       },
       additionalProperties: false,
@@ -64,7 +67,7 @@ export const FIELD_VOICE_TOOL_DEFINITIONS = [
       properties: {
         technician_name: {
           type: "string",
-          description: "OWNERS ONLY: another technician's name. Leave empty for the signed-in person.",
+          description: "Another technician's name, ONLY when the person asks about someone else (owners and managers: anyone; team leads: their crew). Leave empty for the signed-in person.",
         },
       },
       additionalProperties: false,
@@ -325,28 +328,46 @@ export type FieldVoiceContext = {
 
 type TechnicianTarget = { technicianId: number; name: string } | { error: string; choices?: string[] };
 
+function crewLabel(position: CrewPosition) {
+  return position === "Installer" ? "installers" : "sales reps";
+}
+
 async function resolveTechnician(ctx: FieldVoiceContext, requestedName: unknown): Promise<TechnicianTarget> {
   const { access } = ctx;
   const ownTech = access.member?.stTechnicianId
     ? { technicianId: access.member.stTechnicianId, name: access.member.stTechnicianName || access.displayName }
     : null;
   const name = typeof requestedName === "string" ? requestedName.trim() : "";
+  const seesAll = seesAllTechnicians(access.role);
+  const crewPosition = crewPositionFor(access.role);
 
-  if (name && access.role === "owner") {
-    const roster = await callMcpJson<{ technicians?: { technicianId: number; name: string; active: boolean }[] }>(
+  if (name && (seesAll || crewPosition)) {
+    const roster = await callMcpJson<{ technicians?: { technicianId: number; name: string; active: boolean; positions?: string[] }[] }>(
       ctx.client, "get_technician_roster", { name }
     );
-    const matches = (roster.technicians || []).filter((tech) => tech.active);
-    if (matches.length === 1) return { technicianId: matches[0].technicianId, name: matches[0].name };
+    let matches = (roster.technicians || []).filter((tech) => tech.active);
     if (matches.length === 0) return { error: `No active technician matches "${name}".` };
+
+    if (!seesAll && crewPosition) {
+      // Team leads: themselves, or anyone with their crew's ServiceTitan position.
+      const allowed = matches.filter((tech) =>
+        tech.technicianId === ownTech?.technicianId || (tech.positions || []).includes(crewPosition)
+      );
+      if (allowed.length === 0) {
+        return { error: `${matches[0].name} isn't one of the ${crewLabel(crewPosition)}, so I can only pull up your own crew.` };
+      }
+      matches = allowed;
+    }
+
+    if (matches.length === 1) return { technicianId: matches[0].technicianId, name: matches[0].name };
     return { error: `More than one technician matches "${name}". Ask which one.`, choices: matches.map((tech) => tech.name) };
   }
 
   if (ownTech) return ownTech;
   return {
-    error: access.role === "owner"
-      ? "Your login isn't linked to a ServiceTitan technician. Ask whose schedule you want (owners can name a technician)."
-      : "This login isn't linked to a ServiceTitan technician yet. An owner needs to link it on the Team page.",
+    error: seesAll || crewPosition
+      ? "Your login isn't linked to a ServiceTitan technician. Ask whose schedule you want and pass their name."
+      : "This login isn't linked to a ServiceTitan technician yet. An owner or manager needs to link it on the Team page.",
   };
 }
 
@@ -385,13 +406,16 @@ function describeEvent(event: DispatchEvent, timeZone: string) {
   };
 }
 
-async function loadEvents(ctx: FieldVoiceContext, technicianId: number, firstDay: string, lastDay: string) {
+/** Whose schedule to read: one technician, or every technician with a ServiceTitan position (a lead's crew). */
+type ScheduleScope = { technicianId: number } | { position: CrewPosition };
+
+async function loadEvents(ctx: FieldVoiceContext, scope: ScheduleScope, firstDay: string, lastDay: string) {
   // Ask ServiceTitan for one extra UTC day on each side, then keep only events
   // whose LOCAL start date is inside the requested range.
   const board = await callMcpJson<DispatchBoard>(ctx.client, "get_dispatch_board", {
     startDate: addDays(firstDay, -1),
     endDate: addDays(lastDay, 1),
-    technicianId,
+    ...scope,
     includeUnassigned: false,
     includeCanceled: false,
     includeNonJobAppointments: true,
@@ -415,7 +439,7 @@ async function getMySchedule(ctx: FieldVoiceContext, args: Record<string, unknow
   const days = Math.min(Math.max(Number(args.days) || 1, 1), 7);
   const lastDay = addDays(firstDay, days - 1);
 
-  const events = await loadEvents(ctx, tech.technicianId, firstDay, lastDay);
+  const events = await loadEvents(ctx, { technicianId: tech.technicianId }, firstDay, lastDay);
   const customerCount = events.filter((event) => event.eventType === "Job").length;
 
   return {
@@ -762,7 +786,7 @@ async function getNextCustomer(ctx: FieldVoiceContext, args: Record<string, unkn
   if ("error" in tech) return tech;
 
   const today = todayFor(ctx.timeZone);
-  const events = await loadEvents(ctx, tech.technicianId, today, addDays(today, 14));
+  const events = await loadEvents(ctx, { technicianId: tech.technicianId }, today, addDays(today, 14));
   const cutoff = Date.now() - 15 * 60 * 1000; // still count one that started a few minutes ago
   const next = events.find((event) => event.eventType === "Job" && Date.parse(event.start as string) >= cutoff);
   if (!next) return { technician: tech.name, note: "No upcoming customer appointments in the next two weeks." };
@@ -865,11 +889,11 @@ type NoteTargetResult = { target: NoteTarget } | { error: string } | { choices: 
  * Jobs on this technician's schedule: today only for "the job I'm at",
  * otherwise two weeks back to two weeks ahead.
  */
-async function scheduledJobs(ctx: FieldVoiceContext, technicianId: number, todayOnly: boolean) {
+async function scheduledJobs(ctx: FieldVoiceContext, scope: ScheduleScope, todayOnly: boolean) {
   const today = todayFor(ctx.timeZone);
   const events = todayOnly
-    ? await loadEvents(ctx, technicianId, today, today)
-    : await loadEvents(ctx, technicianId, addDays(today, -14), addDays(today, 14));
+    ? await loadEvents(ctx, scope, today, today)
+    : await loadEvents(ctx, scope, addDays(today, -14), addDays(today, 14));
   return events.filter((event) => event.eventType === "Job" && event.jobId);
 }
 
@@ -887,8 +911,22 @@ function normalizeAddress(text: string) {
   return text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 }
 
+/** Jobs on these events at a spoken address (deduplicated by job). */
+function jobsAtAddress(events: DispatchEvent[], address: string): DispatchEvent[] {
+  const wanted = normalizeAddress(address);
+  const streetNumber = wanted.split(" ")[0];
+  const matches = events.filter((event) => {
+    const candidate = normalizeAddress(event.location?.address || "");
+    return candidate.includes(wanted) || (streetNumber && candidate.startsWith(`${streetNumber} `) && wanted.split(" ").slice(1, 2).every((word) => candidate.includes(word)));
+  });
+  return [...new Map(matches.map((event) => [event.jobId, event])).values()];
+}
+
 async function resolveNoteTarget(ctx: FieldVoiceContext, args: Record<string, unknown>): Promise<NoteTargetResult> {
-  const isOwner = ctx.access.role === "owner";
+  // Owners and managers: any job. Team leads: own jobs + their crew's jobs.
+  const isOwner = seesAllTechnicians(ctx.access.role);
+  const crewPosition = crewPositionFor(ctx.access.role);
+  const yours = crewPosition ? `your or your ${crewLabel(crewPosition)}' schedules` : "your schedule";
   const address = typeof args.address === "string" ? args.address.trim() : "";
   const jobNumber = typeof args.job_number === "string" || typeof args.job_number === "number"
     ? String(args.job_number).replace(/[^0-9]/g, "")
@@ -896,39 +934,42 @@ async function resolveNoteTarget(ctx: FieldVoiceContext, args: Record<string, un
   const techId = ctx.access.member?.stTechnicianId ?? null;
 
   if (!isOwner && !techId) {
-    return { error: "This login isn't linked to a ServiceTitan technician yet, so I can't tell which jobs are yours. An owner can link it on the Team page." };
+    return { error: "This login isn't linked to a ServiceTitan technician yet, so I can't tell which jobs are yours. An owner or manager can link it on the Team page." };
   }
-  const mine = techId ? await scheduledJobs(ctx, techId, !jobNumber && !address) : [];
+  const mine = techId ? await scheduledJobs(ctx, { technicianId: techId }, !jobNumber && !address) : [];
+  // A lead's crew schedule (one dispatch-board call for everyone with the position), loaded only if needed.
+  let crewEvents: DispatchEvent[] | null = null;
+  const crewJobs = async () => {
+    if (!crewPosition) return [];
+    crewEvents ??= await scheduledJobs(ctx, { position: crewPosition }, false);
+    return crewEvents;
+  };
 
   // 1. A job number they said.
   if (jobNumber) {
     const id = Number(jobNumber);
-    const onSchedule = mine.find((event) => event.jobId === id || event.jobNumber === jobNumber);
+    const isJob = (event: DispatchEvent) => event.jobId === id || event.jobNumber === jobNumber;
+    const onSchedule = mine.find(isJob) || (await crewJobs()).find(isJob);
     if (onSchedule) return { target: targetFromEvent(onSchedule, ctx.timeZone) };
     // Owners: any job. The preview step checks ServiceTitan's job number
     // matches what was said before a confirmation code is issued.
     if (isOwner) return { target: { jobId: id, customer: null, address: null, when: null, spokenJobNumber: jobNumber } };
-    return { error: `Job ${jobNumber} isn't on your schedule for the last or next two weeks, so I can't add a note to it. The office can add it.` };
+    return { error: `Job ${jobNumber} isn't on ${yours} for the last or next two weeks, so I can't add a note to it. The office can add it.` };
   }
 
   // 2. An address they said.
   if (address) {
-    const wanted = normalizeAddress(address);
-    const streetNumber = wanted.split(" ")[0];
-    const onSchedule = mine.filter((event) => {
-      const candidate = normalizeAddress(event.location?.address || "");
-      return candidate.includes(wanted) || (streetNumber && candidate.startsWith(`${streetNumber} `) && wanted.split(" ").slice(1, 2).every((word) => candidate.includes(word)));
-    });
-    const uniqueJobs = [...new Map(onSchedule.map((event) => [event.jobId, event])).values()];
+    let uniqueJobs = jobsAtAddress(mine, address);
+    if (uniqueJobs.length === 0 && crewPosition) uniqueJobs = jobsAtAddress(await crewJobs(), address);
     if (uniqueJobs.length === 1) return { target: targetFromEvent(uniqueJobs[0], ctx.timeZone) };
     if (uniqueJobs.length > 1) {
       return {
         choices: uniqueJobs.slice(0, 5).map((event) => ({ jobNumber: event.jobNumber, ...targetFromEvent(event, ctx.timeZone), kind: jobTypeName(event.jobTypeId) })),
-        instruction: "More than one of their jobs is at that address. Ask which one, then call add_job_note again with job_number.",
+        instruction: "More than one job they can note is at that address. Ask which one, then call add_job_note again with job_number.",
       };
     }
     if (!isOwner) {
-      return { error: `I don't see a job at "${address}" on your schedule for the last or next two weeks. Check the address, or the office can add the note.` };
+      return { error: `I don't see a job at "${address}" on ${yours} for the last or next two weeks. Check the address, or the office can add the note.` };
     }
     // Owners: find the customer's most recent open job.
     const search = await callMcpJson<CustomerSearch>(ctx.client, "search_customers", { query: address, searchType: "address" });

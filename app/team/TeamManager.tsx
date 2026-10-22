@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type Role = "owner" | "csr" | "sales_rep" | "installer";
+type Role = "owner" | "manager" | "csr" | "sales_rep" | "installer" | "sales_lead" | "installer_lead";
 
 type Member = {
   email: string;
@@ -26,10 +26,17 @@ type Technician = {
 
 const ROLE_LABELS: Record<Role, string> = {
   owner: "Owner",
+  manager: "Manager",
   csr: "CSR",
   sales_rep: "Sales rep",
   installer: "Installer",
+  sales_lead: "Sales team lead",
+  installer_lead: "Installer team lead",
 };
+
+const FIELD_ROLES: Role[] = ["sales_rep", "installer", "sales_lead", "installer_lead"];
+/** Only owners can grant or edit these (matches lib/access.ts OWNER_ONLY_ROLES). */
+const OWNER_ONLY_ROLES: Role[] = ["owner", "manager"];
 
 const TIME_ZONES = [
   ["America/Los_Angeles", "Pacific (CA, NV, WA, OR)"],
@@ -51,7 +58,10 @@ function timeZoneLabel(zone: string) {
   return TIME_ZONES.find(([value]) => value === zone)?.[1] ?? zone;
 }
 
-export default function TeamManager() {
+export default function TeamManager({ viewerRole }: { viewerRole: "owner" | "manager" }) {
+  const isOwner = viewerRole === "owner";
+  const assignableRoles = (Object.keys(ROLE_LABELS) as Role[]).filter((role) => isOwner || !OWNER_ONLY_ROLES.includes(role));
+  const canEdit = (member: Member) => isOwner || !OWNER_ONLY_ROLES.includes(member.role);
   const [members, setMembers] = useState<Member[]>([]);
   const [roster, setRoster] = useState<Technician[]>([]);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -84,7 +94,7 @@ export default function TeamManager() {
       .catch((error: unknown) => setRosterStatus(error instanceof Error ? error.message : "Could not load the roster."));
   }, []);
 
-  const needsTechnician = form.role === "sales_rep" || form.role === "installer";
+  const needsTechnician = FIELD_ROLES.includes(form.role);
   const selectedTech = useMemo(
     () => roster.find((tech) => String(tech.technicianId) === form.stTechnicianId) || null,
     [roster, form.stTechnicianId]
@@ -176,9 +186,10 @@ export default function TeamManager() {
     <div className="team-page">
       <section className="owner-hero">
         <div>
-          <p className="eyebrow">Owner tools</p>
+          <p className="eyebrow">{isOwner ? "Owner tools" : "Manager tools"}</p>
           <h1>Den Coach Denny team</h1>
-          <p>Add installers, sales reps, CSRs and owners. People sign in with their Auth0 login; this list decides what they see.</p>
+          <p>Add installers, sales reps, team leads, CSRs{isOwner ? ", managers and owners" : ""}. People sign in with their Auth0 login; this list decides what they see.</p>
+          {!isOwner && <p>Owners and managers can only be added or changed by an owner.</p>}
         </div>
       </section>
 
@@ -207,7 +218,7 @@ export default function TeamManager() {
           <label>
             <span>Role</span>
             <select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value as Role })}>
-              {(Object.keys(ROLE_LABELS) as Role[]).map((role) => <option key={role} value={role}>{ROLE_LABELS[role]}</option>)}
+              {assignableRoles.map((role) => <option key={role} value={role}>{ROLE_LABELS[role]}</option>)}
             </select>
           </label>
           <label>
@@ -223,8 +234,11 @@ export default function TeamManager() {
         </div>
         <p className="team-hint">
           {form.role === "owner" && "Owners see everything, including this page and the Owner Dashboard."}
+          {form.role === "manager" && "Managers see everything except the Owner Dashboard. On this page they can manage everyone except owners and managers. In Talk with Coach Denny they can ask about any technician."}
           {form.role === "csr" && "CSRs see Chat, Let Denny Listen and the Smart Scheduler."}
-          {needsTechnician && "Sales reps and installers see the Smart Scheduler and Talk with Coach Denny. \"My schedule\" uses the ServiceTitan technician picked above."}
+          {(form.role === "sales_rep" || form.role === "installer") && "Sales reps and installers see the Smart Scheduler and Talk with Coach Denny, for their own schedule only. \"My schedule\" uses the ServiceTitan technician picked above."}
+          {form.role === "installer_lead" && "Installer team leads see what installers see, and can also ask Denny about any installer's schedule and jobs (anyone with the Installer position in ServiceTitan) and add notes to those jobs."}
+          {form.role === "sales_lead" && "Sales team leads see what sales reps see, and can also ask Denny about any sales rep's schedule and appointments (anyone with the Sales position in ServiceTitan) and add notes to those jobs."}
         </p>
         <div className="hero-actions">
           <button className="btn btn-teal" disabled={saving} onClick={() => save()}>{editing ? "Save changes" : "Add to team"}</button>
@@ -253,8 +267,14 @@ export default function TeamManager() {
                     <td>{timeZoneLabel(member.timeZone)}</td>
                     <td>{member.active ? "On" : "Off"}</td>
                     <td className="team-actions">
-                      <button className="team-link" onClick={() => editMember(member)}>Edit</button>
-                      <button className="team-link" disabled={saving} onClick={() => toggleActive(member)}>{member.active ? "Turn off" : "Turn on"}</button>
+                      {canEdit(member) ? (
+                        <>
+                          <button className="team-link" onClick={() => editMember(member)}>Edit</button>
+                          <button className="team-link" disabled={saving} onClick={() => toggleActive(member)}>{member.active ? "Turn off" : "Turn on"}</button>
+                        </>
+                      ) : (
+                        <span className="team-hint">Owner only</span>
+                      )}
                     </td>
                   </tr>
                 ))}
