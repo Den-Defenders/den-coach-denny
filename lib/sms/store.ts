@@ -5,7 +5,8 @@
  * they're needed (same pattern as lib/teamStore.ts):
  *
  *   sms_contacts       one row per phone number (time zone for sending hours)
- *   sms_conversations  one conversation per phone number (re-submits join it)
+ *   sms_conversations  one conversation per phone number (re-submits join it),
+ *                      plus the bot switch for that number ("on" or "paused" after a handoff)
  *   sms_messages       every text in and out, with Twilio status
  *   sms_opt_outs       numbers that said STOP (blocks every send)
  *   sms_consent        what consent we have, its source and timestamp
@@ -84,6 +85,13 @@ async function createTables(sql: Sql) {
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`;
+  // Step 2 (bot replies): bot on/paused per conversation, handoff reason, lead outcome.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS bot_status TEXT NOT NULL DEFAULT 'on'`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_reason TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_summary TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_status TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_status_at TIMESTAMPTZ`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -170,8 +178,8 @@ export type InboundInput = {
   at: Date;
 };
 
-/** Save a text they sent us. Returns false when Twilio retried a text we already have. */
-export async function saveInbound(input: InboundInput): Promise<{ saved: boolean; contact: SmsContact }> {
+/** Save a text they sent us. saved=false when Twilio retried a text we already have. */
+export async function saveInbound(input: InboundInput): Promise<{ saved: boolean; messageId: number | null; contact: SmsContact }> {
   const contact = await ensureContact(input.phone);
   const sql = await db();
   const media = input.media.length ? JSON.stringify(input.media) : null;
@@ -181,10 +189,10 @@ export async function saveInbound(input: InboundInput): Promise<{ saved: boolean
       ${input.twilioSid}, ${input.ourNumber}, 'received', ${iso(input.at)}::timestamptz, ${iso(input.at)}::timestamptz)
     ON CONFLICT (twilio_sid) DO NOTHING
     RETURNING id`;
-  if (!rows.length) return { saved: false, contact };
+  if (!rows.length) return { saved: false, messageId: null, contact };
   await sql`UPDATE sms_conversations SET last_inbound_at = ${iso(input.at)}::timestamptz, updated_at = now()
     WHERE id = ${contact.conversationId}`;
-  return { saved: true, contact: { ...contact, lastInboundAt: iso(input.at) } };
+  return { saved: true, messageId: Number(rows[0].id), contact: { ...contact, lastInboundAt: iso(input.at) } };
 }
 
 export type OutboundInput = {
@@ -311,11 +319,111 @@ export async function activeConsentTypes(phone: string): Promise<ConsentType[]> 
   return rows.map((r) => String(r.consent_type) as ConsentType);
 }
 
-/** Did we already send the opt-out confirmation for this opt-out? */
-export async function optOutConfirmationSent(phone: string, since: Date): Promise<boolean> {
+/** Did we already send this kind of confirmation (opt-out / opt-in) since a time? */
+export async function confirmationSent(phone: string, kind: "opt_out_confirmation" | "opt_in_confirmation", since: Date): Promise<boolean> {
   const sql = await db();
   const rows = await sql`SELECT 1 FROM sms_messages WHERE direction = 'outbound' AND phone = ${phone}
-    AND kind = 'opt_out_confirmation' AND created_at >= ${iso(since)}::timestamptz LIMIT 1`;
+    AND kind = ${kind} AND status <> 'send_failed' AND created_at >= ${iso(since)}::timestamptz LIMIT 1`;
+  return rows.length > 0;
+}
+
+/** Did we already send the opt-out confirmation for this opt-out? */
+export function optOutConfirmationSent(phone: string, since: Date): Promise<boolean> {
+  return confirmationSent(phone, "opt_out_confirmation", since);
+}
+
+/**
+ * Twilio just blocked a number that was already opted out in Denny only
+ * ("please stop texting me"). Mark the opt-out as Twilio-known, so a later
+ * START (which Twilio then confirms itself) doesn't get a second confirmation.
+ */
+export async function markOptOutKnownToTwilio(phone: string) {
+  const sql = await db();
+  await sql`UPDATE sms_opt_outs SET source = 'keyword' WHERE phone = ${phone} AND source IN ('keyword_extra', 'ai_detected')`;
+}
+
+// ---------------------------------------------------------------------------
+// Bot state (step 2)
+// ---------------------------------------------------------------------------
+
+export type BotStatus = "on" | "paused";
+export type LeadStatus = "price_accepted" | "not_interested";
+
+export type ConversationState = {
+  conversationId: number;
+  botStatus: BotStatus;
+  handoffReason: string | null;
+  leadStatus: LeadStatus | null;
+};
+
+export async function conversationState(phone: string): Promise<ConversationState> {
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  const rows = await sql`SELECT bot_status, handoff_reason, lead_status FROM sms_conversations WHERE id = ${contact.conversationId}`;
+  const row = rows[0] || {};
+  return {
+    conversationId: contact.conversationId,
+    botStatus: row.bot_status === "paused" ? "paused" : "on",
+    handoffReason: (row.handoff_reason as string) ?? null,
+    leadStatus: (row.lead_status as LeadStatus) ?? null,
+  };
+}
+
+/** Bot stops answering this number; the team takes over. */
+export async function setHandoff(phone: string, reason: string, summary: string, at: Date) {
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET bot_status = 'paused', handoff_reason = ${reason.slice(0, 60)},
+      handoff_summary = ${summary.slice(0, 1500)}, handoff_at = ${iso(at)}::timestamptz, updated_at = now()
+    WHERE id = ${contact.conversationId}`;
+}
+
+/** Owner turned the bot back on for this number (test page). */
+export async function resumeBot(phone: string): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations SET bot_status = 'on', handoff_reason = NULL, handoff_summary = NULL,
+      handoff_at = NULL, updated_at = now()
+    WHERE phone = ${phone} RETURNING id`;
+  return rows.length > 0;
+}
+
+export async function setLeadStatus(phone: string, status: LeadStatus, at: Date) {
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET lead_status = ${status}, lead_status_at = ${iso(at)}::timestamptz, updated_at = now()
+    WHERE id = ${contact.conversationId}`;
+}
+
+export type ThreadMessage = { id: number; direction: "inbound" | "outbound"; body: string; mediaCount: number; createdAt: string };
+
+/** The latest texts with this number, oldest first (what the bot reads before replying). */
+export async function threadForBot(phone: string, limit = 40): Promise<ThreadMessage[]> {
+  const sql = await db();
+  const rows = await sql`SELECT id, direction, body, media, created_at FROM sms_messages
+    WHERE phone = ${phone} AND status <> 'send_failed'
+    ORDER BY created_at DESC, id DESC LIMIT ${limit}`;
+  return rows.reverse().map((r) => ({
+    id: Number(r.id),
+    direction: r.direction === "outbound" ? "outbound" : "inbound",
+    body: String(r.body || ""),
+    mediaCount: Array.isArray(r.media) ? r.media.length : 0,
+    createdAt: toIso(r.created_at) || "",
+  }));
+}
+
+/** Id of the newest text they sent us (the bot only answers the newest one). */
+export async function latestInboundId(phone: string): Promise<number | null> {
+  const sql = await db();
+  const rows = await sql`SELECT id FROM sms_messages WHERE phone = ${phone} AND direction = 'inbound'
+    ORDER BY created_at DESC, id DESC LIMIT 1`;
+  return rows.length ? Number(rows[0].id) : null;
+}
+
+/** Was anything sent to this number after a given text of theirs? */
+export async function outboundSinceMessage(phone: string, messageId: number): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`SELECT 1 FROM sms_messages WHERE phone = ${phone} AND direction = 'outbound'
+    AND status <> 'send_failed' AND id > ${messageId} LIMIT 1`;
   return rows.length > 0;
 }
 
@@ -345,9 +453,12 @@ export async function recentActivity(limit = 50) {
     FROM sms_messages ORDER BY created_at DESC, id DESC LIMIT ${limit}`;
   const optOuts = await sql`SELECT phone, opted_out_at, source, keyword FROM sms_opt_outs ORDER BY opted_out_at DESC LIMIT ${limit}`;
   const auditRows = await sql`SELECT id, phone, action, reason, detail, actor, created_at FROM sms_audit ORDER BY created_at DESC, id DESC LIMIT ${limit}`;
+  const handoffs = await sql`SELECT phone, handoff_reason, handoff_summary, handoff_at, lead_status FROM sms_conversations
+    WHERE bot_status = 'paused' ORDER BY handoff_at DESC NULLS LAST LIMIT ${limit}`;
   return {
     messages: messages.map((m) => ({ ...m, created_at: toIso(m.created_at) })),
     optOuts: optOuts.map((o) => ({ ...o, opted_out_at: toIso(o.opted_out_at) })),
     audit: auditRows.map((a) => ({ ...a, created_at: toIso(a.created_at) })),
+    handoffs: handoffs.map((h) => ({ ...h, handoff_at: toIso(h.handoff_at) })),
   };
 }

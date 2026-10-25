@@ -109,6 +109,17 @@ export function classifyKeyword(body: string, opts: { optedOut: boolean; twilioO
 export const OPT_OUT_CONFIRMATION =
   "Den Defenders: You're unsubscribed and won't get more texts from us. Reply START to resubscribe.";
 
+/**
+ * Sent by us only when START follows an opt-out Twilio never knew about
+ * ("please stop texting me"): Twilio then has nothing to confirm. Same wording
+ * as the Twilio Opt-out tab's opt-in confirmation.
+ */
+export const OPT_IN_CONFIRMATION =
+  "Den Defenders: You're resubscribed to texts about your consultation, quote or appointment. Msg&data rates may apply. Reply HELP for help, STOP to opt out.";
+
+/** Opt-out sources Twilio doesn't know about (Twilio never blocked the number). */
+export const DENNY_ONLY_OPT_OUT_SOURCES = new Set(["keyword_extra", "ai_detected"]);
+
 // ---------------------------------------------------------------------------
 // Sending hours and holidays
 // ---------------------------------------------------------------------------
@@ -119,11 +130,17 @@ export const OPT_OUT_CONFIRMATION =
  *   manual     - a person typing in Denny
  *   automated  - drip and follow-ups nobody asked for just now
  *   opt_out_confirmation - the one confirmation after an opt-out (internal only)
+ *   opt_in_confirmation  - the one confirmation after START, when Twilio won't send it (internal only)
  */
-export type SendKind = "reply" | "manual" | "automated" | "opt_out_confirmation";
+export type SendKind = "reply" | "manual" | "automated" | "opt_out_confirmation" | "opt_in_confirmation";
+
+/** Keyword confirmations: sent right away, any hour, once per keyword. */
+export function isConfirmationKind(kind: SendKind): kind is "opt_out_confirmation" | "opt_in_confirmation" {
+  return kind === "opt_out_confirmation" || kind === "opt_in_confirmation";
+}
 
 /** [start hour, end hour) in the customer's local time. */
-export const SENDING_HOURS: Record<Exclude<SendKind, "opt_out_confirmation">, [number, number]> = {
+export const SENDING_HOURS: Record<Exclude<SendKind, "opt_out_confirmation" | "opt_in_confirmation">, [number, number]> = {
   reply: [8, 19],      // 8 AM - 7 PM (Melanie, 2026-10-22)
   manual: [8, 21],     // 8 AM - 9 PM (quiet-hours rule)
   automated: [9, 17],  // 9 AM - 5 PM (Melanie, 2026-10-22)
@@ -160,13 +177,13 @@ export function localTime(now: Date, timeZone: string): LocalTime {
 }
 
 export function withinSendingHours(kind: SendKind, local: LocalTime): boolean {
-  if (kind === "opt_out_confirmation") return true;
+  if (isConfirmationKind(kind)) return true;
   const [start, end] = SENDING_HOURS[kind];
   return local.hour >= start && local.hour < end;
 }
 
 export function describeHours(kind: SendKind): string {
-  if (kind === "opt_out_confirmation") return "any time";
+  if (isConfirmationKind(kind)) return "any time";
   const [start, end] = SENDING_HOURS[kind];
   const fmt = (h: number) => `${((h + 11) % 12) + 1} ${h < 12 ? "AM" : "PM"}`;
   return `${fmt(start)}–${fmt(end)}`;
