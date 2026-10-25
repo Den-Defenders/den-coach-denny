@@ -10,10 +10,10 @@ type DenShellProps = {
   title: string;
   subtitle?: string;
   children: ReactNode;
-  theme?: "home" | "chat" | "listen" | "schedule" | "owner" | "talk" | "team";
+  theme?: "home" | "chat" | "listen" | "schedule" | "owner" | "talk" | "team" | "texting";
 };
 
-type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team";
+type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team" | "texting";
 
 const navItems = [
   { key: "home", href: "/", label: "Home", theme: "home", icon: "home" },
@@ -23,6 +23,7 @@ const navItems = [
   { key: "talk", href: "/talk", label: "Talk with Coach Denny", theme: "talk", icon: "mic" },
   { key: "owner", href: "/owner", label: "Owner Dashboard", theme: "owner", icon: "owner" },
   { key: "team", href: "/team", label: "Team", theme: "team", icon: "team" },
+  { key: "texting", href: "/sms-test", label: "Texting", theme: "texting", icon: "sms" },
 ] as const satisfies readonly { key: NavKey; href: string; label: string; theme: string; icon: string }[];
 
 type MeResponse = { displayName?: string; nav?: NavKey[] };
@@ -33,6 +34,7 @@ function NavIcon({ name }: { name: string }) {
   if (name === "wave") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4" /></svg>;
   if (name === "mic") return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8" /></svg>;
   if (name === "team") return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5a6.5 6.5 0 0 1 3.5 5.5" /></svg>;
+  if (name === "sms") return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5" /><path d="M10 5h4M9 10h6M9 13.5h4M11 18.5h2" /></svg>;
   if (name === "owner") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20h18M5 16l5-5 4 3 5-8M16 6h3v3" /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 17h.01M12 17h.01" /></svg>;
 }
