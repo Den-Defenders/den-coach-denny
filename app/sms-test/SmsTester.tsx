@@ -12,6 +12,10 @@ type Settings = {
   allowList: string;
   promoTextsEnabled: boolean;
   limits: { perContactPerHour: number; perContactPerDay: number; automatedPerContactPerDay: number; systemPerDay: number };
+  botEnabled: boolean;
+  botModel: string;
+  openAiConfigured: boolean;
+  slackAlerts: boolean;
 };
 
 type Message = {
@@ -20,6 +24,7 @@ type Message = {
   sent_by: string | null; created_at: string;
 };
 type OptOut = { phone: string; opted_out_at: string; source: string; keyword: string | null };
+type Handoff = { phone: string; handoff_reason: string | null; handoff_summary: string | null; handoff_at: string | null; lead_status: string | null };
 type AuditRow = { id: number; phone: string | null; action: string; reason: string | null; detail: Record<string, unknown> | null; actor: string | null; created_at: string };
 
 const MAX = 640;
@@ -50,6 +55,7 @@ export default function SmsTester() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [optOuts, setOptOuts] = useState<OptOut[]>([]);
   const [auditRows, setAuditRows] = useState<AuditRow[]>([]);
+  const [handoffs, setHandoffs] = useState<Handoff[]>([]);
   const [to, setTo] = useState("");
   const [body, setBody] = useState("Den Defenders test: texting from Denny works. Reply to this text to test incoming.");
   const [kind, setKind] = useState("manual");
@@ -64,6 +70,7 @@ export default function SmsTester() {
     setMessages(data.messages || []);
     setOptOuts(data.optOuts || []);
     setAuditRows(data.audit || []);
+    setHandoffs(data.handoffs || []);
     setStatus(response.ok ? "" : data.error || "Could not load texting activity.");
   }, []);
 
@@ -89,6 +96,17 @@ export default function SmsTester() {
     load();
   }
 
+  async function resume(phone: string) {
+    const response = await fetch("/api/sms/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "resume_bot", phone }),
+    });
+    const data = await response.json().catch(() => ({}));
+    setStatus(data.message || (response.ok ? "Done." : "Could not turn the bot back on."));
+    load();
+  }
+
   return (
     <div className="team-page">
       <section className="surface team-form">
@@ -99,7 +117,8 @@ export default function SmsTester() {
             <Check ok={settings.twilioConfigured} label="Twilio settings found (Account SID, Auth Token, Messaging Service SID)" />
             <Check ok={Boolean(settings.webhookBaseUrl)} label={`Webhook address: ${settings.webhookBaseUrl || "SMS_WEBHOOK_BASE_URL not set"}`} />
             <Check ok={settings.sendingEnabled} label={`Sending switch ${settings.sendingEnabled ? "ON" : "OFF"} (SMS_SENDING_ENABLED)`} />
-            <li className="team-hint">Pilot allow-list: <b>{settings.allowList}</b></li>
+            <Check ok={settings.botEnabled && settings.openAiConfigured} label={`AI replies ${settings.botEnabled ? "ON" : "OFF"} (SMS_BOT_ENABLED)${settings.openAiConfigured ? "" : " · OPENAI_API_KEY missing"} · model ${settings.botModel}`} />
+            <li className="team-hint">Pilot allow-list: <b>{settings.allowList}</b> · Slack alert on handoff: <b>{settings.slackAlerts ? "ON" : "OFF"}</b></li>
             <li className="team-hint">Promo texts: <b>{settings.promoTextsEnabled ? "ON" : "OFF"}</b> · Caps: {settings.limits.perContactPerHour}/hour and {settings.limits.perContactPerDay}/day per number, {settings.limits.automatedPerContactPerDay} automated/day, {settings.limits.systemPerDay}/day total</li>
             {settings.inboundUrl && <li className="team-hint">Twilio “A message comes in”: <code>{settings.inboundUrl}</code></li>}
             {settings.statusUrl && <li className="team-hint">Twilio “Delivery Status Callback”: <code>{settings.statusUrl}</code></li>}
@@ -140,6 +159,28 @@ export default function SmsTester() {
           <button className="btn btn-outline" onClick={load}>Refresh</button>
         </div>
         {status && <div className="notice" style={{ marginTop: 12 }}>{status}</div>}
+      </section>
+
+      <section className="surface team-list">
+        <h2>Needs CSR (AI paused for these numbers)</h2>
+        {handoffs.length === 0 ? <p className="team-hint">No handoffs. The AI is answering every number on the pilot list.</p> : (
+          <div className="owner-table-wrap">
+            <table className="team-table">
+              <thead><tr><th>When</th><th>Number</th><th>Why</th><th>Summary for the team</th><th></th></tr></thead>
+              <tbody>
+                {handoffs.map((h) => (
+                  <tr key={h.phone}>
+                    <td>{h.handoff_at ? when(h.handoff_at) : "—"}</td>
+                    <td>{phoneLabel(h.phone)}</td>
+                    <td>{(h.handoff_reason || "team").replace(/_/g, " ")}{h.lead_status ? ` · ${h.lead_status.replace(/_/g, " ")}` : ""}</td>
+                    <td style={{ whiteSpace: "pre-wrap", maxWidth: 420 }}>{h.handoff_summary || "—"}</td>
+                    <td><button className="btn btn-outline" onClick={() => resume(h.phone)}>Turn AI back on</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className="surface team-list">

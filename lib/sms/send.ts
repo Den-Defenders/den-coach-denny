@@ -11,6 +11,7 @@
  *   3. Twilio is set up       TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_MESSAGING_SERVICE_SID
  *   4. pilot allow-list       SMS_ALLOWED_TO (comma list of numbers, or * for everyone; empty = nobody)
  *   5. not opted out          (STOP / END / ... or Twilio error 21610)
+ *      (keyword confirmations: only right after the STOP / START they answer, once)
  *   6. consent                care texts: any active consent
  *                             automated texts: form consent (care/marketing), not just "they texted us"
  *                             promo texts: SMS_PROMO_TEXTS_ENABLED=true + form consent
@@ -21,8 +22,10 @@
  */
 import {
   MAX_BODY_CHARS,
+  OPT_IN_CONFIRMATION,
   OPT_OUT_CONFIRMATION,
   describeHours,
+  isConfirmationKind,
   holidayName,
   localTime,
   normalizePhone,
@@ -32,6 +35,7 @@ import {
 import {
   activeConsentTypes,
   audit,
+  confirmationSent,
   countOutboundAll,
   countOutboundTo,
   createOutbound,
@@ -63,7 +67,7 @@ export type BlockReason =
   | "opted_out" | "no_consent" | "promo_texts_disabled" | "no_marketing_consent"
   | "reply_window_closed" | "outside_hours" | "holiday"
   | "contact_hourly_cap" | "contact_daily_cap" | "automated_daily_cap" | "system_daily_cap"
-  | "no_recent_opt_out" | "twilio_rejected";
+  | "no_recent_opt_out" | "no_recent_opt_in" | "twilio_rejected";
 
 export type SendResult =
   | { ok: true; messageId: number; twilioSid: string; status: string }
@@ -115,7 +119,7 @@ export function smsNow(): Date {
   return clock();
 }
 
-const KINDS: SendKind[] = ["reply", "manual", "automated", "opt_out_confirmation"];
+const KINDS: SendKind[] = ["reply", "manual", "automated", "opt_out_confirmation", "opt_in_confirmation"];
 
 export async function sendSms(request: SendRequest): Promise<SendResult> {
   const now = clock();
@@ -160,7 +164,15 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
 
   const contact = await ensureContact(phone);
 
-  if (kind !== "opt_out_confirmation") {
+  if (kind === "opt_in_confirmation") {
+    // Only right after their START: their newest text is under 10 minutes old and not yet confirmed.
+    const last = contact.lastInboundAt ? Date.parse(contact.lastInboundAt) : 0;
+    if (!last || now.getTime() - last > 10 * 60 * 1000 || await confirmationSent(phone, "opt_in_confirmation", new Date(last))) {
+      return block("no_recent_opt_in", "No new START to confirm.");
+    }
+  }
+
+  if (!isConfirmationKind(kind)) {
     // 6. Consent
     const consent = await activeConsentTypes(phone);
     if (!consent.length) return block("no_consent", "No texting consent on file for this number.");
@@ -226,4 +238,9 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
 /** The one opt-out confirmation for wording Twilio doesn't catch ("please stop texting me"). */
 export function sendOptOutConfirmation(to: string): Promise<SendResult> {
   return sendSms({ to, body: OPT_OUT_CONFIRMATION, kind: "opt_out_confirmation", sentBy: "system" });
+}
+
+/** The one opt-in confirmation when START follows an opt-out Twilio never knew about. */
+export function sendOptInConfirmation(to: string): Promise<SendResult> {
+  return sendSms({ to, body: OPT_IN_CONFIRMATION, kind: "opt_in_confirmation", sentBy: "system" });
 }
