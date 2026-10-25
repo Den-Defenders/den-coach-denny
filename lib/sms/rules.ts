@@ -85,7 +85,12 @@ export function classifyKeyword(body: string, opts: { optedOut: boolean; twilioO
   const twilioType = (opts.twilioOptOutType || "").trim().toUpperCase();
 
   if (twilioType === "STOP") return { keyword: "stop", handledByTwilio: true, matched: text || "STOP" };
-  if (twilioType === "START") return { keyword: "start", handledByTwilio: true, matched: text || "START" };
+  // Twilio's opt-in list includes YES, so Twilio tags EVERY "Yes" as START. Only treat it as
+  // START when they're opted out or actually typed START/UNSTOP; otherwise "Yes" is a normal
+  // answer the bot must reply to (Twilio sends no auto-reply to subscribed numbers).
+  if (twilioType === "START" && (opts.optedOut || START_WORDS.has(text))) {
+    return { keyword: "start", handledByTwilio: true, matched: text || "START" };
+  }
   if (twilioType === "HELP") return { keyword: "help", handledByTwilio: true, matched: text || "HELP" };
 
   if (!text) return { keyword: null, handledByTwilio: false, matched: null };
