@@ -51,6 +51,11 @@ a { color: inherit; }
 .nav-owner { background: linear-gradient(135deg, #0d6980, #238da0); }
 .nav-talk { background: linear-gradient(135deg, #0b7f79, #159d96); }
 .nav-team { background: linear-gradient(135deg, #3b4a5a, #56697c); }
+.nav-texting { background: linear-gradient(135deg, #5b3f8f, #7a5cc4); }
+/* Owners have 8 tiles: two even rows of 4 on wide screens instead of 7 + 1. */
+@media (min-width: 1101px) {
+  .den-nav:has(> .nav-tile:nth-child(8)) { grid-template-columns: repeat(4, 1fr); }
+}
 .sign-out-link { margin-left: 6px; padding-left: 10px; border-left: 1px solid var(--line); color: var(--muted); font-weight: 650; font-size: 14px; text-decoration: none; }
 .sign-out-link:hover { color: var(--coral); }
 .nav-icon { width: 36px; height: 36px; display: grid; place-items: center; flex: 0 0 auto; }
@@ -337,6 +342,10 @@ a { color: inherit; }
 .team-actions { white-space: nowrap; }
 .team-link { border: 0; background: none; color: var(--teal-dark); font-weight: 750; cursor: pointer; padding: 4px 6px; }
 .team-link:hover { color: var(--coral); }
+.sms-message { display: grid; gap: 6px; margin-top: 14px; font-weight: 700; }
+.sms-message > span { font-size: 14px; color: var(--muted); }
+.sms-message textarea { width: 100%; min-height: 110px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; font: inherit; font-weight: 400; color: var(--ink); background: #fff; resize: vertical; }
+.sms-message textarea:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 4px rgba(53,189,181,.14); }
 
 /* Talk with Coach Denny (field voice) */
 .talk-page { display: grid; gap: 14px; }

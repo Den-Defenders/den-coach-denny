@@ -239,12 +239,13 @@ export function landingPathFor(role: AccessRole): string {
   return "/";
 }
 
-export type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team";
+export type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team" | "texting";
 
 export function navFor(role: AccessRole): NavKey[] {
   switch (role) {
     case "owner":
-      return ["home", "chat", "listen", "schedule", "talk", "owner", "team"];
+      // "texting" = the texting test page (pilot). Owners only for now.
+      return ["home", "chat", "listen", "schedule", "talk", "owner", "team", "texting"];
     case "manager":
       return ["home", "chat", "listen", "schedule", "talk", "team"];
     case "csr":

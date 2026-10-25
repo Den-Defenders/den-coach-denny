@@ -131,10 +131,9 @@ export default function SmsTester() {
             </select>
           </label>
         </div>
-        <label className="team-grid" style={{ marginTop: 14 }}>
+        <label className="sms-message">
           <span>Message ({body.length}/{MAX} characters · {segments(body)} segment{segments(body) === 1 ? "" : "s"})</span>
-          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} maxLength={MAX + 50}
-            style={{ padding: 12, border: "1px solid var(--line)", borderRadius: 11, font: "inherit" }} />
+          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} maxLength={MAX + 50} />
         </label>
         <div className="hero-actions" style={{ marginTop: 14 }}>
           <button className="btn btn-teal" disabled={sending || !to || !body.trim()} onClick={send}>Send test text</button>
