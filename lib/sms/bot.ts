@@ -6,7 +6,7 @@
  * Called by /api/sms/inbound AFTER it has answered Twilio (so Twilio's
  * 15-second webhook limit never matters). For each normal text:
  *
- *   1. wait a few seconds; if they sent another text meanwhile, let that one answer both
+ *   1. wait 2.5 seconds; if they sent another text meanwhile, let that one answer both
  *   2. skip (no AI cost) when: bot switched off, number not on the pilot list, opted out,
  *      handed off to the team, or outside reply hours (8 AM - 7 PM their time)
  *   3. read the last 40 texts, ask OpenAI for one reply (tools: ZIP check, handoff, outcome, opt-out)
@@ -51,7 +51,7 @@ export function botModel(): string {
 
 function debounceMs(): number {
   const n = Number.parseInt((process.env.SMS_BOT_DEBOUNCE_MS || "").trim(), 10);
-  return Number.isFinite(n) && n >= 0 && n <= 20000 ? n : 4000;
+  return Number.isFinite(n) && n >= 0 && n <= 20000 ? n : 2500;
 }
 
 /** Keep AI replies to about 3-4 SMS segments; the send helper's hard limit is 640. */
@@ -192,7 +192,10 @@ export function checkServiceZip(zip: string): { result: "IN_AREA" | "NEEDS_TEAM_
 // Text clean-up
 // ---------------------------------------------------------------------------
 
-/** Plain SMS text: no markdown, no dashes the docs ban, no emojis (they triple the cost). */
+/** Openers Melanie's docs ban ("Great!", "Perfect!", "Got it."). */
+const BANNED_OPENER = /^(great news|good news|great|perfect|awesome|love it|got it|absolutely)\s*[!.,]+\s*/i;
+
+/** Plain SMS text: no markdown, no dashes the docs ban, no emojis (they triple the cost), no banned openers. */
 export function cleanSmsText(text: string): string {
   let out = (text || "")
     .replace(/\*\*(.+?)\*\*/g, "$1")
@@ -205,6 +208,11 @@ export function cleanSmsText(text: string): string {
     .replace(/[ \t]+/g, " ")
     .replace(/\s*\n\s*/g, " ")
     .trim();
+  const opener = out.match(BANNED_OPENER);
+  if (opener && out.length > opener[0].length + 10) {
+    const rest = out.slice(opener[0].length);
+    out = rest.charAt(0).toUpperCase() + rest.slice(1);
+  }
   if (out.length > MAX_REPLY_CHARS) {
     const cut = out.slice(0, MAX_REPLY_CHARS);
     const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
@@ -352,8 +360,11 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     }
 
     // Last look before sending: a newer text (that run answers it) or a reply already sent.
-    if (await latestInboundId(phone) !== inboundId) return skip(phone, "newer_text_will_answer", inboundId, false);
-    if (await outboundSinceMessage(phone, inboundId)) return skip(phone, "already_answered", inboundId);
+    // A handoff's final message always goes out: the newer texts' runs are paused by the handoff.
+    if (!handedOff) {
+      if (await latestInboundId(phone) !== inboundId) return skip(phone, "newer_text_will_answer", inboundId, false);
+      if (await outboundSinceMessage(phone, inboundId)) return skip(phone, "already_answered", inboundId);
+    }
 
     const result = await sendSms({ to: phone, body: reply, kind: "reply", purpose: "care", sentBy: "denny-ai" });
     return result.ok ? { status: "sent", result } : { status: "not_sent", result };
