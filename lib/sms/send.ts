@@ -204,19 +204,8 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
     }
 
     // 10. Caps
-    const limits = smsLimits();
-    if (await countOutboundTo(phone, new Date(now.getTime() - HOUR)) >= limits.perContactPerHour) {
-      return block("contact_hourly_cap", `Hit the limit of ${limits.perContactPerHour} texts per hour to one number.`);
-    }
-    if (await countOutboundTo(phone, new Date(now.getTime() - DAY)) >= limits.perContactPerDay) {
-      return block("contact_daily_cap", `Hit the limit of ${limits.perContactPerDay} texts per 24 hours to one number.`);
-    }
-    if (kind === "automated" && await countOutboundTo(phone, new Date(now.getTime() - DAY), "automated") >= limits.automatedPerContactPerDay) {
-      return block("automated_daily_cap", `Hit the limit of ${limits.automatedPerContactPerDay} automated texts per 24 hours to one number.`);
-    }
-    if (await countOutboundAll(new Date(now.getTime() - DAY)) >= limits.systemPerDay) {
-      return block("system_daily_cap", `Hit the company-wide limit of ${limits.systemPerDay} texts per 24 hours.`);
-    }
+    const capHit = await checkCaps(phone, kind, now);
+    if (capHit) return block(capHit.reason, capHit.message);
   }
 
   // Send. Record first so nothing goes out without a row.
@@ -233,6 +222,27 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
   await markOutboundAccepted(messageId, result.sid, result.status, result.from);
   await audit({ phone, action: "sent", reason: kind, detail: { purpose, messageId, sid: result.sid, chars: body.length }, actor });
   return { ok: true, messageId, twilioSid: result.sid, status: result.status };
+}
+
+/**
+ * Rule 10 on its own, so the AI can check it BEFORE paying for an OpenAI call.
+ * Returns null when another text of this kind may go to this number now.
+ */
+export async function checkCaps(phone: string, kind: SendKind, now: Date = clock()): Promise<{ reason: BlockReason; message: string } | null> {
+  const limits = smsLimits();
+  if (await countOutboundTo(phone, new Date(now.getTime() - HOUR)) >= limits.perContactPerHour) {
+    return { reason: "contact_hourly_cap", message: `Hit the limit of ${limits.perContactPerHour} texts per hour to one number.` };
+  }
+  if (await countOutboundTo(phone, new Date(now.getTime() - DAY)) >= limits.perContactPerDay) {
+    return { reason: "contact_daily_cap", message: `Hit the limit of ${limits.perContactPerDay} texts per 24 hours to one number.` };
+  }
+  if (kind === "automated" && await countOutboundTo(phone, new Date(now.getTime() - DAY), "automated") >= limits.automatedPerContactPerDay) {
+    return { reason: "automated_daily_cap", message: `Hit the limit of ${limits.automatedPerContactPerDay} automated texts per 24 hours to one number.` };
+  }
+  if (await countOutboundAll(new Date(now.getTime() - DAY)) >= limits.systemPerDay) {
+    return { reason: "system_daily_cap", message: `Hit the company-wide limit of ${limits.systemPerDay} texts per 24 hours.` };
+  }
+  return null;
 }
 
 /** The one opt-out confirmation for wording Twilio doesn't catch ("please stop texting me"). */
