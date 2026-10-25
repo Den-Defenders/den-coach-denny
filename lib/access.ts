@@ -191,6 +191,9 @@ const ROUTE_RULES: Rule[] = [
   // Owner Dashboard: owners only. Managers are deliberately NOT here.
   { prefix: "/owner", roles: ["owner"] },
   { prefix: "/api/owner", roles: ["owner"] },
+  // Texting test page (pilot): owners only.
+  { prefix: "/sms-test", roles: ["owner"] },
+  { prefix: "/api/sms/test", roles: ["owner"] },
 
   { prefix: "/talk", roles: VOICE_ROLES },
   { prefix: "/api/field-voice", roles: VOICE_ROLES },
