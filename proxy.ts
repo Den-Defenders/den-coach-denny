@@ -19,6 +19,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Twilio texting webhooks. No login, but each route rejects any request
+  // without a valid X-Twilio-Signature (lib/sms/twilio.ts).
+  if (pathname === "/api/sms/inbound" || pathname === "/api/sms/status") {
+    return NextResponse.next();
+  }
+
   // Let Auth0 handle login, callback, and logout routes.
   const authResponse = await auth0.middleware(request);
 
