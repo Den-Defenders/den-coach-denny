@@ -9,7 +9,9 @@
  *   1. wait 2.5 seconds; if they sent another text meanwhile, let that one answer both
  *   2. skip (no AI cost) when: bot switched off, number not on the pilot list, opted out,
  *      handed off to the team, or outside reply hours (8 AM - 7 PM their time)
- *   3. read the last 40 texts, ask OpenAI for one reply (tools: ZIP check, handoff, outcome, opt-out)
+ *   3. read the last 40 texts + the customer's saved notes, ask OpenAI for one reply
+ *      (tools: ZIP check, handoff, outcome, opt-out, save notes). The prompt starts with
+ *      the shared customer policy (lib/ai/customerPolicy.ts); its version is logged per reply
  *   4. send it through THE send helper (lib/sms/send.ts) as kind "reply", so every
  *      guardrail still applies: opt-outs, allow-list, 24-hour window, hours, caps
  *
@@ -19,7 +21,9 @@
 import { after } from "next/server";
 import OpenAI from "openai";
 import salesZipDirectory from "@/app/lib/salesZipDirectory.json";
-import { SMS_BOT_FACTS, smsBotSystemPrompt } from "@/lib/sms/botPrompt";
+import { COMPANY_FACTS, NV_ASK_TEAM_CITIES, NV_SERVED_CITIES } from "@/lib/ai/companyFacts";
+import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
+import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { MAX_BODY_CHARS, formatPhone, localTime, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
 import {
@@ -30,6 +34,7 @@ import {
   latestInboundId,
   outboundSinceMessage,
   recordOptOut,
+  saveCustomerNotes,
   setHandoff,
   setLeadStatus,
   threadForBot,
@@ -159,11 +164,34 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "record_outcome",
       description:
-        "Record a lead outcome: price_accepted when they clearly said the quoted range works; not_interested when they clearly declined the project.",
+        "Record a lead outcome: price_accepted when they said on their own that the price works for them (never ask them to approve it); not_interested when they clearly declined the project.",
       parameters: {
         type: "object",
         properties: { outcome: { type: "string", enum: ["price_accepted", "not_interested"] } },
         required: ["outcome"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_customer_notes",
+      description:
+        "Save details the customer just told you so you never ask again. Fill only the fields with NEW information, in their words. Never guess.",
+      parameters: {
+        type: "object",
+        properties: {
+          first_name: { type: "string" },
+          need: { type: "string", description: "What got them looking / what matters most (airflow, security, look, pets, a break-in...)" },
+          product: { type: "string", description: "Security door, slider, window screens, VistaLuxe; style if said (full-view, decorative, wood)" },
+          door_count: { type: "string", description: "Single, double, how many doors or windows" },
+          style: { type: "string", description: "Color or look they want" },
+          concerns: { type: "string", description: "Worries or objections they raised (price, HOA, timing...)" },
+          timing: { type: "string" },
+          decision_makers: { type: "string", description: "Only if they said someone else is involved" },
+          preferred_days: { type: "string" },
+          other: { type: "string" },
+        },
       },
     },
   },
@@ -180,19 +208,34 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
 
 type ZipDirectory = Record<string, [string, string]>;
 const SERVICE_ZIPS = salesZipDirectory as unknown as ZipDirectory;
-/**
- * States in the sales ZIP list that Melanie's SERVICE AREA v1.3 says we don't serve.
- * Until Mike confirms, the bot never says yes for these; the team checks.
- */
-const TEAM_CHECK_STATES = new Set(["NV"]);
 
-export function checkServiceZip(zip: string): { result: "IN_AREA" | "NEEDS_TEAM_CHECK"; city?: string; state?: string } {
+export type ZipResult = "IN_AREA" | "IN_AREA_NV_TWO_DOOR_MINIMUM" | "NOT_SERVED" | "NEEDS_TEAM_CHECK";
+
+/**
+ * Nevada (Steven, 2026-10-26): Reno and Las Vegas only, 2-door minimum.
+ * Henderson, North Las Vegas and Sparks go to the team; other NV cities aren't served.
+ * Unknown ZIPs always go to the team (never a guessed yes or no).
+ */
+export function checkServiceZip(zip: string): { result: ZipResult; city?: string; state?: string } {
   const z = (zip || "").trim();
   const hit = /^\d{5}$/.test(z) ? SERVICE_ZIPS[z] : undefined;
   if (!hit) return { result: "NEEDS_TEAM_CHECK" };
-  if (TEAM_CHECK_STATES.has(hit[1].toUpperCase())) return { result: "NEEDS_TEAM_CHECK", city: hit[0], state: hit[1] };
-  return { result: "IN_AREA", city: hit[0], state: hit[1] };
+  const [city, state] = hit;
+  if (state.toUpperCase() === "NV") {
+    const c = city.trim().toLowerCase();
+    if (NV_SERVED_CITIES.has(c)) return { result: "IN_AREA_NV_TWO_DOOR_MINIMUM", city, state };
+    if (NV_ASK_TEAM_CITIES.has(c)) return { result: "NEEDS_TEAM_CHECK", city, state };
+    return { result: "NOT_SERVED", city, state };
+  }
+  return { result: "IN_AREA", city, state };
 }
+
+const ZIP_TOOL_ANSWER: Record<ZipResult, string> = {
+  IN_AREA: "We serve this ZIP.",
+  IN_AREA_NV_TWO_DOOR_MINIMUM: "We serve this ZIP, but Nevada projects need at least 2 doors. Follow the Nevada rule.",
+  NOT_SERVED: "We don't serve this ZIP right now. Say so kindly and offer the office phone in case that changes. No handoff.",
+  NEEDS_TEAM_CHECK: "Don't say yes or no. Say the team will double-check the ZIP and hand off with reason service_area_check.",
+};
 
 // ---------------------------------------------------------------------------
 // Text clean-up
@@ -227,21 +270,22 @@ export function cleanSmsText(text: string): string {
   return out.slice(0, MAX_BODY_CHARS);
 }
 
-const INCLUSIONS =
-  "That includes installation, hardware, tax, upgrades, a 10-year workmanship warranty and our Lifetime No Break-In Guarantee.";
+const INCLUSIONS = `That includes ${COMPANY_FACTS.doorInclusions}.`;
 
-/** Range text without "around"/"starting" words, e.g. "$3,700 to $5,300". */
+/** Range text without "around"/"starting" words, e.g. "$3,800 to $5,300". */
 function bareRange(fact: string): string {
   const m = fact.match(/\$[\d,]+ to \$[\d,]+/);
   return m ? m[0] : fact;
 }
 
 /**
- * Single/double security door quotes must carry the inclusions (Melanie's PRICING rules).
- * The AI kept shortening them, so the code adds the sentence when it's missing.
+ * The FIRST door price quote in a thread must say what it includes (the AI kept
+ * dropping it), so the code adds the short sentence when it's missing. Later
+ * quotes are left alone: Mike's policy says don't repeat the price paragraph.
  */
-export function ensurePriceInclusions(reply: string): string {
-  const ranges = [bareRange(SMS_BOT_FACTS.singleDoor), bareRange(SMS_BOT_FACTS.doubleDoor)];
+export function ensurePriceInclusions(reply: string, priceAlreadyGiven = false): string {
+  if (priceAlreadyGiven) return reply;
+  const ranges = [bareRange(COMPANY_FACTS.perDoor), bareRange(COMPANY_FACTS.doubleDoor)];
   const at = ranges.map((r) => reply.indexOf(r)).filter((i) => i >= 0).sort((a, b) => a - b)[0];
   if (at === undefined || /includ\w*[^.?!]{0,40}(installation|hardware|tax)/i.test(reply)) return reply;
   const end = reply.slice(at).search(/[.?!](\s|$)/);
@@ -255,19 +299,26 @@ export function promisesTeamFollowUp(reply: string): boolean {
   return /\b(team member|our team|the team|someone (from|on) (our|the) team|our specialist|a specialist|our office)\b[^.?!]{0,40}\b(will|'ll|is going to)\b[^.?!]{0,40}\b(text|call|reach out|contact|follow up|get back|send)/i.test(reply);
 }
 
-const YES = /^(yes|yeah|yep|yup|sure|ok|okay|sounds good|that works|works for me|it works|that's fine|thats fine|fine|absolutely|definitely|of course|correct|y)\b/i;
+/** Did we already text them a price range (any "$x to $y")? */
+export function priceAlreadyGiven(thread: ThreadMessage[]): boolean {
+  return thread.some((m) => m.direction === "outbound" && /\$[\d,]+ to \$[\d,]+/.test(m.body));
+}
 
-/** Their newest text is a yes, and our text right before it asked whether the price works. */
-export function saidYesToPrice(thread: ThreadMessage[]): boolean {
-  const last = thread[thread.length - 1];
-  if (!last || last.direction !== "inbound" || !YES.test(last.body.trim())) return false;
-  for (let i = thread.length - 2; i >= 0; i--) {
-    if (thread[i].direction === "outbound") {
-      const b = thread[i].body;
-      return /\$[\d,]+/.test(b) && /(price|range|budget)[^?]{0,60}(work|fit|okay|ok)\b/i.test(b);
-    }
-  }
-  return false;
+/** Which of our links already went out in this thread (so the bot doesn't resend them). */
+export function linksSent(thread: ThreadMessage[]): string[] {
+  const links: Array<[string, string]> = [
+    ["gallery link", COMPANY_FACTS.gallery],
+    ["catalog link", COMPANY_FACTS.catalog],
+    ["financing page link", COMPANY_FACTS.financingPage],
+  ];
+  const out = thread.filter((m) => m.direction === "outbound").map((m) => m.body).join(" ");
+  return links.filter(([, url]) => out.includes(url.replace(/\/$/, ""))).map(([label]) => label);
+}
+
+/** One line of saved notes for the team's Slack alert. */
+function notesLine(notes: Record<string, string>): string {
+  const parts = Object.entries(notes).filter(([, v]) => v).map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`);
+  return parts.length ? `Notes: ${parts.join("; ")}`.slice(0, 600) : "";
 }
 
 function todayPacific(now: Date): string {
@@ -281,7 +332,7 @@ function todayPacific(now: Date): string {
 // Slack alert for handoffs (optional: SMS_SLACK_WEBHOOK_URL)
 // ---------------------------------------------------------------------------
 
-async function postHandoffToSlack(phone: string, reason: string, summary: string) {
+async function postHandoffToSlack(phone: string, reason: string, summary: string, notes: Record<string, string> = {}) {
   const url = (process.env.SMS_SLACK_WEBHOOK_URL || "").trim();
   if (!url) return;
   const pilot = !allowList().everyone;
@@ -289,7 +340,8 @@ async function postHandoffToSlack(phone: string, reason: string, summary: string
     `${pilot ? "[PILOT] " : ""}:raising_hand: *Texting: Needs CSR* - ${formatPhone(phone)}`,
     `Reason: ${reason.replace(/_/g, " ")}`,
     summary,
-  ].join("\n");
+    notesLine(notes),
+  ].filter(Boolean).join("\n");
   try {
     await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
   } catch (error) {
@@ -335,13 +387,11 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
 
     const thread = await threadForBot(phone, 40);
 
-    // A "yes" right after our price question = price accepted (recorded by code, not left to the AI).
-    if (state.leadStatus !== "price_accepted" && saidYesToPrice(thread)) {
-      await setLeadStatus(phone, "price_accepted", smsNow());
-      await audit({ phone, action: "bot_outcome", reason: "price_accepted", detail: { inboundId, by: "code" }, actor: "system" });
-    }
+    // What we already know (saved notes + what code can see in the thread), shown at the end of the prompt.
+    const notes = { ...state.customerNotes };
+    const known: KnownAboutCustomer = { notes, priceAlreadyGiven: priceAlreadyGiven(thread), linksSent: linksSent(thread) };
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-      { role: "system", content: smsBotSystemPrompt(todayPacific(smsNow())) },
+      { role: "system", content: smsBotSystemPrompt(todayPacific(smsNow()), known) },
     ];
     for (const m of thread) {
       const photos = m.mediaCount ? ` [sent ${m.mediaCount} photo${m.mediaCount > 1 ? "s" : ""}; you can't view photos]` : "";
@@ -377,7 +427,7 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       messages.push(message);
       const calls = (message.tool_calls || []).filter((c) => c.type === "function");
       if (!calls.length) {
-        reply = ensurePriceInclusions(cleanSmsText(message.content || ""));
+        reply = ensurePriceInclusions(cleanSmsText(message.content || ""), known.priceAlreadyGiven);
         break;
       }
 
@@ -391,17 +441,26 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
           const zip = String(args.zip || "");
           const result = checkServiceZip(zip);
           await audit({ phone, action: "bot_zip_check", reason: result.result, detail: { zip, city: result.city, state: result.state }, actor: "denny-ai" });
-          answer(result.result === "IN_AREA"
-            ? { result: "IN_AREA", city: result.city, state: result.state }
-            : { result: "NEEDS_TEAM_CHECK", message: "Don't say yes or no. Say the team will double-check the ZIP and hand off with reason service_area_check." });
+          const place = result.city ? ` ${result.city}, ${result.state}` : "";
+          notes.zip = `${zip}${place}: ${result.result.toLowerCase().replace(/_/g, " ")}`;
+          await saveCustomerNotes(phone, { zip: notes.zip });
+          answer({ result: result.result, city: result.city, state: result.state, message: ZIP_TOOL_ANSWER[result.result] });
         } else if (name === "hand_off_to_team") {
           const reason = HANDOFF_REASONS.includes(args.reason as HandoffReason) ? String(args.reason) : "question_for_team";
           const summary = String(args.summary || "").trim() || "No summary given.";
           await setHandoff(phone, reason, summary, smsNow());
           await audit({ phone, action: "bot_handoff", reason, detail: { summary: summary.slice(0, 500), inboundId }, actor: "denny-ai" });
-          await postHandoffToSlack(phone, reason, summary);
+          await postHandoffToSlack(phone, reason, summary, notes);
           handedOff = { reason };
           answer({ ok: true, message: "Flagged for the team. Now write your one short final message (no promised call or text time)." });
+        } else if (name === "save_customer_notes") {
+          const fresh: Record<string, string> = {};
+          for (const [k, v] of Object.entries(args)) {
+            if (typeof v === "string" && v.trim() && k !== "zip") fresh[k] = v.trim();
+          }
+          await saveCustomerNotes(phone, fresh);
+          Object.assign(notes, fresh);
+          answer({ ok: true, message: "Saved. Now write your reply." });
         } else if (name === "record_outcome") {
           const outcome = args.outcome === "not_interested" ? "not_interested" : args.outcome === "price_accepted" ? "price_accepted" : null;
           if (outcome) {
@@ -432,7 +491,7 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       const summary = "Flagged by code: the AI told the customer our team will follow up but didn't hand off. Read the thread.";
       await setHandoff(phone, reason, summary, smsNow());
       await audit({ phone, action: "bot_handoff", reason, detail: { summary, inboundId, auto: true }, actor: "system" });
-      await postHandoffToSlack(phone, reason, summary);
+      await postHandoffToSlack(phone, reason, summary, notes);
       handedOff = { reason };
     }
 
@@ -444,6 +503,13 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     }
 
     const result = await sendSms({ to: phone, body: reply, kind: "reply", purpose: "care", sentBy: "denny-ai" });
+    await audit({
+      phone,
+      action: "bot_reply",
+      reason: `policy ${CUSTOMER_POLICY_VERSION}`,
+      detail: { inboundId, policyVersion: CUSTOMER_POLICY_VERSION, model: botModel(), sent: result.ok },
+      actor: "denny-ai",
+    });
     return result.ok ? { status: "sent", result } : { status: "not_sent", result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
