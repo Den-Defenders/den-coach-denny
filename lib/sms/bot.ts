@@ -294,6 +294,23 @@ export function ensurePriceInclusions(reply: string, priceAlreadyGiven = false):
   return `${reply.slice(0, cut)} ${INCLUSIONS}${reply.slice(cut)}`.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Re-quoting a door price after it was already given: keep just the number
+ * (Mike's policy: don't repeat the price paragraph). The AI kept re-sending the
+ * whole thing, so code trims it. Only when the reply contains the price range,
+ * so an answer to "what's included?" is left alone.
+ */
+export function trimRepeatedPrice(reply: string, priceAlreadyGiven: boolean): string {
+  if (!priceAlreadyGiven || !/\$[\d,]+ to \$[\d,]+/.test(reply)) return reply;
+  return reply
+    .replace(/\s*That includes [^.?!]*[.?!]/gi, "")
+    .replace(/,?\s*includ(?:ing|es)\s+(?:the\s+)?door,\s*hardware,\s*installation,?\s*and\s+tax/gi, "")
+    .replace(/\s*Each one is custom-built for your entry\./gi, "")
+    .replace(/\s+([.,?!])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 /** "A team member will text you…", "our team will call you" etc. */
 export function promisesTeamFollowUp(reply: string): boolean {
   return /\b(team member|our team|the team|someone (from|on) (our|the) team|our specialist|a specialist|our office)\b[^.?!]{0,40}\b(will|'ll|is going to)\b[^.?!]{0,40}\b(text|call|reach out|contact|follow up|get back|send)/i.test(reply);
@@ -427,7 +444,7 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       messages.push(message);
       const calls = (message.tool_calls || []).filter((c) => c.type === "function");
       if (!calls.length) {
-        reply = ensurePriceInclusions(cleanSmsText(message.content || ""), known.priceAlreadyGiven);
+        reply = trimRepeatedPrice(ensurePriceInclusions(cleanSmsText(message.content || ""), known.priceAlreadyGiven), known.priceAlreadyGiven);
         break;
       }
 
@@ -488,7 +505,12 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     // Safety net: the AI told them the team will follow up but forgot to hand off.
     if (!handedOff && promisesTeamFollowUp(reply)) {
       const reason = /\b(times?|day|days|schedul|consultation|appointment)\b/i.test(reply) ? "ready_to_book" : "question_for_team";
-      const summary = "Flagged by code: the AI told the customer our team will follow up but didn't hand off. Read the thread.";
+      const lastText = [...thread].reverse().find((m) => m.direction === "inbound")?.body || "";
+      const summary = [
+        "Flagged by code: the AI told the customer our team will follow up but didn't hand off.",
+        lastText ? `Their last text: "${lastText.slice(0, 200)}".` : "",
+        notesLine(notes),
+      ].filter(Boolean).join(" ");
       await setHandoff(phone, reason, summary, smsNow());
       await audit({ phone, action: "bot_handoff", reason, detail: { summary, inboundId, auto: true }, actor: "system" });
       await postHandoffToSlack(phone, reason, summary, notes);
