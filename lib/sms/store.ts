@@ -92,6 +92,8 @@ async function createTables(sql: Sql) {
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_at TIMESTAMPTZ`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_status TEXT`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_status_at TIMESTAMPTZ`;
+  // Step 2b (shared brain): what this customer already told us, so the bot never re-asks.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS customer_notes JSONB`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -354,19 +356,49 @@ export type ConversationState = {
   botStatus: BotStatus;
   handoffReason: string | null;
   leadStatus: LeadStatus | null;
+  customerNotes: Record<string, string>;
 };
+
+function notesFrom(value: unknown): Record<string, string> {
+  let obj: unknown = value;
+  if (typeof obj === "string") {
+    try { obj = JSON.parse(obj); } catch { obj = null; }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (typeof v === "string" && v.trim()) out[k] = v.trim();
+  }
+  return out;
+}
 
 export async function conversationState(phone: string): Promise<ConversationState> {
   const contact = await ensureContact(phone);
   const sql = await db();
-  const rows = await sql`SELECT bot_status, handoff_reason, lead_status FROM sms_conversations WHERE id = ${contact.conversationId}`;
+  const rows = await sql`SELECT bot_status, handoff_reason, lead_status, customer_notes FROM sms_conversations WHERE id = ${contact.conversationId}`;
   const row = rows[0] || {};
   return {
     conversationId: contact.conversationId,
     botStatus: row.bot_status === "paused" ? "paused" : "on",
     handoffReason: (row.handoff_reason as string) ?? null,
     leadStatus: (row.lead_status as LeadStatus) ?? null,
+    customerNotes: notesFrom(row.customer_notes),
   };
+}
+
+/** Merge new details into the customer's notes (empty values never wipe a saved one). */
+export async function saveCustomerNotes(phone: string, notes: Record<string, string>) {
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries(notes)) {
+    const value = String(v ?? "").trim();
+    if (value) clean[k.slice(0, 40)] = value.slice(0, 200);
+  }
+  if (!Object.keys(clean).length) return;
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET customer_notes = COALESCE(customer_notes, '{}'::jsonb) || ${JSON.stringify(clean)}::jsonb,
+      updated_at = now()
+    WHERE id = ${contact.conversationId}`;
 }
 
 /** Bot stops answering this number; the team takes over. */
