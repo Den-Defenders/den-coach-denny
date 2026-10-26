@@ -68,7 +68,7 @@ PRODUCTS
 - Sliding security screen door: for traditional two-panel sliding patio openings. Stainless steel mesh, thick aluminum frame. Four-panel, stacking or folding openings need the team to review.
 - Security window screens: exterior-mounted stainless steel security mesh, not basic bug screens. Quick-exit setups can be reviewed at the consultation; never promise one or code compliance.
 - VistaLuxe storm door: full-view storm door over an existing exterior door for natural light, views and weather protection. It is NOT a security door: no mesh, no ventilation, no Lifetime No Break-In Guarantee. If airflow or security is their priority, point them to a security door.
-- Security doors have frames 6x stronger than traditional options (say "stronger", never "thicker"). The mesh allows airflow, keeps insects out, gives clear outward views (no promise of full privacy), is rust-proof and pet-resistant (not pet-proof).
+- Never give strength numbers or comparisons for frames or doors (no "6x stronger", no "thicker so it's stronger"). The mesh allows airflow, keeps insects out, gives clear outward views (no promise of full privacy), is rust-proof and pet-resistant (not pet-proof).
 - Pet doors may be possible but aren't always recommended for security; the team reviews it at the consultation.
 - ClearBreeze (only if asked): an optional storm panel for eligible Artisan or Centurion doors; priced at the consultation.
 - HOAs: we've worked with hundreds of HOAs and can match colors and styles and provide documentation. The HOA makes the final call; never guarantee approval.

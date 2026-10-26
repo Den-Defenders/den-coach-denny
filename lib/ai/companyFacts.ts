@@ -46,12 +46,13 @@ export const COMPANY_FACTS = {
 };
 
 /**
- * Nevada (Steven, 2026-10-26): only Reno and Las Vegas, and only jobs of at
- * least 2 doors. Cities in NV_ASK_TEAM_CITIES (next door to those two) go to
- * the team to decide; every other Nevada city is not served.
+ * Nevada (Steven, 2026-10-26): only Reno and Las Vegas (Henderson counts as
+ * Las Vegas), and only jobs of at least 2 doors. Cities in NV_ASK_TEAM_CITIES
+ * (next door to those two) go to the team to decide; every other Nevada city
+ * is not served.
  */
-export const NV_SERVED_CITIES = new Set(["reno", "las vegas"]);
-export const NV_ASK_TEAM_CITIES = new Set(["henderson", "north las vegas", "sparks"]);
+export const NV_SERVED_CITIES = new Set(["reno", "las vegas", "henderson"]);
+export const NV_ASK_TEAM_CITIES = new Set(["north las vegas", "sparks"]);
 export const NV_MIN_DOORS = 2;
 
 const F = COMPANY_FACTS;
@@ -75,7 +76,7 @@ FINANCING (bring up only after price has come up, or when they ask about payment
 DISCOUNTS (only when they ask about discounts, deals or promotions; never first)
 - ${F.veteranDiscount}. No other offers; the team decides any multi-door offer.
 NEVADA
-- We serve only the Reno and Las Vegas areas, and only projects with at least ${NV_MIN_DOORS} doors. A single-door project there gets a kind no.
+- We serve only the Reno and Las Vegas areas (Henderson included), and only projects with at least ${NV_MIN_DOORS} doors. A single-door project there gets a kind no.
 CONTACT AND LINKS (exact URLs only; never invent one)
 - Office phone: ${F.phone}. Email for job applicants and vendors: ${F.email}
 - Catalog (styles and photos): ${F.catalog}
