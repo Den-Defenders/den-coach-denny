@@ -194,6 +194,9 @@ const ROUTE_RULES: Rule[] = [
   // Texting test page (pilot): owners only.
   { prefix: "/sms-test", roles: ["owner"] },
   { prefix: "/api/sms/test", roles: ["owner"] },
+  // Door photo library the texting bot can send: owners only (photo files themselves live on Blob).
+  { prefix: "/door-photos", roles: ["owner"] },
+  { prefix: "/api/door-photos", roles: ["owner"] },
 
   { prefix: "/talk", roles: VOICE_ROLES },
   { prefix: "/api/field-voice", roles: VOICE_ROLES },
