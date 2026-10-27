@@ -59,7 +59,11 @@ export type SendRequest = {
   purpose?: SendPurpose;
   /** Who is sending, for the log: an email, "denny-ai", "drip", "system". */
   sentBy: string;
+  /** Up to 2 public https photo links (door photo library) → sent as one picture text (MMS, ~2-3 cents). */
+  mediaUrls?: string[];
 };
+
+export const MAX_MEDIA_PER_TEXT = 2;
 
 export type BlockReason =
   | "invalid_number" | "empty_message" | "too_long" | "invalid_kind"
@@ -67,7 +71,7 @@ export type BlockReason =
   | "opted_out" | "no_consent" | "promo_texts_disabled" | "no_marketing_consent"
   | "reply_window_closed" | "outside_hours" | "holiday"
   | "contact_hourly_cap" | "contact_daily_cap" | "automated_daily_cap" | "system_daily_cap"
-  | "no_recent_opt_out" | "no_recent_opt_in" | "twilio_rejected";
+  | "no_recent_opt_out" | "no_recent_opt_in" | "twilio_rejected" | "bad_media";
 
 export type SendResult =
   | { ok: true; messageId: number; twilioSid: string; status: string }
@@ -108,7 +112,7 @@ export function allowList(): { everyone: boolean; numbers: string[] } {
 
 // Tests can swap the clock and Twilio.
 let clock: () => Date = () => new Date();
-let sender: (to: string, body: string) => Promise<TwilioSendResult> = twilioSendMessage;
+let sender: (to: string, body: string, mediaUrls?: string[]) => Promise<TwilioSendResult> = twilioSendMessage;
 export function setSendDepsForTests(deps: { now?: () => Date; send?: typeof sender } | null) {
   clock = deps?.now ?? (() => new Date());
   sender = deps?.send ?? twilioSendMessage;
@@ -128,6 +132,7 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
   const phone = normalizePhone(request.to);
   const body = (request.body || "").trim();
   const actor = request.sentBy || "unknown";
+  const media = (request.mediaUrls || []).filter(Boolean);
 
   const block = async (reason: BlockReason, message: string, detail?: Record<string, unknown>): Promise<SendResult> => {
     if (reason !== "database_not_configured") {
@@ -141,6 +146,9 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
   if (!phone) return block("invalid_number", "That isn't a valid US/Canada mobile number.");
   if (!body) return block("empty_message", "The message is empty.");
   if (body.length > MAX_BODY_CHARS) return block("too_long", `Keep texts under ${MAX_BODY_CHARS} characters (this one is ${body.length}).`);
+  if (media.length > MAX_MEDIA_PER_TEXT || media.some((u) => !/^https:\/\/[^\s]+$/i.test(u))) {
+    return block("bad_media", `Up to ${MAX_MEDIA_PER_TEXT} https photo links per text.`, { media: media.length });
+  }
 
   // 2-4. Switches and setup
   if (!smsDatabaseConfigured()) return block("database_not_configured", "Texting database isn't set up.");
@@ -209,8 +217,8 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
   }
 
   // Send. Record first so nothing goes out without a row.
-  const messageId = await createOutbound({ conversationId: contact.conversationId, phone, body, kind, purpose, sentBy: actor, at: now });
-  const result = await sender(phone, body);
+  const messageId = await createOutbound({ conversationId: contact.conversationId, phone, body, kind, purpose, sentBy: actor, at: now, media });
+  const result = await sender(phone, body, media);
   if (!result.ok) {
     await markOutboundFailed(messageId, result.code, result.message);
     if (result.code === TWILIO_UNSUBSCRIBED_ERROR) {
@@ -220,7 +228,7 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
     return block("twilio_rejected", `Twilio didn't accept the text: ${result.message}`, { code: result.code, httpStatus: result.httpStatus, messageId });
   }
   await markOutboundAccepted(messageId, result.sid, result.status, result.from);
-  await audit({ phone, action: "sent", reason: kind, detail: { purpose, messageId, sid: result.sid, chars: body.length }, actor });
+  await audit({ phone, action: "sent", reason: kind, detail: { purpose, messageId, sid: result.sid, chars: body.length, ...(media.length ? { photos: media.length } : {}) }, actor });
   return { ok: true, messageId, twilioSid: result.sid, status: result.status };
 }
 
