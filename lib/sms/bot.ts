@@ -68,7 +68,7 @@ function debounceMs(): number {
 
 /** Keep AI replies to about 3-4 SMS segments; the send helper's hard limit is 640. */
 const MAX_REPLY_CHARS = 600;
-const MAX_ROUNDS = 4;
+const MAX_ROUNDS = 5;
 
 export const HANDOFF_REASONS = [
   "wants_call",
@@ -293,7 +293,42 @@ export function cleanSmsText(text: string): string {
     for (const m of cut.matchAll(/[.?!](?=\s)/g)) end = m.index ?? end;
     out = end > 200 ? cut.slice(0, end + 1).trim() : cut.slice(0, Math.max(cut.lastIndexOf(" "), cut.lastIndexOf("\n"))).trim();
   }
-  return out.slice(0, MAX_BODY_CHARS);
+  return dropRepeatedParagraphs(out).slice(0, MAX_BODY_CHARS);
+}
+
+function wordSet(text: string): Set<string> {
+  return new Set((text.toLowerCase().match(/[a-z0-9']+/g) || []).filter((w) => w.length > 3));
+}
+
+/**
+ * The AI sometimes says the same thing twice in one text ("Here are a couple…"
+ * then "I've sent photos…"). Drop a paragraph that mostly repeats an earlier one.
+ */
+export function dropRepeatedParagraphs(text: string): string {
+  const kept: Array<{ part: string; words: Set<string> }> = [];
+  for (const part of text.split("\n\n")) {
+    const words = wordSet(part);
+    const repeat = words.size >= 4 && kept.some((k) => {
+      let same = 0;
+      for (const w of words) if (k.words.has(w)) same++;
+      return same / Math.min(words.size, k.words.size) >= 0.6;
+    });
+    if (!repeat) kept.push({ part, words });
+  }
+  return kept.map((k) => k.part).join("\n\n");
+}
+
+/** "Here are a couple of Artisan doors we installed", "I've sent photos…": the reply says photos are attached. */
+export function claimsPhotos(reply: string): boolean {
+  if (/https?:\/\//i.test(reply)) return false;
+  return /\b(here (are|is)|here's|i('ve| have)? sent|i'm sending|sending you|attached)\b[^.?!\n]{0,60}\b(photos?|pictures?|pics?|images?|examples?|installed)\b/i.test(reply)
+    || /\b(photos?|pictures?|pics?)\b[^.?!\n]{0,30}\b(attached|sent)\b/i.test(reply);
+}
+
+/** Last resort: take out the photo claim and point to the gallery instead. */
+function withoutPhotoClaim(reply: string): string {
+  const parts = reply.split(/(?<=[.?!])\s+/).filter((s) => !claimsPhotos(s));
+  return [parts.join(" ").trim(), `You can see installed doors in our gallery: ${COMPANY_FACTS.gallery}`].filter(Boolean).join("\n\n");
 }
 
 const INCLUSIONS = `That includes ${COMPANY_FACTS.doorInclusions}.`;
@@ -451,6 +486,7 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     let handedOff: { reason: string } | null = null;
     let reply = "";
     let media: string[] = [];
+    let photoNudged = false;
 
     for (let round = 0; round < MAX_ROUNDS && !reply; round++) {
       const params = (model: string): CompletionParams => ({
@@ -476,6 +512,17 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       const calls = (message.tool_calls || []).filter((c) => c.type === "function");
       if (!calls.length) {
         reply = trimRepeatedPrice(ensurePriceInclusions(cleanSmsText(message.content || ""), known.priceAlreadyGiven), known.priceAlreadyGiven);
+        // The AI said photos are attached but never attached any: one more try.
+        if (!media.length && !photoNudged && round < MAX_ROUNDS - 1 && claimsPhotos(reply)) {
+          photoNudged = true;
+          await audit({ phone, action: "bot_photo_claim_retry", reason: "no_photos_attached", detail: { inboundId }, actor: "system" });
+          messages.push({
+            role: "system",
+            content: "Check (from the system, not the customer): your reply says photos are attached, but none are. If they want to see a style, call send_door_photos now and then write the reply. Otherwise rewrite the reply without mentioning photos.",
+          });
+          reply = "";
+          continue;
+        }
         break;
       }
 
@@ -560,6 +607,12 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     if (!reply) {
       await audit({ phone, action: "bot_no_reply", reason: handedOff ? "handoff_without_message" : "empty_model_reply", detail: { inboundId }, actor: "denny-ai" });
       return { status: "skipped", reason: "empty_model_reply" };
+    }
+
+    // Never tell them photos are attached when none are.
+    if (!media.length && claimsPhotos(reply)) {
+      await audit({ phone, action: "bot_photo_claim_removed", reason: "no_photos_attached", detail: { inboundId }, actor: "system" });
+      reply = withoutPhotoClaim(reply);
     }
 
     // Safety net: the AI told them the team will follow up but forgot to hand off.
