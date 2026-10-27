@@ -244,18 +244,26 @@ const ZIP_TOOL_ANSWER: Record<ZipResult, string> = {
 /** Openers Melanie's docs ban ("Great!", "Perfect!", "Got it."). */
 const BANNED_OPENER = /^((great|good|perfect|awesome|excellent|nice|wonderful) (news|choice|question|pick|call)|great|perfect|awesome|excellent|love it|got it|absolutely)\s*[!.,]+\s*/i;
 
-/** Plain SMS text: no markdown, no dashes the docs ban, no emojis (they triple the cost), no banned openers. */
+/**
+ * Plain SMS text: no markdown, no dashes the docs ban, no emojis (they triple the cost),
+ * no banned openers. Parts of a reply are kept apart with ONE blank line (Mike, 2026-10-27:
+ * no run-on paragraphs), still sent as a single text.
+ */
 export function cleanSmsText(text: string): string {
   let out = (text || "")
+    .replace(/\r\n?/g, "\n")
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/__(.+?)__/g, "$1")
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/^\s*[-*•]\s+/gm, "")
-    .replace(/(\d)\s*[–—]\s*(\$?\d)/g, "$1 to $2")
-    .replace(/\s*[—–]\s*/g, ", ")
+    .replace(/(\d)[ \t]*[–—][ \t]*(\$?\d)/g, "$1 to $2")
+    .replace(/[ \t]*[—–][ \t]*/g, ", ")
     .replace(/\p{Extended_Pictographic}️?/gu, "")
     .replace(/[ \t]+/g, " ")
-    .replace(/\s*\n\s*/g, " ")
+    .split(/\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n\n")
     .trim();
   const opener = out.match(BANNED_OPENER);
   if (opener && out.length > opener[0].length + 10) {
@@ -264,8 +272,9 @@ export function cleanSmsText(text: string): string {
   }
   if (out.length > MAX_REPLY_CHARS) {
     const cut = out.slice(0, MAX_REPLY_CHARS);
-    const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
-    out = end > 200 ? cut.slice(0, end + 1) : cut.slice(0, cut.lastIndexOf(" ")).trim();
+    let end = -1;
+    for (const m of cut.matchAll(/[.?!](?=\s)/g)) end = m.index ?? end;
+    out = end > 200 ? cut.slice(0, end + 1).trim() : cut.slice(0, Math.max(cut.lastIndexOf(" "), cut.lastIndexOf("\n"))).trim();
   }
   return out.slice(0, MAX_BODY_CHARS);
 }
@@ -291,7 +300,7 @@ export function ensurePriceInclusions(reply: string, priceAlreadyGiven = false):
   const end = reply.slice(at).search(/[.?!](\s|$)/);
   if (end < 0) return `${reply.trim()}. ${INCLUSIONS}`;
   const cut = at + end + 1;
-  return `${reply.slice(0, cut)} ${INCLUSIONS}${reply.slice(cut)}`.replace(/\s+/g, " ").trim();
+  return `${reply.slice(0, cut)} ${INCLUSIONS}${reply.slice(cut)}`.replace(/[ \t]+/g, " ").trim();
 }
 
 /**
@@ -306,8 +315,9 @@ export function trimRepeatedPrice(reply: string, priceAlreadyGiven: boolean): st
     .replace(/\s*That includes [^.?!]*[.?!]/gi, "")
     .replace(/,?\s*includ(?:ing|es)\s+(?:the\s+)?door,\s*hardware,\s*installation,?\s*and\s+tax/gi, "")
     .replace(/\s*Each one is custom-built for your entry\./gi, "")
-    .replace(/\s+([.,?!])/g, "$1")
-    .replace(/\s{2,}/g, " ")
+    .replace(/[ \t]+([.,?!])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
