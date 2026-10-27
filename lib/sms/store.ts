@@ -205,14 +205,17 @@ export type OutboundInput = {
   purpose: string;
   sentBy: string;
   at: Date;
+  /** Picture links sent with the text (MMS). */
+  media?: string[];
 };
 
 /** Record the text before calling Twilio, so a crash can't hide a send. */
 export async function createOutbound(input: OutboundInput): Promise<number> {
   const sql = await db();
   const rows = await sql`INSERT INTO sms_messages
-      (conversation_id, phone, direction, kind, purpose, body, status, sent_by, created_at, updated_at)
+      (conversation_id, phone, direction, kind, purpose, body, media, status, sent_by, created_at, updated_at)
     VALUES (${input.conversationId}, ${input.phone}, 'outbound', ${input.kind}, ${input.purpose}, ${input.body},
+      ${input.media?.length ? JSON.stringify(input.media) : null}::jsonb,
       'pending', ${input.sentBy}, ${iso(input.at)}::timestamptz, ${iso(input.at)}::timestamptz)
     RETURNING id`;
   await sql`UPDATE sms_conversations SET last_outbound_at = ${iso(input.at)}::timestamptz, updated_at = now()

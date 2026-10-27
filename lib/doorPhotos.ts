@@ -67,8 +67,15 @@ export function blobConfigured(): boolean {
   return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 }
 
+let testPhotos: DoorPhoto[] | null = null;
+/** Tests only: use this list instead of Vercel Blob. */
+export function setDoorPhotosForTests(photos: DoorPhoto[] | null) {
+  testPhotos = photos;
+}
+
 /** Every photo in the library (newest first). */
 export async function listDoorPhotos(): Promise<DoorPhoto[]> {
+  if (testPhotos) return [...testPhotos];
   const photos: DoorPhoto[] = [];
   let cursor: string | undefined;
   do {
@@ -100,4 +107,39 @@ export async function deleteDoorPhoto(url: string): Promise<boolean> {
   if (!parseDoorPhotoPath(pathname)) return false;
   await del(url);
   return true;
+}
+
+/**
+ * Pick up to `count` photos for the texting bot. Skips photos this customer
+ * already got (by file name). If Double Doors has none, falls back to Single
+ * and says so. Never throws: no storage or no photos → empty list.
+ */
+export async function pickDoorPhotos(
+  category: DoorPhotoCategory,
+  variant: DoorPhotoVariant,
+  alreadySent: string[] = [],
+  count = 2,
+): Promise<{ photos: DoorPhoto[]; variant: DoorPhotoVariant; fellBackToSingle: boolean }> {
+  let all: DoorPhoto[] = [];
+  try {
+    if (testPhotos || blobConfigured()) all = await listDoorPhotos();
+  } catch (error) {
+    console.error("Door photos list failed:", error instanceof Error ? error.message : error);
+  }
+  const sent = new Set(alreadySent);
+  const choose = (v: DoorPhotoVariant) => {
+    const pool = all.filter((p) => p.category === category && p.variant === v);
+    const fresh = pool.filter((p) => !sent.has(doorPhotoName(p.pathname)));
+    const list = fresh.length ? fresh : pool;
+    return [...list].sort(() => Math.random() - 0.5).slice(0, count);
+  };
+  let photos = choose(variant);
+  if (photos.length || variant === "single") return { photos, variant, fellBackToSingle: false };
+  photos = choose("single");
+  return { photos, variant: "single", fellBackToSingle: photos.length > 0 };
+}
+
+/** Short file name used to remember which photos a customer already got. */
+export function doorPhotoName(pathname: string): string {
+  return (pathname.split("/").pop() || "").replace(/\.jpe?g$/i, "");
 }

@@ -23,6 +23,7 @@ import OpenAI from "openai";
 import salesZipDirectory from "@/app/lib/salesZipDirectory.json";
 import { COMPANY_FACTS, NV_ASK_TEAM_CITIES, NV_SERVED_CITIES } from "@/lib/ai/companyFacts";
 import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
+import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from "@/lib/doorPhotos";
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { MAX_BODY_CHARS, formatPhone, localTime, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
@@ -192,6 +193,22 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           preferred_days: { type: "string" },
           other: { type: "string" },
         },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "send_door_photos",
+      description:
+        "Attach 1 to 2 real installed photos of one style to THIS reply (one picture text). Use when they ask to see a style or photos, or right after you recommend a style. Write your reply as if the photos are attached, but only if this returns ok.",
+      parameters: {
+        type: "object",
+        properties: {
+          category: { type: "string", enum: DOOR_PHOTO_CATEGORIES.map((c) => c.key) },
+          variant: { type: "string", enum: ["single", "double"], description: "double for double / French doors" },
+        },
+        required: ["category"],
       },
     },
   },
@@ -421,7 +438,10 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       { role: "system", content: smsBotSystemPrompt(todayPacific(smsNow()), known) },
     ];
     for (const m of thread) {
-      const photos = m.mediaCount ? ` [sent ${m.mediaCount} photo${m.mediaCount > 1 ? "s" : ""}; you can't view photos]` : "";
+      const plural = m.mediaCount > 1 ? "s" : "";
+      const photos = !m.mediaCount ? ""
+        : m.direction === "inbound" ? ` [they sent ${m.mediaCount} photo${plural}; you can't view photos]`
+        : ` [we sent ${m.mediaCount} door photo${plural}]`;
       const content = `${m.body}${photos}`.trim();
       if (!content) continue;
       messages.push({ role: m.direction === "inbound" ? "user" : "assistant", content });
@@ -430,6 +450,7 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
 
     let handedOff: { reason: string } | null = null;
     let reply = "";
+    let media: string[] = [];
 
     for (let round = 0; round < MAX_ROUNDS && !reply; round++) {
       const params = (model: string): CompletionParams => ({
@@ -480,10 +501,39 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
           await postHandoffToSlack(phone, reason, summary, notes);
           handedOff = { reason };
           answer({ ok: true, message: "Flagged for the team. Now write your one short final message (no promised call or text time)." });
+        } else if (name === "send_door_photos") {
+          const category = isCategory(args.category) ? args.category : null;
+          const variant = args.variant === "double" ? "double" : "single";
+          if (!category) {
+            answer({ ok: false, message: "Unknown style." });
+          } else if (media.length) {
+            answer({ ok: false, message: "Photos are already attached to this reply." });
+          } else {
+            const sentBefore = (notes._photos_sent || "").split(",").map((s) => s.trim()).filter(Boolean);
+            const pick = await pickDoorPhotos(category, variant, sentBefore);
+            if (!pick.photos.length) {
+              answer({ ok: false, message: "No photos of that style yet. Offer the gallery link instead and don't say photos are attached." });
+            } else {
+              media = pick.photos.map((p) => p.url);
+              const label = DOOR_PHOTO_CATEGORIES.find((c) => c.key === category)?.label || category;
+              const names = [...sentBefore, ...pick.photos.map((p) => doorPhotoName(p.pathname))].slice(-20);
+              notes._photos_sent = names.join(",");
+              notes.photos_sent = [notes.photos_sent, `${label} (${pick.variant})`].filter(Boolean).join("; ").slice(0, 200);
+              await saveCustomerNotes(phone, { _photos_sent: notes._photos_sent, photos_sent: notes.photos_sent });
+              await audit({ phone, action: "bot_photos", reason: `${category}/${pick.variant}`, detail: { inboundId, count: media.length }, actor: "denny-ai" });
+              answer({
+                ok: true,
+                attached: media.length,
+                message: pick.fellBackToSingle
+                  ? `Attached ${media.length} single-door photo(s); we don't have double-door photos of this style yet, so say these show the style on a single door.`
+                  : `Attached ${media.length} installed ${label} photo(s). Now write your reply.`,
+              });
+            }
+          }
         } else if (name === "save_customer_notes") {
           const fresh: Record<string, string> = {};
           for (const [k, v] of Object.entries(args)) {
-            if (typeof v === "string" && v.trim() && k !== "zip") fresh[k] = v.trim();
+            if (typeof v === "string" && v.trim() && k !== "zip" && !k.startsWith("_") && k !== "photos_sent") fresh[k] = v.trim();
           }
           await saveCustomerNotes(phone, fresh);
           Object.assign(notes, fresh);
@@ -534,12 +584,12 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       if (await outboundSinceMessage(phone, inboundId)) return skip(phone, "already_answered", inboundId);
     }
 
-    const result = await sendSms({ to: phone, body: reply, kind: "reply", purpose: "care", sentBy: "denny-ai" });
+    const result = await sendSms({ to: phone, body: reply, kind: "reply", purpose: "care", sentBy: "denny-ai", mediaUrls: media });
     await audit({
       phone,
       action: "bot_reply",
       reason: `policy ${CUSTOMER_POLICY_VERSION}`,
-      detail: { inboundId, policyVersion: CUSTOMER_POLICY_VERSION, model: botModel(), sent: result.ok },
+      detail: { inboundId, policyVersion: CUSTOMER_POLICY_VERSION, model: botModel(), sent: result.ok, photos: media.length },
       actor: "denny-ai",
     });
     return result.ok ? { status: "sent", result } : { status: "not_sent", result };

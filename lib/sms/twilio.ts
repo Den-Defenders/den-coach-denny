@@ -90,10 +90,12 @@ export type TwilioSendResult =
 /** Twilio error 21610 = this number replied STOP to us (Twilio blocks it). */
 export const TWILIO_UNSUBSCRIBED_ERROR = "21610";
 
-export async function twilioSendMessage(to: string, body: string): Promise<TwilioSendResult> {
+/** Send a text; mediaUrls (public https image links) turn it into a picture text (MMS). */
+export async function twilioSendMessage(to: string, body: string, mediaUrls: string[] = []): Promise<TwilioSendResult> {
   const cfg = messagingConfig();
   if (!cfg) return { ok: false, code: null, message: "Twilio Messaging is not configured.", httpStatus: 0 };
   const form = new URLSearchParams({ To: to, Body: body, MessagingServiceSid: cfg.messagingServiceSid });
+  for (const url of mediaUrls) form.append("MediaUrl", url);
   const base = webhookBaseUrl();
   if (base) form.set("StatusCallback", `${base}/api/sms/status`);
   try {
