@@ -260,18 +260,19 @@ export default function SmsSimulator() {
       <section className="surface team-list">
         <h2>Scenarios</h2>
         <p className="team-hint">Tick the ones to run, or run them all. Each one plays out until the customer is done, the AI hands off to a CSR, or it hits its turn limit. Results are saved to the test log automatically.</p>
-        <div className="owner-table-wrap">
+        <div className="owner-table-wrap sim-scenarios">
           <table className="team-table">
+            <colgroup><col className="sim-col-pick" /><col className="sim-col-name" /><col /><col className="sim-col-first" /><col className="sim-col-turns" /><col className="sim-col-actions" /></colgroup>
             <thead><tr><th></th><th>Name</th><th>Who the customer is and what they want</th><th>First text</th><th>Turns</th><th></th></tr></thead>
             <tbody>
               {scenarios.map((s) => (
                 <tr key={s.id}>
                   <td><input type="checkbox" checked={selected.has(s.id || 0)} onChange={() => toggle(s.id)} aria-label={`Select ${s.name}`} /></td>
-                  <td style={{ fontWeight: 700 }}>{s.name}</td>
-                  <td style={{ maxWidth: 420 }}>{s.persona}</td>
-                  <td style={{ maxWidth: 220 }}>{s.opening || <span className="team-hint">AI writes it</span>}</td>
-                  <td>{s.maxTurns}</td>
-                  <td style={{ whiteSpace: "nowrap" }}>
+                  <td className="sim-name">{s.name}</td>
+                  <td>{s.persona}</td>
+                  <td>{s.opening ? <q>{s.opening}</q> : <span className="team-hint">AI writes it</span>}</td>
+                  <td className="sim-turns">{s.maxTurns}</td>
+                  <td className="sim-actions">
                     <button className="btn btn-outline btn-small" disabled={busy} onClick={() => runMany([s])}>Run</button>{" "}
                     <button className="btn btn-outline btn-small" onClick={() => setEditing({ ...s })}>Edit</button>{" "}
                     <button className="btn btn-outline btn-small" onClick={() => removeScenario(s)}>Delete</button>
