@@ -55,6 +55,11 @@ function sqlClient(): Sql {
 
 let schemaReady: Promise<void> | null = null;
 
+/** The texting database (tables created on first use). Also used by the Simulator's tables. */
+export function smsDb(): Promise<Sql> {
+  return db();
+}
+
 async function db(): Promise<Sql> {
   const sql = sqlClient();
   if (!schemaReady) {
