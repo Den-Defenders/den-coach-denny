@@ -82,6 +82,21 @@ a { color: inherit; }
 .sim-event-opt_out { background: #fdecef; border-color: #f2b8c3; color: #8a1c33; }
 .sim-event-zip, .sim-event-outcome { background: #e9f7f1; border-color: #b6e3cf; color: #145c3f; }
 .sim-typing { align-self: flex-end; color: var(--muted); font-size: 22px; letter-spacing: 2px; }
+/* Scenarios table: wrap long text inside each column (the shared table style keeps everything on one line). */
+.owner-table-wrap.sim-scenarios { max-height: 640px; }
+.owner-table-wrap.sim-scenarios table { white-space: normal; table-layout: fixed; min-width: 980px; font-size: 14px; }
+.owner-table-wrap.sim-scenarios th, .owner-table-wrap.sim-scenarios td { text-align: left; vertical-align: top; line-height: 1.4; overflow-wrap: anywhere; }
+.owner-table-wrap.sim-scenarios th:first-child, .owner-table-wrap.sim-scenarios td:first-child { position: static; }
+.sim-col-pick { width: 44px; }
+.sim-col-name { width: 170px; }
+.sim-col-first { width: 24%; }
+.sim-col-turns { width: 64px; }
+.sim-col-actions { width: 118px; }
+.sim-scenarios .sim-name { font-weight: 700; color: var(--navy); }
+.sim-scenarios .sim-turns { text-align: center; }
+.sim-scenarios q { font-style: italic; color: #33414f; }
+.owner-table-wrap.sim-scenarios td.sim-actions { overflow-wrap: normal; }
+.sim-scenarios .sim-actions .btn { display: flex; width: 100%; margin-bottom: 6px; white-space: nowrap; }
 .sim-edit { margin-top: 16px; padding: 14px; border: 1px dashed var(--line); border-radius: 14px; }
 .sim-edit h3 { margin: 0 0 10px; }
 .sim-chat-box { display: flex; gap: 8px; margin-top: 12px; align-items: stretch; flex-wrap: wrap; }
