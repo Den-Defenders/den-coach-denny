@@ -52,10 +52,40 @@ a { color: inherit; }
 .nav-talk { background: linear-gradient(135deg, #0b7f79, #159d96); }
 .nav-team { background: linear-gradient(135deg, #3b4a5a, #56697c); }
 .nav-texting { background: linear-gradient(135deg, #5b3f8f, #7a5cc4); }
-/* Owners have 8 tiles: two even rows of 4 on wide screens instead of 7 + 1. */
+.nav-simulator { background: linear-gradient(135deg, #a8326e, #d0558f); }
+/* Owners have 8 tiles: two even rows of 4 on wide screens instead of 7 + 1.
+   With the pilot Simulator tile (9): two rows of 5 + 4, a bit smaller text. */
 @media (min-width: 1101px) {
   .den-nav:has(> .nav-tile:nth-child(8)) { grid-template-columns: repeat(4, 1fr); }
+  .den-nav:has(> .nav-tile:nth-child(9)) { grid-template-columns: repeat(5, 1fr); }
+  .den-nav:has(> .nav-tile:nth-child(9)) .nav-tile { font-size: clamp(15px, 1.3vw, 21px); gap: 10px; padding: 12px 12px; }
 }
+
+/* Texting Simulator */
+.btn.btn-small { padding: 6px 12px; font-size: 14px; min-height: 0; border-radius: 10px; }
+.sim-run { border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 12px; background: #fff; }
+.sim-run-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; justify-content: space-between; }
+.sim-run-title { background: none; border: 0; padding: 0; font-weight: 800; font-size: 16px; color: var(--navy); cursor: pointer; text-align: left; }
+.sim-run-actions { display: flex; gap: 6px; }
+.sim-thread { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.sim-row { display: flex; flex-direction: column; max-width: 78%; }
+.sim-customer { align-self: flex-start; }
+.sim-bot { align-self: flex-end; align-items: flex-end; }
+.sim-who { font-size: 12px; font-weight: 700; color: var(--muted); margin: 0 6px 3px; }
+.sim-bubble { white-space: pre-wrap; padding: 10px 14px; border-radius: 18px; line-height: 1.4; font-size: 15px; }
+.sim-customer .sim-bubble { background: #eef1f4; color: #1d2a36; border-bottom-left-radius: 5px; }
+.sim-bot .sim-bubble { background: linear-gradient(135deg, #5b3f8f, #7a5cc4); color: #fff; border-bottom-right-radius: 5px; }
+.sim-photos { display: flex; gap: 6px; margin-top: 6px; }
+.sim-photos img { width: 110px; height: 110px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
+.sim-event { font-size: 12.5px; color: #4a5866; background: #fff8e6; border: 1px solid #f3dfa8; border-radius: 8px; padding: 4px 8px; margin-top: 5px; max-width: 100%; }
+.sim-event-handoff { background: #fdecef; border-color: #f2b8c3; color: #8a1c33; font-weight: 700; }
+.sim-event-opt_out { background: #fdecef; border-color: #f2b8c3; color: #8a1c33; }
+.sim-event-zip, .sim-event-outcome { background: #e9f7f1; border-color: #b6e3cf; color: #145c3f; }
+.sim-typing { align-self: flex-end; color: var(--muted); font-size: 22px; letter-spacing: 2px; }
+.sim-edit { margin-top: 16px; padding: 14px; border: 1px dashed var(--line); border-radius: 14px; }
+.sim-edit h3 { margin: 0 0 10px; }
+.sim-chat-box { display: flex; gap: 8px; margin-top: 12px; align-items: stretch; flex-wrap: wrap; }
+.sim-chat-box textarea { flex: 1 1 320px; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font: inherit; resize: vertical; }
 .sign-out-link { margin-left: 6px; padding-left: 10px; border-left: 1px solid var(--line); color: var(--muted); font-weight: 650; font-size: 14px; text-decoration: none; }
 .sign-out-link:hover { color: var(--coral); }
 .nav-icon { width: 36px; height: 36px; display: grid; place-items: center; flex: 0 0 auto; }

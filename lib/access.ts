@@ -194,6 +194,9 @@ const ROUTE_RULES: Rule[] = [
   // Texting test page (pilot): owners only.
   { prefix: "/sms-test", roles: ["owner"] },
   { prefix: "/api/sms/test", roles: ["owner"] },
+  // Texting Simulator (pilot): owners only. Nothing is texted from it.
+  { prefix: "/sms-sim", roles: ["owner"] },
+  { prefix: "/api/sms/sim", roles: ["owner"] },
   // Door photo library the texting bot can send: owners only (photo files themselves live on Blob).
   { prefix: "/door-photos", roles: ["owner"] },
   { prefix: "/api/door-photos", roles: ["owner"] },
@@ -242,13 +245,13 @@ export function landingPathFor(role: AccessRole): string {
   return "/";
 }
 
-export type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team" | "texting";
+export type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team" | "texting" | "simulator";
 
 export function navFor(role: AccessRole): NavKey[] {
   switch (role) {
     case "owner":
-      // "texting" = the texting test page (pilot). Owners only for now.
-      return ["home", "chat", "listen", "schedule", "talk", "owner", "team", "texting"];
+      // "texting" = the texting test page, "simulator" = the texting Simulator (pilot). Owners only for now.
+      return ["home", "chat", "listen", "schedule", "talk", "owner", "team", "texting", "simulator"];
     case "manager":
       return ["home", "chat", "listen", "schedule", "talk", "team"];
     case "csr":

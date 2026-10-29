@@ -17,6 +17,9 @@
  *
  * Handoffs ("Needs CSR") pause the bot for that number until an owner turns it
  * back on at /sms-test. The Texting inbox (step 3) will show them too.
+ *
+ * composeBotReply() is the brain on its own (no sending); the Simulator
+ * (lib/sms/simulator.ts, /sms-sim) runs it with an AI playing the customer.
  */
 import { after } from "next/server";
 import OpenAI from "openai";
@@ -429,7 +432,200 @@ async function postHandoffToSlack(phone: string, reason: string, summary: string
 }
 
 // ---------------------------------------------------------------------------
-// The reply
+// The brain: decide the reply (shared by real texting and the Simulator)
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the brain does to the outside world goes through these hooks, so
+ * the Simulator (/sms-sim) can run the exact same brain without touching
+ * Twilio, the customer's real record or Slack.
+ */
+export type BotEffects = {
+  /** Guardrail-log line (real) or a Simulator event. */
+  log: (action: string, reason: string, detail?: Record<string, unknown>, actor?: string) => Promise<void>;
+  saveNotes: (fresh: Record<string, string>) => Promise<void>;
+  /** auto = flagged by code (the AI promised a follow-up without handing off). */
+  handOff: (reason: string, summary: string, notes: Record<string, string>, auto: boolean) => Promise<void>;
+  outcome: (outcome: LeadStatus) => Promise<void>;
+  /** Natural-language opt-out: record it and send the standard confirmation. */
+  optOut: () => Promise<void>;
+};
+
+export type ComposeResult =
+  | { kind: "reply"; reply: string; media: string[]; handedOff: { reason: string } | null; model: string }
+  | { kind: "opted_out" }
+  | { kind: "no_reply"; reason: string; handedOff: { reason: string } | null };
+
+/**
+ * Decide what the bot texts back to the newest text in `thread`.
+ * No sending here: the caller sends (real) or shows it (Simulator).
+ */
+export async function composeBotReply(
+  input: { thread: ThreadMessage[]; notes: Record<string, string>; now: Date },
+  fx: BotEffects,
+): Promise<ComposeResult> {
+  const { thread } = input;
+  const notes = { ...input.notes };
+  const known: KnownAboutCustomer = { notes, priceAlreadyGiven: priceAlreadyGiven(thread), linksSent: linksSent(thread) };
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: "system", content: smsBotSystemPrompt(todayPacific(input.now), known) },
+  ];
+  for (const m of thread) {
+    const plural = m.mediaCount > 1 ? "s" : "";
+    const photos = !m.mediaCount ? ""
+      : m.direction === "inbound" ? ` [they sent ${m.mediaCount} photo${plural}; you can't view photos]`
+      : ` [we sent ${m.mediaCount} door photo${plural}]`;
+    const content = `${m.body}${photos}`.trim();
+    if (!content) continue;
+    messages.push({ role: m.direction === "inbound" ? "user" : "assistant", content });
+  }
+  if (messages[messages.length - 1]?.role !== "user") return { kind: "no_reply", reason: "nothing_to_answer", handedOff: null };
+
+  let handedOff: { reason: string } | null = null;
+  let reply = "";
+  let media: string[] = [];
+  let photoNudged = false;
+  let usedModel = botModel();
+
+  for (let round = 0; round < MAX_ROUNDS && !reply; round++) {
+    const params = (model: string): CompletionParams => ({
+      model,
+      temperature: 0.3,
+      max_completion_tokens: 300,
+      messages,
+      tools: TOOLS,
+      tool_choice: "auto",
+    });
+    let message: CompletionMessage | null;
+    try {
+      message = await complete(params(botModel()));
+    } catch (error) {
+      if (botModel() === FALLBACK_BOT_MODEL) throw error;
+      const why = error instanceof Error ? error.message : String(error);
+      console.warn(`SMS bot: ${botModel()} failed (${why}); using ${FALLBACK_BOT_MODEL}`);
+      await fx.log("bot_model_fallback", botModel(), { error: why.slice(0, 200) });
+      usedModel = FALLBACK_BOT_MODEL;
+      message = await complete(params(FALLBACK_BOT_MODEL));
+    }
+    if (!message) break;
+    messages.push(message);
+    const calls = (message.tool_calls || []).filter((c) => c.type === "function");
+    if (!calls.length) {
+      reply = trimRepeatedPrice(ensurePriceInclusions(cleanSmsText(message.content || ""), known.priceAlreadyGiven), known.priceAlreadyGiven);
+      // The AI said photos are attached but never attached any: one more try.
+      if (!media.length && !photoNudged && round < MAX_ROUNDS - 1 && claimsPhotos(reply)) {
+        photoNudged = true;
+        await fx.log("bot_photo_claim_retry", "no_photos_attached", {}, "system");
+        messages.push({
+          role: "system",
+          content: "Check (from the system, not the customer): your reply says photos are attached, but none are. If they want to see a style, call send_door_photos now and then write the reply. Otherwise rewrite the reply without mentioning photos.",
+        });
+        reply = "";
+        continue;
+      }
+      break;
+    }
+
+    for (const call of calls) {
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(call.function.arguments || "{}"); } catch { args = {}; }
+      const answer = (content: unknown) => messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(content) });
+      const name = call.function.name;
+
+      if (name === "check_service_zip") {
+        const zip = String(args.zip || "");
+        const result = checkServiceZip(zip);
+        await fx.log("bot_zip_check", result.result, { zip, city: result.city, state: result.state });
+        const place = result.city ? ` ${result.city}, ${result.state}` : "";
+        notes.zip = `${zip}${place}: ${result.result.toLowerCase().replace(/_/g, " ")}`;
+        await fx.saveNotes({ zip: notes.zip });
+        answer({ result: result.result, city: result.city, state: result.state, message: ZIP_TOOL_ANSWER[result.result] });
+      } else if (name === "hand_off_to_team") {
+        const reason = HANDOFF_REASONS.includes(args.reason as HandoffReason) ? String(args.reason) : "question_for_team";
+        const summary = String(args.summary || "").trim() || "No summary given.";
+        await fx.handOff(reason, summary, notes, false);
+        handedOff = { reason };
+        answer({ ok: true, message: "Flagged for the team. Now write your one short final message (no promised call or text time)." });
+      } else if (name === "send_door_photos") {
+        const category = isCategory(args.category) ? args.category : null;
+        const variant = args.variant === "double" ? "double" : "single";
+        if (!category) {
+          answer({ ok: false, message: "Unknown style." });
+        } else if (media.length) {
+          answer({ ok: false, message: "Photos are already attached to this reply." });
+        } else {
+          const sentBefore = (notes._photos_sent || "").split(",").map((x) => x.trim()).filter(Boolean);
+          const pick = await pickDoorPhotos(category, variant, sentBefore);
+          if (!pick.photos.length) {
+            answer({ ok: false, message: "No photos of that style yet. Offer the gallery link instead and don't say photos are attached." });
+          } else {
+            media = pick.photos.map((p) => p.url);
+            const label = DOOR_PHOTO_CATEGORIES.find((c) => c.key === category)?.label || category;
+            const names = [...sentBefore, ...pick.photos.map((p) => doorPhotoName(p.pathname))].slice(-20);
+            notes._photos_sent = names.join(",");
+            notes.photos_sent = [notes.photos_sent, `${label} (${pick.variant})`].filter(Boolean).join("; ").slice(0, 200);
+            await fx.saveNotes({ _photos_sent: notes._photos_sent, photos_sent: notes.photos_sent });
+            await fx.log("bot_photos", `${category}/${pick.variant}`, { count: media.length });
+            answer({
+              ok: true,
+              attached: media.length,
+              message: pick.fellBackToSingle
+                ? `Attached ${media.length} single-door photo(s); we don't have double-door photos of this style yet, so say these show the style on a single door.`
+                : `Attached ${media.length} installed ${label} photo(s). Now write your reply.`,
+            });
+          }
+        }
+      } else if (name === "save_customer_notes") {
+        const fresh: Record<string, string> = {};
+        for (const [k, v] of Object.entries(args)) {
+          if (typeof v === "string" && v.trim() && k !== "zip" && !k.startsWith("_") && k !== "photos_sent") fresh[k] = v.trim();
+        }
+        await fx.saveNotes(fresh);
+        Object.assign(notes, fresh);
+        answer({ ok: true, message: "Saved. Now write your reply." });
+      } else if (name === "record_outcome") {
+        const outcome = args.outcome === "not_interested" ? "not_interested" : args.outcome === "price_accepted" ? "price_accepted" : null;
+        if (outcome) await fx.outcome(outcome);
+        answer({ ok: Boolean(outcome) });
+      } else if (name === "record_opt_out") {
+        await fx.optOut();
+        return { kind: "opted_out" };
+      } else {
+        answer({ error: "Unknown tool." });
+      }
+    }
+  }
+
+  if (!reply) {
+    const reason = handedOff ? "handoff_without_message" : "empty_model_reply";
+    await fx.log("bot_no_reply", reason, {});
+    return { kind: "no_reply", reason, handedOff };
+  }
+
+  // Never tell them photos are attached when none are.
+  if (!media.length && claimsPhotos(reply)) {
+    await fx.log("bot_photo_claim_removed", "no_photos_attached", {}, "system");
+    reply = withoutPhotoClaim(reply);
+  }
+
+  // Safety net: the AI told them the team will follow up but forgot to hand off.
+  if (!handedOff && promisesTeamFollowUp(reply)) {
+    const reason = /\b(times?|day|days|schedul|consultation|appointment)\b/i.test(reply) ? "ready_to_book" : "question_for_team";
+    const lastText = [...thread].reverse().find((m) => m.direction === "inbound")?.body || "";
+    const summary = [
+      "Flagged by code: the AI told the customer our team will follow up but didn't hand off.",
+      lastText ? `Their last text: "${lastText.slice(0, 200)}".` : "",
+      notesLine(notes),
+    ].filter(Boolean).join(" ");
+    await fx.handOff(reason, summary, notes, true);
+    handedOff = { reason };
+  }
+
+  return { kind: "reply", reply, media, handedOff, model: usedModel };
+}
+
+// ---------------------------------------------------------------------------
+// The real reply (texts to the pilot number)
 // ---------------------------------------------------------------------------
 
 export type BotRunResult =
@@ -442,6 +638,35 @@ export type BotRunResult =
 async function skip(phone: string, reason: string, inboundId: number, logIt = true): Promise<BotRunResult> {
   if (logIt) await audit({ phone, action: "bot_skipped", reason, detail: { inboundId }, actor: "denny-ai" });
   return { status: "skipped", reason };
+}
+
+/** The real hooks: guardrail log, the customer's record, Slack, opt-out confirmation. */
+function liveEffects(phone: string, inboundId: number): BotEffects {
+  return {
+    log: (action, reason, detail = {}, actor = "denny-ai") => audit({ phone, action, reason, detail: { inboundId, ...detail }, actor }),
+    saveNotes: (fresh) => saveCustomerNotes(phone, fresh),
+    handOff: async (reason, summary, notes, auto) => {
+      await setHandoff(phone, reason, summary, smsNow());
+      await audit({
+        phone,
+        action: "bot_handoff",
+        reason,
+        detail: auto ? { summary, inboundId, auto: true } : { summary: summary.slice(0, 500), inboundId },
+        actor: auto ? "system" : "denny-ai",
+      });
+      await postHandoffToSlack(phone, reason, summary, notes);
+    },
+    outcome: async (outcome) => {
+      await setLeadStatus(phone, outcome, smsNow());
+      await audit({ phone, action: "bot_outcome", reason: outcome, detail: { inboundId }, actor: "denny-ai" });
+    },
+    optOut: async () => {
+      await recordOptOut(phone, "ai_detected", null, smsNow());
+      await audit({ phone, action: "opt_out", reason: "ai_detected", detail: { inboundId }, actor: "denny-ai" });
+      const confirmation = await sendOptOutConfirmation(phone);
+      if (!confirmation.ok) console.warn("SMS AI opt-out confirmation not sent:", confirmation.reason);
+    },
+  };
 }
 
 /** Answer the text with id `inboundId` from `phone` (if it's still their newest one). */
@@ -465,170 +690,13 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     if (capHit) return skip(phone, capHit.reason, inboundId);
 
     const thread = await threadForBot(phone, 40);
-
-    // What we already know (saved notes + what code can see in the thread), shown at the end of the prompt.
-    const notes = { ...state.customerNotes };
-    const known: KnownAboutCustomer = { notes, priceAlreadyGiven: priceAlreadyGiven(thread), linksSent: linksSent(thread) };
-    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-      { role: "system", content: smsBotSystemPrompt(todayPacific(smsNow()), known) },
-    ];
-    for (const m of thread) {
-      const plural = m.mediaCount > 1 ? "s" : "";
-      const photos = !m.mediaCount ? ""
-        : m.direction === "inbound" ? ` [they sent ${m.mediaCount} photo${plural}; you can't view photos]`
-        : ` [we sent ${m.mediaCount} door photo${plural}]`;
-      const content = `${m.body}${photos}`.trim();
-      if (!content) continue;
-      messages.push({ role: m.direction === "inbound" ? "user" : "assistant", content });
-    }
-    if (messages[messages.length - 1]?.role !== "user") return skip(phone, "nothing_to_answer", inboundId);
-
-    let handedOff: { reason: string } | null = null;
-    let reply = "";
-    let media: string[] = [];
-    let photoNudged = false;
-
-    for (let round = 0; round < MAX_ROUNDS && !reply; round++) {
-      const params = (model: string): CompletionParams => ({
-        model,
-        temperature: 0.3,
-        max_completion_tokens: 300,
-        messages,
-        tools: TOOLS,
-        tool_choice: "auto",
-      });
-      let message: CompletionMessage | null;
-      try {
-        message = await complete(params(botModel()));
-      } catch (error) {
-        if (botModel() === FALLBACK_BOT_MODEL) throw error;
-        const why = error instanceof Error ? error.message : String(error);
-        console.warn(`SMS bot: ${botModel()} failed (${why}); using ${FALLBACK_BOT_MODEL}`);
-        await audit({ phone, action: "bot_model_fallback", reason: botModel(), detail: { error: why.slice(0, 200) }, actor: "denny-ai" });
-        message = await complete(params(FALLBACK_BOT_MODEL));
-      }
-      if (!message) break;
-      messages.push(message);
-      const calls = (message.tool_calls || []).filter((c) => c.type === "function");
-      if (!calls.length) {
-        reply = trimRepeatedPrice(ensurePriceInclusions(cleanSmsText(message.content || ""), known.priceAlreadyGiven), known.priceAlreadyGiven);
-        // The AI said photos are attached but never attached any: one more try.
-        if (!media.length && !photoNudged && round < MAX_ROUNDS - 1 && claimsPhotos(reply)) {
-          photoNudged = true;
-          await audit({ phone, action: "bot_photo_claim_retry", reason: "no_photos_attached", detail: { inboundId }, actor: "system" });
-          messages.push({
-            role: "system",
-            content: "Check (from the system, not the customer): your reply says photos are attached, but none are. If they want to see a style, call send_door_photos now and then write the reply. Otherwise rewrite the reply without mentioning photos.",
-          });
-          reply = "";
-          continue;
-        }
-        break;
-      }
-
-      for (const call of calls) {
-        let args: Record<string, unknown> = {};
-        try { args = JSON.parse(call.function.arguments || "{}"); } catch { args = {}; }
-        const answer = (content: unknown) => messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(content) });
-        const name = call.function.name;
-
-        if (name === "check_service_zip") {
-          const zip = String(args.zip || "");
-          const result = checkServiceZip(zip);
-          await audit({ phone, action: "bot_zip_check", reason: result.result, detail: { zip, city: result.city, state: result.state }, actor: "denny-ai" });
-          const place = result.city ? ` ${result.city}, ${result.state}` : "";
-          notes.zip = `${zip}${place}: ${result.result.toLowerCase().replace(/_/g, " ")}`;
-          await saveCustomerNotes(phone, { zip: notes.zip });
-          answer({ result: result.result, city: result.city, state: result.state, message: ZIP_TOOL_ANSWER[result.result] });
-        } else if (name === "hand_off_to_team") {
-          const reason = HANDOFF_REASONS.includes(args.reason as HandoffReason) ? String(args.reason) : "question_for_team";
-          const summary = String(args.summary || "").trim() || "No summary given.";
-          await setHandoff(phone, reason, summary, smsNow());
-          await audit({ phone, action: "bot_handoff", reason, detail: { summary: summary.slice(0, 500), inboundId }, actor: "denny-ai" });
-          await postHandoffToSlack(phone, reason, summary, notes);
-          handedOff = { reason };
-          answer({ ok: true, message: "Flagged for the team. Now write your one short final message (no promised call or text time)." });
-        } else if (name === "send_door_photos") {
-          const category = isCategory(args.category) ? args.category : null;
-          const variant = args.variant === "double" ? "double" : "single";
-          if (!category) {
-            answer({ ok: false, message: "Unknown style." });
-          } else if (media.length) {
-            answer({ ok: false, message: "Photos are already attached to this reply." });
-          } else {
-            const sentBefore = (notes._photos_sent || "").split(",").map((s) => s.trim()).filter(Boolean);
-            const pick = await pickDoorPhotos(category, variant, sentBefore);
-            if (!pick.photos.length) {
-              answer({ ok: false, message: "No photos of that style yet. Offer the gallery link instead and don't say photos are attached." });
-            } else {
-              media = pick.photos.map((p) => p.url);
-              const label = DOOR_PHOTO_CATEGORIES.find((c) => c.key === category)?.label || category;
-              const names = [...sentBefore, ...pick.photos.map((p) => doorPhotoName(p.pathname))].slice(-20);
-              notes._photos_sent = names.join(",");
-              notes.photos_sent = [notes.photos_sent, `${label} (${pick.variant})`].filter(Boolean).join("; ").slice(0, 200);
-              await saveCustomerNotes(phone, { _photos_sent: notes._photos_sent, photos_sent: notes.photos_sent });
-              await audit({ phone, action: "bot_photos", reason: `${category}/${pick.variant}`, detail: { inboundId, count: media.length }, actor: "denny-ai" });
-              answer({
-                ok: true,
-                attached: media.length,
-                message: pick.fellBackToSingle
-                  ? `Attached ${media.length} single-door photo(s); we don't have double-door photos of this style yet, so say these show the style on a single door.`
-                  : `Attached ${media.length} installed ${label} photo(s). Now write your reply.`,
-              });
-            }
-          }
-        } else if (name === "save_customer_notes") {
-          const fresh: Record<string, string> = {};
-          for (const [k, v] of Object.entries(args)) {
-            if (typeof v === "string" && v.trim() && k !== "zip" && !k.startsWith("_") && k !== "photos_sent") fresh[k] = v.trim();
-          }
-          await saveCustomerNotes(phone, fresh);
-          Object.assign(notes, fresh);
-          answer({ ok: true, message: "Saved. Now write your reply." });
-        } else if (name === "record_outcome") {
-          const outcome = args.outcome === "not_interested" ? "not_interested" : args.outcome === "price_accepted" ? "price_accepted" : null;
-          if (outcome) {
-            await setLeadStatus(phone, outcome as LeadStatus, smsNow());
-            await audit({ phone, action: "bot_outcome", reason: outcome, detail: { inboundId }, actor: "denny-ai" });
-          }
-          answer({ ok: Boolean(outcome) });
-        } else if (name === "record_opt_out") {
-          await recordOptOut(phone, "ai_detected", null, smsNow());
-          await audit({ phone, action: "opt_out", reason: "ai_detected", detail: { inboundId }, actor: "denny-ai" });
-          const confirmation = await sendOptOutConfirmation(phone);
-          if (!confirmation.ok) console.warn("SMS AI opt-out confirmation not sent:", confirmation.reason);
-          return { status: "opted_out" };
-        } else {
-          answer({ error: "Unknown tool." });
-        }
-      }
-    }
-
-    if (!reply) {
-      await audit({ phone, action: "bot_no_reply", reason: handedOff ? "handoff_without_message" : "empty_model_reply", detail: { inboundId }, actor: "denny-ai" });
+    const composed = await composeBotReply({ thread, notes: state.customerNotes, now: smsNow() }, liveEffects(phone, inboundId));
+    if (composed.kind === "opted_out") return { status: "opted_out" };
+    if (composed.kind === "no_reply") {
+      if (composed.reason === "nothing_to_answer") return skip(phone, "nothing_to_answer", inboundId);
       return { status: "skipped", reason: "empty_model_reply" };
     }
-
-    // Never tell them photos are attached when none are.
-    if (!media.length && claimsPhotos(reply)) {
-      await audit({ phone, action: "bot_photo_claim_removed", reason: "no_photos_attached", detail: { inboundId }, actor: "system" });
-      reply = withoutPhotoClaim(reply);
-    }
-
-    // Safety net: the AI told them the team will follow up but forgot to hand off.
-    if (!handedOff && promisesTeamFollowUp(reply)) {
-      const reason = /\b(times?|day|days|schedul|consultation|appointment)\b/i.test(reply) ? "ready_to_book" : "question_for_team";
-      const lastText = [...thread].reverse().find((m) => m.direction === "inbound")?.body || "";
-      const summary = [
-        "Flagged by code: the AI told the customer our team will follow up but didn't hand off.",
-        lastText ? `Their last text: "${lastText.slice(0, 200)}".` : "",
-        notesLine(notes),
-      ].filter(Boolean).join(" ");
-      await setHandoff(phone, reason, summary, smsNow());
-      await audit({ phone, action: "bot_handoff", reason, detail: { summary, inboundId, auto: true }, actor: "system" });
-      await postHandoffToSlack(phone, reason, summary, notes);
-      handedOff = { reason };
-    }
+    const { reply, media, handedOff } = composed;
 
     // Last look before sending: a newer text (that run answers it) or a reply already sent.
     // A handoff's final message always goes out: the newer texts' runs are paused by the handoff.
@@ -642,7 +710,7 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       phone,
       action: "bot_reply",
       reason: `policy ${CUSTOMER_POLICY_VERSION}`,
-      detail: { inboundId, policyVersion: CUSTOMER_POLICY_VERSION, model: botModel(), sent: result.ok, photos: media.length },
+      detail: { inboundId, policyVersion: CUSTOMER_POLICY_VERSION, model: composed.model, sent: result.ok, photos: media.length },
       actor: "denny-ai",
     });
     return result.ok ? { status: "sent", result } : { status: "not_sent", result };
