@@ -137,8 +137,8 @@ export default function SmsTester() {
           <label>
             <span>Kind of text</span>
             <select value={kind} onChange={(e) => setKind(e.target.value)}>
-              <option value="manual">Manual (person typing) · 8 AM–9 PM</option>
-              <option value="reply">Auto-reply (within 24 h of their text) · 8 AM–7 PM</option>
+              <option value="manual">Manual (person typing) · 8 AM–7 PM</option>
+              <option value="reply">Auto-reply (within 24 h of their text) · any hour</option>
               <option value="automated">Automated follow-up · 9 AM–5 PM, no holidays</option>
             </select>
           </label>

@@ -5,7 +5,7 @@
  *   GET  ?q=<search>          -> conversation list, "Needs CSR" first
  *   GET  ?phone=<number>      -> one conversation (texts, AI notes, handoff, reply blockers)
  *   POST {action:"send", phone, body}   -> a person's reply through the ONE send helper
- *                                          (kind "manual": 8 AM–9 PM their time, opt-outs,
+ *                                          (kind "manual": 8 AM–7 PM their time, opt-outs,
  *                                          consent, caps, pilot list all apply). Pauses the AI.
  *   POST {action:"take_over", phone}    -> pause the AI for this number without texting
  *   POST {action:"resume_bot", phone}   -> turn the AI back on for this number
@@ -19,6 +19,7 @@ import { handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inb
 import { formatPhone, normalizePhone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
 import {
+  HOLD_SENDER,
   audit,
   inboxThread,
   listInboxConversations,
@@ -62,7 +63,8 @@ export async function GET(request: Request) {
       if (!phone) return json({ error: "That isn't a valid number." }, 400);
       const thread = await inboxThread(phone);
       if (!thread) return json({ error: "No texts with that number yet." }, 404);
-      const last = [...thread.messages].reverse().find((m) => m.status !== "send_failed");
+      // The automatic hold text answers nothing, so it doesn't count as the latest reply.
+      const last = [...thread.messages].reverse().find((m) => m.status !== "send_failed" && m.sentBy !== HOLD_SENDER);
       const flag = inboxFlag({
         botStatus: thread.botStatus,
         handoffReason: thread.handoffReason,

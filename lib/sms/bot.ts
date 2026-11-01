@@ -8,7 +8,7 @@
  *
  *   1. wait 2.5 seconds; if they sent another text meanwhile, let that one answer both
  *   2. skip (no AI cost) when: bot switched off, number not on the pilot list, opted out,
- *      handed off to the team, or outside reply hours (8 AM - 7 PM their time)
+ *      handed off to the team, or outside reply hours (any hour since 2026-11-01)
  *   3. read the last 40 texts + the customer's saved notes, ask OpenAI for one reply
  *      (tools: ZIP check, handoff, outcome, opt-out, save notes). The prompt starts with
  *      the shared customer policy (lib/ai/customerPolicy.ts); its version is logged per reply
@@ -29,7 +29,7 @@ import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
 import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from "@/lib/doorPhotos";
 import { inboxLink, pilotTag, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
-import { MAX_BODY_CHARS, formatPhone, localTime, withinSendingHours } from "@/lib/sms/rules";
+import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
 import {
   audit,
@@ -405,10 +405,24 @@ function notesLine(notes: Record<string, string>): string {
 }
 
 function todayPacific(now: Date): string {
-  return new Intl.DateTimeFormat("en-US", {
+  const date = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
-    weekday: "long", year: "numeric", month: "long", day: "numeric",
+    weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit",
   }).format(now);
+  // The AI answers any hour; real people text 8 AM - 7 PM. Tell the AI which it is right now.
+  const team = teamIsTexting(now, DEFAULT_TIME_ZONE)
+    ? `Our team (real people) texts customers ${TEAM_HOURS_TEXT} every day, and they're working now.`
+    : `Our team (real people) texts customers ${TEAM_HOURS_TEXT} every day, and it's outside those hours now. If you hand off, say in your final message that a team member will text them after 8 AM.`;
+  return `${date}. ${team}`;
+}
+
+/** After hours, a handoff goodbye must say when a person will answer (added by code if the AI didn't). */
+export const AFTER_HOURS_HANDOFF_NOTE = `Our team texts between ${TEAM_HOURS_TEXT.replace(" to ", " and ")}, so expect a reply after 8 AM.`;
+
+export function withAfterHoursNote(reply: string, now: Date, timeZone = DEFAULT_TIME_ZONE): string {
+  if (teamIsTexting(now, timeZone) || /\b8(:00)?\s?(am|a\.m\.)/i.test(reply)) return reply;
+  const longer = `${reply}\n\n${AFTER_HOURS_HANDOFF_NOTE}`;
+  return longer.length <= MAX_BODY_CHARS ? longer : reply;
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +629,15 @@ export async function composeBotReply(
     ].filter(Boolean).join(" ");
     await fx.handOff(reason, summary, notes, true);
     handedOff = { reason };
+  }
+
+  // After hours (7 PM - 8 AM), tell them when a person will pick this up.
+  if (handedOff) {
+    const withNote = withAfterHoursNote(reply, input.now);
+    if (withNote !== reply) {
+      await fx.log("bot_after_hours_note", "added", {}, "system");
+      reply = withNote;
+    }
   }
 
   return { kind: "reply", reply, media, handedOff, model: usedModel };

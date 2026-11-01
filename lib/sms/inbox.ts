@@ -13,9 +13,9 @@
  * Keyword-only texts (STOP, START, HELP) never count: Twilio answers those.
  * Opted-out numbers never count: we can't text them anyway.
  */
-import { classifyKeyword, describeHours, localTime, withinSendingHours } from "@/lib/sms/rules";
-import { allowList, sendingEnabled } from "@/lib/sms/send";
-import type { InboxRow, InboxThread } from "@/lib/sms/store";
+import { TEAM_HOURS_TEXT, classifyKeyword, describeHours, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
+import { allowList, sendSms, sendingEnabled } from "@/lib/sms/send";
+import { HOLD_SENDER, audit, lastOutbound, type InboxRow, type InboxThread } from "@/lib/sms/store";
 
 export const NO_REPLY_MINUTES = 5;
 
@@ -102,4 +102,37 @@ export function replyBlockers(thread: Pick<InboxThread, "phone" | "timeZone" | "
     blockers.push(`Outside texting hours (${describeHours("manual")} their time; it's ${localTimeLabel} there).`);
   }
   return { blockers, canSend, localTimeLabel };
+}
+
+// ---------------------------------------------------------------------------
+// Hold text: "a team member will get back to you" (Steven, 2026-11-01)
+// ---------------------------------------------------------------------------
+
+/** No hold text if anyone (a person or the AI) texted this customer in the last 30 minutes. */
+export const HOLD_QUIET_MINUTES = 30;
+
+export const HOLD_TEXT_TEAM_WORKING =
+  "Thanks for your text! A member of our team will reply as soon as they can, so it may take a little longer than usual.";
+export const HOLD_TEXT_AFTER_HOURS =
+  `Thanks for your text! Our team texts between ${TEAM_HOURS_TEXT.replace(" to ", " and ")}, so a team member will get back to you after 8 AM.`;
+
+export function holdText(now: Date, timeZone: string): string {
+  return teamIsTexting(now, timeZone) ? HOLD_TEXT_TEAM_WORKING : HOLD_TEXT_AFTER_HOURS;
+}
+
+/**
+ * The customer texted a number the AI is paused for (a person has it). Send ONE
+ * hold text per wait so they know a person will answer, unless someone texted
+ * them in the last 30 minutes (a live back-and-forth is never interrupted).
+ * Goes through the one send helper like every other text (opt-outs, pilot list, caps).
+ */
+export async function maybeSendHoldText(phone: string, timeZone: string, now: Date): Promise<string> {
+  const last = await lastOutbound(phone);
+  if (last?.sentBy === HOLD_SENDER) return "already_sent";
+  if (last && now.getTime() - Date.parse(last.createdAt) < HOLD_QUIET_MINUTES * 60_000) return "texted_recently";
+  const afterHours = !teamIsTexting(now, timeZone);
+  const result = await sendSms({ to: phone, body: holdText(now, timeZone), kind: "reply", purpose: "care", sentBy: HOLD_SENDER });
+  if (!result.ok) return `blocked:${result.reason}`;
+  await audit({ phone, action: "hold_text", reason: afterHours ? "after_hours" : "team_hours", detail: { messageId: result.messageId }, actor: "system" });
+  return "sent";
 }

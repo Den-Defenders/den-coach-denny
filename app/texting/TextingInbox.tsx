@@ -84,7 +84,7 @@ function longWhen(iso: string | null) {
 function senderLabel(sentBy: string | null) {
   if (!sentBy) return "Den Defenders";
   if (sentBy === "denny-ai") return "AI";
-  if (sentBy === "system") return "Automatic";
+  if (sentBy === "system" || sentBy === "denny-hold") return "Automatic";
   if (sentBy === "drip") return "Drip";
   return sentBy.includes("@") ? sentBy.split("@")[0] : sentBy;
 }
@@ -248,7 +248,8 @@ export default function TextingInbox() {
   const thread = data?.thread;
   const flag = data?.flag;
   const reply = data?.reply;
-  const notes = Object.entries(thread?.customerNotes || {});
+  // Notes starting with "_" are code-only bookkeeping (like which photo files were sent).
+  const notes = Object.entries(thread?.customerNotes || {}).filter(([k]) => !k.startsWith("_"));
   const tooLong = draft.trim().length > MAX_CHARS;
 
   return (
@@ -351,14 +352,14 @@ export default function TextingInbox() {
 
             {notes.length > 0 && (
               <div className="inbox-notes" aria-label="What the customer told the AI">
-                {notes.map(([k, v]) => <span key={k} className="inbox-note"><b>{k.replace(/^_/, "").replace(/_/g, " ")}:</b> {v}</span>)}
+                {notes.map(([k, v]) => <span key={k} className="inbox-note"><b>{k.replace(/_/g, " ")}:</b> {v}</span>)}
               </div>
             )}
 
             <div className="inbox-messages">
               {thread.messages.map((m) => {
                 const failed = ["send_failed", "failed", "undelivered"].includes(m.status);
-                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" ? "ai" : m.sentBy === "system" ? "system" : "person";
+                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" ? "system" : "person";
                 return (
                   <div key={m.id} className={`inbox-row inbox-${who}${failed ? " failed" : ""}`}>
                     <div className="sim-who">{m.direction === "inbound" ? displayName(thread) : senderLabel(m.sentBy)} · {longWhen(m.createdAt)}</div>

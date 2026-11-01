@@ -14,6 +14,7 @@
  */
 import { postCustomerWaitingAlert, slackAlertsEnabled } from "@/lib/sms/alerts";
 import { scheduleBotReply } from "@/lib/sms/bot";
+import { maybeSendHoldText } from "@/lib/sms/inbox";
 import { DENNY_ONLY_OPT_OUT_SOURCES, classifyKeyword, normalizePhone } from "@/lib/sms/rules";
 import { sendOptInConfirmation, sendOptOutConfirmation, smsNow } from "@/lib/sms/send";
 import {
@@ -21,6 +22,7 @@ import {
   audit,
   clearOptOut,
   conversationState,
+  ensureContact,
   findOptOut,
   markOptOutKnownToTwilio,
   previousMessageDirection,
@@ -36,22 +38,25 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * Slack alert when a customer texts a number a person has taken over (AI paused,
- * "Needs CSR" already handled). Skipped while a Needs CSR flag is still open
- * (that alert already went out) and for the 2nd, 3rd... text in a row.
+ * The customer texted a number a person has taken over (AI paused). Two things:
+ *   1. one hold text so they know a person will answer (lib/sms/inbox.ts decides when)
+ *   2. a Slack alert, once per unanswered stretch, and not while a "Needs CSR"
+ *      flag is still open (that alert already went out)
  */
-async function alertIfWaitingForPerson(phone: string, messageId: number, body: string, photos: number) {
-  if (!slackAlertsEnabled()) return;
+async function handlePausedInbound(phone: string, messageId: number, body: string, photos: number) {
   try {
     const state = await conversationState(phone);
     if (state.botStatus !== "paused") return;
-    const { handoffResolved } = state;
-    if (!handoffResolved) return;
+    const contact = await ensureContact(phone);
+    const hold = await maybeSendHoldText(phone, contact.timeZone, smsNow());
+    console.info(`SMS paused inbound ${messageId}: hold text ${hold}`);
+
+    if (!slackAlertsEnabled() || !state.handoffResolved) return;
     if (await previousMessageDirection(phone, messageId) === "inbound") return;
     await postCustomerWaitingAlert(phone, body, photos);
     await audit({ phone, action: "slack_alert", reason: "customer_waiting", detail: { messageId }, actor: "system" });
   } catch (error) {
-    console.error("SMS waiting alert failed:", error instanceof Error ? error.message : error);
+    console.error("SMS paused-number handling failed:", error instanceof Error ? error.message : error);
   }
 }
 
@@ -117,8 +122,8 @@ export async function POST(request: Request) {
       if (added) await audit({ phone: from, action: "consent_added", reason: "inbound_text", detail: { sid }, actor: "customer" });
       // AI reply, after Twilio has its empty TwiML. All send rules still apply inside.
       if (messageId) scheduleBotReply(from, messageId);
-      // Step 3: a person took this number over, so the AI won't answer. Tell the team (once per unanswered stretch).
-      if (messageId) await alertIfWaitingForPerson(from, messageId, body, media.length);
+      // Step 3: a person took this number over, so the AI won't answer: hold text + team alert.
+      if (messageId) await handlePausedInbound(from, messageId, body, media.length);
     }
   } catch (error) {
     console.error("SMS inbound failed:", error instanceof Error ? error.message : error);
