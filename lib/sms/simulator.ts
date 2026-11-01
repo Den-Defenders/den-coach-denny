@@ -12,7 +12,7 @@
  */
 import OpenAI from "openai";
 import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
-import { botModel, composeBotReply, type BotEffects } from "@/lib/sms/bot";
+import { botModel, composeBotReply, isSoftHandoff, type BotEffects } from "@/lib/sms/bot";
 import { OPT_OUT_CONFIRMATION } from "@/lib/sms/rules";
 import { smsDb, type ThreadMessage } from "@/lib/sms/store";
 
@@ -163,9 +163,10 @@ export async function simulateTurn(input: SimTurnInput): Promise<SimTurnResult> 
       if (shown.length) add("notes", `Saved: ${shown.map(([k, v]) => `${k.replace(/_/g, " ")} = ${v}`).join("; ")}`);
     },
     handOff: async (reason, summary, _notes, auto, booking) => {
-      handoff = reason;
+      // A "wants to book, no time picked" flag keeps the AI answering, so the run goes on.
+      if (!isSoftHandoff(reason, booking)) handoff = reason;
       if (booking) add("handoff", `📅 Ready to book (pinned + Slack alert in real texting). ${summary.replace(/\n/g, " · ")}`);
-      else add("handoff", `Needs CSR: ${HANDOFF_LABELS[reason] || reason}${auto ? " (flagged by code)" : ""}. ${summary}`);
+      else add("handoff", `Needs CSR: ${HANDOFF_LABELS[reason] || reason}${auto ? " (flagged by code)" : ""}${isSoftHandoff(reason, booking) ? " (AI keeps answering)" : ""}. ${summary}`);
     },
     progress: async (text) => { add("checking", `Lookup was slow, so the AI would first text: "${text}"`); },
     outcome: async (outcome) => { add("outcome", `Lead marked: ${outcome.replace(/_/g, " ")}`); },
@@ -180,12 +181,13 @@ export async function simulateTurn(input: SimTurnInput): Promise<SimTurnResult> 
   if (composed.kind === "no_reply") {
     return {
       customerText, botReply: null, media: [], events, notes,
-      ended: Boolean(composed.handedOff || handoff),
-      endReason: composed.handedOff || handoff ? "Handed off (no final message)" : null,
+      ended: Boolean(handoff),
+      endReason: handoff ? "Handed off (no final message)" : null,
       model: botModel(),
     };
   }
-  const reason = composed.handedOff?.reason || handoff;
+  // Every handoff goes through fx.handOff; a soft one ("wants to book, no time picked") leaves handoff null.
+  const reason = handoff;
   return {
     customerText,
     botReply: composed.reply,

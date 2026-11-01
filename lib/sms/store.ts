@@ -426,10 +426,16 @@ export async function saveCustomerNotes(phone: string, notes: Record<string, str
 }
 
 /** Bot stops answering this number; the team takes over. */
-export async function setHandoff(phone: string, reason: string, summary: string, at: Date) {
+/**
+ * keepAi (step 4a): a "wants to book, no time picked yet" flag. The team sees it in
+ * Needs CSR, but the AI keeps answering, so a customer who then says "ok, Tuesday works"
+ * still gets times. A person's reply pauses the AI as usual.
+ */
+export async function setHandoff(phone: string, reason: string, summary: string, at: Date, options: { keepAi?: boolean } = {}) {
   const contact = await ensureContact(phone);
   const sql = await db();
-  await sql`UPDATE sms_conversations SET bot_status = 'paused', handoff_reason = ${reason.slice(0, 60)},
+  const botStatus = options.keepAi ? "on" : "paused";
+  await sql`UPDATE sms_conversations SET bot_status = ${botStatus}, handoff_reason = ${reason.slice(0, 60)},
       handoff_summary = ${summary.slice(0, 1500)}, handoff_at = ${iso(at)}::timestamptz,
       handoff_resolved_at = NULL, handoff_resolved_by = NULL, updated_at = now()
     WHERE id = ${contact.conversationId}`;
@@ -605,7 +611,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
         OR EXISTS (SELECT 1 FROM sms_messages s WHERE s.conversation_id = v.id AND s.body ILIKE ${text}::text))
     ORDER BY (v.bot_status = 'paused' AND v.handoff_reason = 'ready_to_book' AND v.handoff_resolved_at IS NULL
         AND v.booking_request IS NOT NULL AND v.booking_done_at IS NULL) DESC,
-      (v.bot_status = 'paused' AND v.handoff_reason IS NOT NULL AND v.handoff_resolved_at IS NULL) DESC,
+      (v.handoff_reason IS NOT NULL AND v.handoff_resolved_at IS NULL) DESC,
       m.created_at DESC
     LIMIT ${limit}`;
   return rows.map((r) => ({

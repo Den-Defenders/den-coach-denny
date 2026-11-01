@@ -68,7 +68,8 @@ export function inboxFlag(row: FlagInput, now: Date): InboxFlag {
   const keywordOnly = row.lastDirection === "inbound" && classifyKeyword(row.lastBody, { optedOut: false }).keyword !== null;
   const waiting = row.lastDirection === "inbound" && !keywordOnly && (!resolvedAt || lastAt > resolvedAt);
 
-  if (row.botStatus === "paused" && row.handoffReason && !resolvedAt) {
+  // Open handoff. Usually the AI is paused; a "wants to book, no time picked" flag keeps it on.
+  if (row.handoffReason && !resolvedAt) {
     const pinned = row.handoffReason === "ready_to_book" && bookingPending(row);
     return { needsCsr: true, pinned, reason: pinned ? READY_TO_BOOK_LABEL : handoffLabel(row.handoffReason), waiting };
   }
