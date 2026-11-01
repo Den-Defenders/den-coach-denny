@@ -178,6 +178,18 @@ export async function resolveAccess(session: SessionData | null): Promise<DennyA
 
 const STAFF: readonly AccessRole[] = ["owner", "manager", "csr", ...FIELD_ROLES];
 
+/**
+ * Who may open the Texting inbox (/texting) and its API. Owners only during
+ * internal testing; add "manager" and "csr" here before the pilot so CSRs can
+ * work it (the menu tile follows this list automatically).
+ */
+export const TEXTING_INBOX_ROLES: readonly AccessRole[] = ["owner"];
+
+/** Second gate inside the inbox API routes (proxy.ts is the first). */
+export function canUseTextingInbox(role: AccessRole | null | undefined): boolean {
+  return Boolean(role && TEXTING_INBOX_ROLES.includes(role));
+}
+
 type Rule = { prefix: string; exact?: boolean; roles: readonly AccessRole[] };
 
 const ROUTE_RULES: Rule[] = [
@@ -191,6 +203,9 @@ const ROUTE_RULES: Rule[] = [
   // Owner Dashboard: owners only. Managers are deliberately NOT here.
   { prefix: "/owner", roles: ["owner"] },
   { prefix: "/api/owner", roles: ["owner"] },
+  // Texting inbox (step 3): who may read and answer customer texts. See TEXTING_INBOX_ROLES.
+  { prefix: "/texting", roles: TEXTING_INBOX_ROLES },
+  { prefix: "/api/sms/inbox", roles: TEXTING_INBOX_ROLES },
   // Texting test page (pilot): owners only.
   { prefix: "/sms-test", roles: ["owner"] },
   { prefix: "/api/sms/test", roles: ["owner"] },
@@ -248,14 +263,16 @@ export function landingPathFor(role: AccessRole): string {
 export type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team" | "texting" | "simulator";
 
 export function navFor(role: AccessRole): NavKey[] {
+  // "texting" = the Texting inbox: shown to whoever TEXTING_INBOX_ROLES allows.
+  const texting: NavKey[] = canUseTextingInbox(role) ? ["texting"] : [];
   switch (role) {
     case "owner":
-      // "texting" = the texting test page, "simulator" = the texting Simulator (pilot). Owners only for now.
+      // "simulator" = the texting Simulator (pilot). Owners only for now.
       return ["home", "chat", "listen", "schedule", "talk", "owner", "team", "texting", "simulator"];
     case "manager":
-      return ["home", "chat", "listen", "schedule", "talk", "team"];
+      return ["home", "chat", "listen", "schedule", "talk", "team", ...texting];
     case "csr":
-      return ["home", "chat", "listen", "schedule"];
+      return ["home", "chat", "listen", "schedule", ...texting];
     case "sales_rep":
     case "installer":
     case "sales_lead":

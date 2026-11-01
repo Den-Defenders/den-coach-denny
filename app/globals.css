@@ -413,3 +413,73 @@ a { color: inherit; }
   .talk-hero { grid-template-columns: 1fr; }
   .talk-hero img { display: none; }
 }
+
+/* Texting inbox (/texting, step 3): list on the left, one conversation on the right. */
+.inbox { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.inbox-list, .inbox-thread { padding: 16px; min-width: 0; }
+.inbox-list-head h2 { margin: 0 0 10px; font-family: var(--display); text-transform: uppercase; font-size: 26px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.inbox-count { font-family: inherit; text-transform: none; font-size: 13px; font-weight: 800; color: #fff; background: var(--coral); border-radius: 999px; padding: 3px 10px; }
+.inbox-search { width: 100%; min-height: 42px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 11px; font: inherit; background: #fff; color: var(--ink); }
+.inbox-search:focus, .inbox-reply textarea:focus, .inbox-name-edit input:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 4px rgba(53,189,181,.14); }
+.inbox-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 6px; }
+.inbox-filter { border: 1px solid var(--line); background: #fff; color: var(--navy); border-radius: 999px; padding: 5px 11px; font-size: 13px; font-weight: 700; cursor: pointer; }
+.inbox-filter.active { background: var(--navy); border-color: var(--navy); color: #fff; }
+.inbox-items { list-style: none; margin: 8px 0 0; padding: 0; max-height: 72vh; overflow-y: auto; display: grid; gap: 6px; }
+.inbox-empty { padding: 18px 6px; }
+.inbox-item { width: 100%; text-align: left; display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: #fff; cursor: pointer; font: inherit; color: var(--ink); }
+.inbox-item:hover { border-color: var(--teal); }
+.inbox-item.active { border-color: var(--teal); background: #effaf8; box-shadow: inset 4px 0 0 var(--teal); }
+.inbox-item.needs { border-left: 5px solid var(--coral); }
+.inbox-item-top { display: flex; justify-content: space-between; gap: 8px; }
+.inbox-item-top strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-when { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.inbox-badges, .inbox-status { display: flex; flex-wrap: wrap; gap: 5px; }
+.inbox-badge { font-size: 12px; font-weight: 800; border-radius: 7px; padding: 2px 7px; }
+.inbox-badge.red { background: #fdecef; color: #9b1631; border: 1px solid #f2b8c3; }
+.inbox-badge.amber { background: #fff4d6; color: #7a5300; border: 1px solid #f1d17c; }
+.inbox-badge.teal { background: #e3f7f5; color: #0f7a74; border: 1px solid #b6e6e2; }
+.inbox-badge.gray { background: #eef1f4; color: #4a5866; border: 1px solid #dde3e8; }
+.inbox-preview { color: var(--muted); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-preview.unread { color: var(--ink); font-weight: 700; }
+.inbox-thread { display: flex; flex-direction: column; gap: 10px; }
+.inbox-thread-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; justify-content: space-between; }
+.inbox-back { display: none; }
+.inbox-who h2 { margin: 0; font-size: 22px; color: var(--navy); display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.inbox-sub { color: var(--muted); font-size: 14px; }
+.inbox-sub a { color: var(--teal-dark); font-weight: 700; }
+.inbox-link { background: none; border: 0; padding: 0; color: var(--teal-dark); font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: underline; }
+.inbox-name-edit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.inbox-name-edit input { min-height: 38px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.inbox-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.inbox-handoff { border: 1px solid #f2b8c3; background: #fdf3f5; color: #6d1426; border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+.inbox-handoff.done { border-color: var(--line); background: #f6f8f9; color: #33414f; }
+.inbox-handoff p { margin: 6px 0 0; white-space: pre-wrap; }
+.inbox-handoff small { display: block; margin-top: 6px; color: var(--muted); }
+.inbox-notes { display: flex; flex-wrap: wrap; gap: 6px; }
+.inbox-note { font-size: 12.5px; background: #fff8e6; border: 1px solid #f3dfa8; border-radius: 8px; padding: 3px 8px; color: #4a3b00; }
+.inbox-messages { display: flex; flex-direction: column; gap: 10px; max-height: 58vh; min-height: 220px; overflow-y: auto; padding: 8px 4px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.inbox-row { display: flex; flex-direction: column; max-width: 80%; }
+.inbox-customer { align-self: flex-start; }
+.inbox-ai, .inbox-person, .inbox-system { align-self: flex-end; align-items: flex-end; }
+.inbox-bubble { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 14px; border-radius: 18px; line-height: 1.4; font-size: 15px; }
+.inbox-customer .inbox-bubble { background: #eef1f4; color: #1d2a36; border-bottom-left-radius: 5px; }
+.inbox-ai .inbox-bubble { background: linear-gradient(135deg, #5b3f8f, #7a5cc4); color: #fff; border-bottom-right-radius: 5px; }
+.inbox-person .inbox-bubble { background: linear-gradient(135deg, #159d96, #1cb0aa); color: #fff; border-bottom-right-radius: 5px; }
+.inbox-system .inbox-bubble { background: #e9edf1; color: #33414f; border-bottom-right-radius: 5px; font-size: 14px; }
+.inbox-row.failed .inbox-bubble { opacity: .6; }
+.inbox-delivery { font-size: 11.5px; color: var(--muted); margin: 3px 6px 0; }
+.inbox-row.failed .inbox-delivery { color: #b3261e; font-weight: 700; }
+.inbox-reply { display: grid; gap: 8px; }
+.inbox-reply textarea { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font: inherit; resize: vertical; background: #fff; color: var(--ink); }
+.inbox-reply-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.inbox-too-long { color: #b3261e; font-weight: 700; }
+.inbox-blockers { font-size: 14px; display: grid; gap: 3px; }
+.inbox-owner-links { margin-top: 14px; }
+@media (max-width: 860px) {
+  .inbox { grid-template-columns: 1fr; }
+  .inbox.has-thread .inbox-list { display: none; }
+  .inbox:not(.has-thread) .inbox-thread { display: none; }
+  .inbox-back { display: inline-flex; }
+  .inbox-row { max-width: 92%; }
+  .inbox-messages { max-height: 55vh; }
+}

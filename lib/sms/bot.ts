@@ -27,6 +27,7 @@ import salesZipDirectory from "@/app/lib/salesZipDirectory.json";
 import { COMPANY_FACTS, NV_ASK_TEAM_CITIES, NV_SERVED_CITIES } from "@/lib/ai/companyFacts";
 import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
 import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from "@/lib/doorPhotos";
+import { inboxLink, pilotTag, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { MAX_BODY_CHARS, formatPhone, localTime, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
@@ -415,20 +416,15 @@ function todayPacific(now: Date): string {
 // ---------------------------------------------------------------------------
 
 async function postHandoffToSlack(phone: string, reason: string, summary: string, notes: Record<string, string> = {}) {
-  const url = (process.env.SMS_SLACK_WEBHOOK_URL || "").trim();
-  if (!url) return;
-  const pilot = !allowList().everyone;
+  if (!slackAlertsEnabled()) return;
   const text = [
-    `${pilot ? "[PILOT] " : ""}:raising_hand: *Texting: Needs CSR* - ${formatPhone(phone)}`,
+    `${pilotTag()}:raising_hand: *Texting: Needs CSR* - ${formatPhone(phone)}`,
     `Reason: ${reason.replace(/_/g, " ")}`,
     summary,
     notesLine(notes),
+    `<${inboxLink(phone)}|Open in the Texting inbox>`,
   ].filter(Boolean).join("\n");
-  try {
-    await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
-  } catch (error) {
-    console.error("SMS handoff Slack post failed:", error instanceof Error ? error.message : error);
-  }
+  await postSmsSlack(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +699,8 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     if (!handedOff) {
       if (await latestInboundId(phone) !== inboundId) return skip(phone, "newer_text_will_answer", inboundId, false);
       if (await outboundSinceMessage(phone, inboundId)) return skip(phone, "already_answered", inboundId);
+      // A person took over in the Texting inbox while the AI was thinking.
+      if ((await conversationState(phone)).botStatus === "paused") return skip(phone, "person_took_over", inboundId);
     }
 
     const result = await sendSms({ to: phone, body: reply, kind: "reply", purpose: "care", sentBy: "denny-ai", mediaUrls: media });
