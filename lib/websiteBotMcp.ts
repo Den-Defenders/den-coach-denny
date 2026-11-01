@@ -208,6 +208,21 @@ type RawResult = {
 };
 
 export function reduceAvailability(raw: unknown): PublicAvailability {
+  const withReps = reduceAvailabilityWithReps(raw);
+  return {
+    status: withReps.status,
+    options: withReps.options.map(({ date, weekday, arrivalWindow }) => ({ date, weekday, arrivalWindow })),
+  };
+}
+
+/**
+ * Server-side only (texting step 4a): the same reduced options, plus the rep the
+ * scheduler picked for each one. The rep name goes to the team's "Ready to book"
+ * alert, never to the chat model or the customer.
+ */
+export type RepTimeOption = PublicTimeOption & { consultantName: string | null };
+
+export function reduceAvailabilityWithReps(raw: unknown): { status: PublicAvailability["status"]; options: RepTimeOption[] } {
   const result = (raw && typeof raw === "object" ? raw : {}) as RawResult;
   const status = String(result.recommendationStatus || "");
 
@@ -216,7 +231,7 @@ export function reduceAvailability(raw: unknown): PublicAvailability {
   }
 
   const seen = new Set<string>();
-  const options: PublicTimeOption[] = [];
+  const options: RepTimeOption[] = [];
 
   for (const option of result.options || []) {
     if (!option?.date || !option.localStart) continue;
@@ -229,6 +244,7 @@ export function reduceAvailability(raw: unknown): PublicAvailability {
       date: option.date,
       weekday: option.dayOfWeek || weekdayOf(option.date),
       arrivalWindow: window,
+      consultantName: option.consultantName || null,
     });
   }
 
@@ -257,6 +273,15 @@ export async function findOpenSalesTimes(request: AvailabilityRequest): Promise<
   return reduceAvailability(raw);
 }
 
+/** Texting step 4a: open times WITH the scheduler's rep (server-side only), with a shorter time limit. */
+export async function findOpenSalesTimesWithReps(
+  request: AvailabilityRequest,
+  timeoutMs = 90_000
+): Promise<{ status: PublicAvailability["status"]; options: RepTimeOption[] }> {
+  const raw = await callWebsiteBotTool("recommend_sales_schedule", schedulerArgs(request), timeoutMs);
+  return reduceAvailabilityWithReps(raw);
+}
+
 // ---------------------------------------------------------------------------
 // Booking (Phase 2)
 // ---------------------------------------------------------------------------
@@ -277,7 +302,8 @@ export type ResolvedSlot = {
 export async function resolveSlotForBooking(
   fullAddress: string,
   date: string,
-  arrivalWindowLabel: string
+  arrivalWindowLabel: string,
+  timeoutMs = 90_000
 ): Promise<ResolvedSlot | null> {
   const code = bookingWindowCode(arrivalWindowLabel);
   if (!code) return null;
@@ -285,7 +311,7 @@ export async function resolveSlotForBooking(
   const raw = (await callWebsiteBotTool(
     "recommend_sales_schedule",
     { appointmentLocation: fullAddress, requestedDates: [date], maxRecommendations: 6 },
-    90_000
+    timeoutMs
   )) as RawResult;
 
   for (const option of raw?.options || []) {

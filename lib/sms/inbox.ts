@@ -5,6 +5,8 @@
  * and what would stop a person's reply from going out right now.
  *
  * Needs CSR (top of the inbox):
+ *   0. (pinned above everything) "📅 Ready to book": the customer picked a real open
+ *      time by text (step 4a) and nobody has clicked "Booked in ServiceTitan" yet,
  *   1. the AI handed the conversation off (bailout, phone request, complaint,
  *      ready to book...) and nobody has marked it handled yet, or
  *   2. the customer texted a number the AI is paused for (a person took over), or
@@ -21,7 +23,7 @@ export const NO_REPLY_MINUTES = 5;
 
 const HANDOFF_LABELS: Record<string, string> = {
   wants_call: "Wants a call",
-  ready_to_book: "Ready to book",
+  ready_to_book: "Wants to book (no time picked)",
   complaint: "Complaint",
   existing_customer: "Existing customer",
   appointment_change: "Appointment change",
@@ -38,8 +40,12 @@ export function handoffLabel(reason: string | null): string {
   return HANDOFF_LABELS[reason] || reason.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
+export const READY_TO_BOOK_LABEL = "📅 Ready to book";
+
 export type InboxFlag = {
   needsCsr: boolean;
+  /** "📅 Ready to book": pinned to the very top of Needs CSR. */
+  pinned: boolean;
   /** Short reason shown in red on the list and the thread. */
   reason: string | null;
   /** The customer's newest text has no answer and nobody marked it handled. */
@@ -47,30 +53,38 @@ export type InboxFlag = {
 };
 
 type FlagInput = Pick<InboxRow,
-  "botStatus" | "handoffReason" | "handoffResolvedAt" | "optedOut" | "lastDirection" | "lastBody" | "lastAt">;
+  "botStatus" | "handoffReason" | "handoffResolvedAt" | "optedOut" | "lastDirection" | "lastBody" | "lastAt">
+  & { bookingRequest?: unknown; bookingDoneAt?: string | null };
+
+/** The customer picked a time and nobody has booked it in ServiceTitan yet. */
+export function bookingPending(row: { bookingRequest?: unknown; bookingDoneAt?: string | null }): boolean {
+  return Boolean(row.bookingRequest) && !row.bookingDoneAt;
+}
 
 export function inboxFlag(row: FlagInput, now: Date): InboxFlag {
-  if (row.optedOut) return { needsCsr: false, reason: null, waiting: false };
+  if (row.optedOut) return { needsCsr: false, pinned: false, reason: null, waiting: false };
   const resolvedAt = row.handoffResolvedAt ? Date.parse(row.handoffResolvedAt) : 0;
   const lastAt = row.lastAt ? Date.parse(row.lastAt) : 0;
   const keywordOnly = row.lastDirection === "inbound" && classifyKeyword(row.lastBody, { optedOut: false }).keyword !== null;
   const waiting = row.lastDirection === "inbound" && !keywordOnly && (!resolvedAt || lastAt > resolvedAt);
 
   if (row.botStatus === "paused" && row.handoffReason && !resolvedAt) {
-    return { needsCsr: true, reason: handoffLabel(row.handoffReason), waiting };
+    const pinned = row.handoffReason === "ready_to_book" && bookingPending(row);
+    return { needsCsr: true, pinned, reason: pinned ? READY_TO_BOOK_LABEL : handoffLabel(row.handoffReason), waiting };
   }
   if (waiting && row.botStatus === "paused") {
-    return { needsCsr: true, reason: "Customer is waiting (AI paused)", waiting };
+    return { needsCsr: true, pinned: false, reason: "Customer is waiting (AI paused)", waiting };
   }
   if (waiting && now.getTime() - lastAt >= NO_REPLY_MINUTES * 60_000) {
-    return { needsCsr: true, reason: "No reply yet", waiting };
+    return { needsCsr: true, pinned: false, reason: "No reply yet", waiting };
   }
-  return { needsCsr: false, reason: null, waiting };
+  return { needsCsr: false, pinned: false, reason: null, waiting };
 }
 
-/** Needs CSR first (oldest wait first, so nobody sits longest), then newest activity. */
+/** "📅 Ready to book" first, then the rest of Needs CSR (oldest wait first, so nobody sits longest), then newest activity. */
 export function sortInbox<T extends { flag: InboxFlag; lastAt: string }>(rows: T[]): T[] {
   return [...rows].sort((a, b) => {
+    if (a.flag.pinned !== b.flag.pinned) return a.flag.pinned ? -1 : 1;
     if (a.flag.needsCsr !== b.flag.needsCsr) return a.flag.needsCsr ? -1 : 1;
     const ta = Date.parse(a.lastAt) || 0;
     const tb = Date.parse(b.lastAt) || 0;

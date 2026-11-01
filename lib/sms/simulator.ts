@@ -151,16 +151,23 @@ export async function simulateTurn(input: SimTurnInput): Promise<SimTurnResult> 
       else if (action === "bot_photo_claim_retry") add("fixup", "AI said photos were attached without attaching any; asked it to retry");
       else if (action === "bot_photo_claim_removed") add("fixup", "Code removed a false \"photos attached\" line");
       else if (action === "bot_no_reply") add("warning", `No reply (${reason})`);
+      else if (action === "bot_open_times") add("times", reason === "options" ? `Open times looked up (live calendar): ${detail.count} found` : `Open times lookup: ${reason.replace(/_/g, " ")}`);
+      else if (action === "bot_time_chosen") add("times", `Customer picked ${reason} ${String(detail.window || "")}`);
+      else if (action === "bot_slot_gone") add("warning", `Picked time no longer open at their address (${reason} ${String(detail.window || "")})`);
+      else if (action === "bot_booking_claim_retry") add("fixup", "AI said something was booked/scheduled; asked it to rewrite");
+      else if (action === "bot_booking_claim_removed") add("fixup", "Code removed a \"booked / scheduled / confirmed\" line");
     },
     saveNotes: async (fresh) => {
       const shown = Object.entries(fresh).filter(([k, v]) => v && !k.startsWith("_"));
       Object.assign(notes, fresh);
       if (shown.length) add("notes", `Saved: ${shown.map(([k, v]) => `${k.replace(/_/g, " ")} = ${v}`).join("; ")}`);
     },
-    handOff: async (reason, summary, _notes, auto) => {
+    handOff: async (reason, summary, _notes, auto, booking) => {
       handoff = reason;
-      add("handoff", `Needs CSR: ${HANDOFF_LABELS[reason] || reason}${auto ? " (flagged by code)" : ""}. ${summary}`);
+      if (booking) add("handoff", `📅 Ready to book (pinned + Slack alert in real texting). ${summary.replace(/\n/g, " · ")}`);
+      else add("handoff", `Needs CSR: ${HANDOFF_LABELS[reason] || reason}${auto ? " (flagged by code)" : ""}. ${summary}`);
     },
+    progress: async (text) => { add("checking", `Lookup was slow, so the AI would first text: "${text}"`); },
     outcome: async (outcome) => { add("outcome", `Lead marked: ${outcome.replace(/_/g, " ")}`); },
     optOut: async () => { optedOut = true; add("opt_out", "Opted out (AI recognized \"stop texting me\")"); },
   };

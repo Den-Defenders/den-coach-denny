@@ -14,19 +14,24 @@
  *   POST {action:"claim", phone}        -> "Take it": this customer is mine
  *   POST {action:"release", phone}      -> back to the shared queue (own customer, or owner/manager)
  *   POST {action:"assign", phone, to}   -> owners/managers give the customer to a team member (email)
+ *   POST {action:"mark_booked", phone}  -> "Booked in ServiceTitan" (step 4a): clears the "📅 Ready to book"
+ *                                          flag; an unowned customer becomes the booker's
  */
 import { NextResponse } from "next/server";
 import { canUseTextingInbox, type DennyAccess } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
-import { handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
+import { bookingFrom, bookingLines, shortTimeWords } from "@/lib/sms/booking";
+import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
 import { formatPhone, normalizePhone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
 import {
+  CHECKING_SENDER,
   HOLD_SENDER,
   assignConversation,
   audit,
   inboxThread,
   listInboxConversations,
+  markBookingDone,
   markHandoffHandled,
   resumeBot,
   setContactName,
@@ -90,8 +95,11 @@ export async function GET(request: Request) {
       if (!phone) return json({ error: "That isn't a valid number." }, 400);
       const thread = await inboxThread(phone);
       if (!thread) return json({ error: "No texts with that number yet." }, 404);
-      // The automatic hold text answers nothing, so it doesn't count as the latest reply.
-      const last = [...thread.messages].reverse().find((m) => m.status !== "send_failed" && m.sentBy !== HOLD_SENDER);
+      // The automatic hold text and the AI's "checking our calendar" text answer nothing,
+      // so they don't count as the latest reply.
+      const last = [...thread.messages].reverse()
+        .find((m) => m.status !== "send_failed" && m.sentBy !== HOLD_SENDER && m.sentBy !== CHECKING_SENDER);
+      const booking = bookingFrom(thread.bookingRequest);
       const flag = inboxFlag({
         botStatus: thread.botStatus,
         handoffReason: thread.handoffReason,
@@ -100,14 +108,28 @@ export async function GET(request: Request) {
         lastDirection: last?.direction || "outbound",
         lastBody: last?.body || "",
         lastAt: last?.createdAt || "",
+        bookingRequest: booking,
+        bookingDoneAt: thread.bookingDoneAt,
       }, now);
       const team = await inboxTeam();
       return json({
         thread: {
           ...thread,
+          bookingRequest: undefined,
+          booking: booking
+            ? {
+                lines: bookingLines(booking, formatPhone(phone), thread.customerNotes),
+                time: shortTimeWords(booking.chosen),
+                requestedAt: booking.requestedAt,
+                doneAt: thread.bookingDoneAt,
+                doneBy: nameFor(thread.bookingDoneBy, team),
+              }
+            : null,
           assignedName: nameFor(thread.assignedTo, team),
           phoneLabel: formatPhone(phone),
-          handoffLabel: thread.handoffReason ? handoffLabel(thread.handoffReason) : null,
+          handoffLabel: thread.handoffReason
+            ? (thread.handoffReason === "ready_to_book" && booking ? READY_TO_BOOK_LABEL : handoffLabel(thread.handoffReason))
+            : null,
           messages: thread.messages.map((m) => ({ ...m, media: viewableMedia(m.id, m.direction, m.media) })),
         },
         flag,
@@ -120,12 +142,18 @@ export async function GET(request: Request) {
 
     const rows = await listInboxConversations({ search: url.searchParams.get("q") || undefined });
     const team = await inboxTeam();
-    const conversations = sortInbox(rows.map((row) => ({
-      ...row,
-      assignedName: nameFor(row.assignedTo, team),
-      phoneLabel: formatPhone(row.phone),
-      flag: inboxFlag(row, now),
-    })));
+    const conversations = sortInbox(rows.map((row) => {
+      const booking = bookingFrom(row.bookingRequest);
+      return {
+        ...row,
+        bookingRequest: undefined,
+        // Shown under the "📅 Ready to book" badge so the time is visible without opening it.
+        bookingTime: booking && !row.bookingDoneAt ? shortTimeWords(booking.chosen) : null,
+        assignedName: nameFor(row.assignedTo, team),
+        phoneLabel: formatPhone(row.phone),
+        flag: inboxFlag({ ...row, bookingRequest: booking }, now),
+      };
+    }));
     return json({
       conversations,
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
@@ -207,6 +235,16 @@ export async function POST(request: Request) {
         await assignConversation(phone, member.email, now);
         await audit({ phone, action: "assigned", reason: "assigned", detail: { from: thread.assignedTo, to: member.email }, actor: who });
         return json({ ok: true, message: `Assigned to ${member.displayName}.` });
+      }
+      case "mark_booked": {
+        if (!bookingFrom(thread.bookingRequest)) return json({ ok: false, message: "There's no ready-to-book time for this customer." }, 400);
+        if (thread.bookingDoneAt) return json({ ok: true, message: "Already marked booked." });
+        await markBookingDone(phone, who, now);
+        await markHandoffHandled(phone, who, now);
+        // Whoever booked it follows up, unless someone already owns this customer.
+        if (!thread.assignedTo && access.email) await assignConversation(phone, access.email, now);
+        await audit({ phone, action: "booking_marked_booked", reason: "inbox", detail: { owner: thread.assignedTo || access.email }, actor: who });
+        return json({ ok: true, message: `Marked booked in ServiceTitan.${!thread.assignedTo && access.email ? " This customer is yours now." : ""} The AI stays paused; text the customer if you want to confirm.` });
       }
       case "set_name": {
         const name = String(body.name || "").replace(/\s+/g, " ").trim().slice(0, 120);
