@@ -79,6 +79,9 @@ type ThreadResponse = {
 type Filter = "all" | "needs" | "mine" | "unassigned" | "ai" | "paused" | "optout";
 
 const MAX_CHARS = 640;
+
+/** Plain-words names for the AI's saved notes (same as the Slack alerts). */
+const NOTE_LABELS: Record<string, string> = { need: "why they're looking" };
 const LIST_REFRESH_MS = 10_000;
 const THREAD_REFRESH_MS = 5_000;
 
@@ -429,7 +432,7 @@ export default function TextingInbox() {
 
             {notes.length > 0 && (
               <div className="inbox-notes" aria-label="What the customer told the AI">
-                {notes.map(([k, v]) => <span key={k} className="inbox-note"><b>{k.replace(/_/g, " ")}:</b> {v}</span>)}
+                {notes.map(([k, v]) => <span key={k} className="inbox-note"><b>{NOTE_LABELS[k] || k.replace(/_/g, " ")}:</b> {v}</span>)}
               </div>
             )}
 

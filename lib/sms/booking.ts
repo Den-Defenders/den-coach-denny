@@ -210,12 +210,32 @@ export function slotCheckWords(check: SlotCheck): string {
   return SLOT_CHECK_WORDS[check] || "";
 }
 
+/** Plain-words names for the AI's saved notes, for the team (alerts, cards). */
+const TEAM_NOTE_LABELS: Record<string, string> = {
+  need: "why they're looking",
+  door_count: "door count",
+  decision_makers: "decision makers",
+  preferred_days: "preferred days",
+  photos_sent: "photos sent",
+  first_name: "first name",
+};
+
+export function teamNoteLabel(key: string): string {
+  return TEAM_NOTE_LABELS[key] || key.replace(/_/g, " ");
+}
+
+/** The AI's notes as one line for the team. Code-only "_" keys never show. */
+export function teamNotesText(notes: Record<string, string>, skip: string[] = []): string {
+  return Object.entries(notes)
+    .filter(([k, v]) => v && !k.startsWith("_") && !skip.includes(k))
+    .map(([k, v]) => `${teamNoteLabel(k)}: ${v}`)
+    .join("; ");
+}
+
 /** Plain lines a CSR copies into ServiceTitan (inbox "Copy" button and the handoff summary). */
 export function bookingLines(b: BookingRequest, phoneLabel: string, notes: Record<string, string> = {}): string[] {
-  const otherNotes = Object.entries(notes)
-    .filter(([k, v]) => v && !k.startsWith("_") && !["first_name", "product", "door_count", "zip"].includes(k))
-    .map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`)
-    .join("; ");
+  // Already in their own lines, or not needed to book (which photos we texted).
+  const otherNotes = teamNotesText(notes, ["first_name", "product", "door_count", "zip", "photos_sent"]);
   return [
     `Time picked: ${shortTimeWords(b.chosen)}`,
     b.backup ? `Backup: ${shortTimeWords(b.backup)}${b.backup.customerSaidOk ? " (customer said it works)" : " (offered, customer didn't pick)"}` : "Backup: none offered",

@@ -475,6 +475,13 @@ export async function resumeBot(phone: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+/** Clear an old outcome (step 4a: a customer who picks a consultation time is interested again). */
+export async function clearLeadStatus(phone: string) {
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET lead_status = NULL, lead_status_at = NULL, updated_at = now()
+    WHERE phone = ${phone} AND lead_status IS NOT NULL`;
+}
+
 export async function setLeadStatus(phone: string, status: LeadStatus, at: Date) {
   const contact = await ensureContact(phone);
   const sql = await db();
