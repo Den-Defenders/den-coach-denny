@@ -99,6 +99,9 @@ async function createTables(sql: Sql) {
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_status_at TIMESTAMPTZ`;
   // Step 2b (shared brain): what this customer already told us, so the bot never re-asks.
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS customer_notes JSONB`;
+  // Step 3 (Texting inbox): when a person last marked this conversation handled (clears "Needs CSR" up to then).
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_resolved_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_resolved_by TEXT`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -363,6 +366,8 @@ export type ConversationState = {
   conversationId: number;
   botStatus: BotStatus;
   handoffReason: string | null;
+  /** A person already handled the "Needs CSR" flag (or took over from the inbox). */
+  handoffResolved: boolean;
   leadStatus: LeadStatus | null;
   customerNotes: Record<string, string>;
 };
@@ -383,12 +388,13 @@ function notesFrom(value: unknown): Record<string, string> {
 export async function conversationState(phone: string): Promise<ConversationState> {
   const contact = await ensureContact(phone);
   const sql = await db();
-  const rows = await sql`SELECT bot_status, handoff_reason, lead_status, customer_notes FROM sms_conversations WHERE id = ${contact.conversationId}`;
+  const rows = await sql`SELECT bot_status, handoff_reason, handoff_resolved_at, lead_status, customer_notes FROM sms_conversations WHERE id = ${contact.conversationId}`;
   const row = rows[0] || {};
   return {
     conversationId: contact.conversationId,
     botStatus: row.bot_status === "paused" ? "paused" : "on",
     handoffReason: (row.handoff_reason as string) ?? null,
+    handoffResolved: row.handoff_resolved_at != null,
     leadStatus: (row.lead_status as LeadStatus) ?? null,
     customerNotes: notesFrom(row.customer_notes),
   };
@@ -414,15 +420,16 @@ export async function setHandoff(phone: string, reason: string, summary: string,
   const contact = await ensureContact(phone);
   const sql = await db();
   await sql`UPDATE sms_conversations SET bot_status = 'paused', handoff_reason = ${reason.slice(0, 60)},
-      handoff_summary = ${summary.slice(0, 1500)}, handoff_at = ${iso(at)}::timestamptz, updated_at = now()
+      handoff_summary = ${summary.slice(0, 1500)}, handoff_at = ${iso(at)}::timestamptz,
+      handoff_resolved_at = NULL, handoff_resolved_by = NULL, updated_at = now()
     WHERE id = ${contact.conversationId}`;
 }
 
-/** Owner turned the bot back on for this number (test page). */
+/** A person turned the bot back on for this number (inbox or test page). */
 export async function resumeBot(phone: string): Promise<boolean> {
   const sql = await db();
   const rows = await sql`UPDATE sms_conversations SET bot_status = 'on', handoff_reason = NULL, handoff_summary = NULL,
-      handoff_at = NULL, updated_at = now()
+      handoff_at = NULL, handoff_resolved_at = NULL, handoff_resolved_by = NULL, updated_at = now()
     WHERE phone = ${phone} RETURNING id`;
   return rows.length > 0;
 }
@@ -465,6 +472,220 @@ export async function outboundSinceMessage(phone: string, messageId: number): Pr
   const rows = await sql`SELECT 1 FROM sms_messages WHERE phone = ${phone} AND direction = 'outbound'
     AND status <> 'send_failed' AND id > ${messageId} LIMIT 1`;
   return rows.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Texting inbox (step 3): conversation list, one thread, CSR actions
+// ---------------------------------------------------------------------------
+
+export type InboxRow = {
+  phone: string;
+  firstName: string | null;
+  lastName: string | null;
+  botStatus: BotStatus;
+  handoffReason: string | null;
+  handoffSummary: string | null;
+  handoffAt: string | null;
+  handoffResolvedAt: string | null;
+  leadStatus: string | null;
+  optedOut: boolean;
+  lastDirection: "inbound" | "outbound";
+  lastBody: string;
+  lastMediaCount: number;
+  lastSentBy: string | null;
+  lastStatus: string;
+  lastAt: string;
+};
+
+const mediaList = (value: unknown): string[] => {
+  let v: unknown = value;
+  if (typeof v === "string") {
+    try { v = JSON.parse(v); } catch { v = null; }
+  }
+  return Array.isArray(v) ? v.filter((u): u is string => typeof u === "string") : [];
+};
+
+/** Turn what a person typed in the search box into LIKE patterns (text and digits). */
+function searchPatterns(search: string | undefined): { text: string | null; digits: string | null } {
+  const raw = (search || "").trim().slice(0, 60);
+  if (!raw) return { text: null, digits: null };
+  const escaped = raw.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const digits = raw.replace(/\D/g, "");
+  return { text: `%${escaped}%`, digits: digits.length >= 3 ? `%${digits.replace(/^1(?=\d{10}$)/, "")}%` : null };
+}
+
+/**
+ * Conversations for the inbox, newest activity first. Open "Needs CSR" handoffs
+ * always come first so they never fall off the list. Conversations with no
+ * texts at all are left out. Optional search: name, phone digits or message text.
+ */
+export async function listInboxConversations(options: { search?: string; limit?: number } = {}): Promise<InboxRow[]> {
+  const sql = await db();
+  const limit = Math.min(Math.max(options.limit ?? 300, 1), 500);
+  const { text, digits } = searchPatterns(options.search);
+  const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
+      v.lead_status, c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
+      m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
+      m.status AS last_status, m.created_at AS last_at
+    FROM sms_conversations v
+    JOIN sms_contacts c ON c.phone = v.phone
+    LEFT JOIN sms_opt_outs o ON o.phone = v.phone
+    LEFT JOIN LATERAL (
+      SELECT direction, body, media, sent_by, status, created_at FROM sms_messages
+      WHERE conversation_id = v.id AND status <> 'send_failed'
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    ) m ON true
+    WHERE m.created_at IS NOT NULL
+      AND (${text}::text IS NULL
+        OR v.phone LIKE ${digits}::text
+        OR (coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) ILIKE ${text}::text
+        OR EXISTS (SELECT 1 FROM sms_messages s WHERE s.conversation_id = v.id AND s.body ILIKE ${text}::text))
+    ORDER BY (v.bot_status = 'paused' AND v.handoff_reason IS NOT NULL AND v.handoff_resolved_at IS NULL) DESC,
+      m.created_at DESC
+    LIMIT ${limit}`;
+  return rows.map((r) => ({
+    phone: String(r.phone),
+    firstName: (r.first_name as string) || null,
+    lastName: (r.last_name as string) || null,
+    botStatus: r.bot_status === "paused" ? "paused" : "on",
+    handoffReason: (r.handoff_reason as string) ?? null,
+    handoffSummary: (r.handoff_summary as string) ?? null,
+    handoffAt: toIso(r.handoff_at),
+    handoffResolvedAt: toIso(r.handoff_resolved_at),
+    leadStatus: (r.lead_status as string) ?? null,
+    optedOut: r.opted_out === true,
+    lastDirection: r.last_direction === "outbound" ? "outbound" : "inbound",
+    lastBody: String(r.last_body || ""),
+    lastMediaCount: mediaList(r.last_media).length,
+    lastSentBy: (r.last_sent_by as string) ?? null,
+    lastStatus: String(r.last_status || ""),
+    lastAt: toIso(r.last_at) || "",
+  }));
+}
+
+export type InboxMessage = {
+  id: number;
+  direction: "inbound" | "outbound";
+  body: string;
+  media: string[];
+  kind: string | null;
+  status: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+  sentBy: string | null;
+  createdAt: string;
+};
+
+export type InboxThread = {
+  phone: string;
+  firstName: string | null;
+  lastName: string | null;
+  timeZone: string;
+  botStatus: BotStatus;
+  handoffReason: string | null;
+  handoffSummary: string | null;
+  handoffAt: string | null;
+  handoffResolvedAt: string | null;
+  handoffResolvedBy: string | null;
+  leadStatus: string | null;
+  customerNotes: Record<string, string>;
+  optOut: OptOut | null;
+  consent: ConsentType[];
+  messages: InboxMessage[];
+};
+
+/** One conversation for the inbox (latest texts, oldest first). Null when we've never texted with this number. */
+export async function inboxThread(phone: string, limit = 200): Promise<InboxThread | null> {
+  const sql = await db();
+  const rows = await sql`SELECT v.id, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
+      v.handoff_resolved_by, v.lead_status, v.customer_notes, c.first_name, c.last_name, c.time_zone
+    FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone WHERE v.phone = ${phone}`;
+  if (!rows.length) return null;
+  const v = rows[0];
+  const messages = await sql`SELECT id, direction, body, media, kind, status, error_code, error_message, sent_by, created_at
+    FROM sms_messages WHERE conversation_id = ${v.id}
+    ORDER BY created_at DESC, id DESC LIMIT ${Math.min(Math.max(limit, 1), 500)}`;
+  return {
+    phone,
+    firstName: (v.first_name as string) || null,
+    lastName: (v.last_name as string) || null,
+    timeZone: safeTimeZone(String(v.time_zone || DEFAULT_TIME_ZONE)),
+    botStatus: v.bot_status === "paused" ? "paused" : "on",
+    handoffReason: (v.handoff_reason as string) ?? null,
+    handoffSummary: (v.handoff_summary as string) ?? null,
+    handoffAt: toIso(v.handoff_at),
+    handoffResolvedAt: toIso(v.handoff_resolved_at),
+    handoffResolvedBy: (v.handoff_resolved_by as string) ?? null,
+    leadStatus: (v.lead_status as string) ?? null,
+    customerNotes: notesFrom(v.customer_notes),
+    optOut: await findOptOut(phone),
+    consent: await activeConsentTypes(phone),
+    messages: messages.reverse().map((m) => ({
+      id: Number(m.id),
+      direction: m.direction === "outbound" ? "outbound" : "inbound",
+      body: String(m.body || ""),
+      media: mediaList(m.media),
+      kind: (m.kind as string) ?? null,
+      status: String(m.status || ""),
+      errorCode: (m.error_code as string) ?? null,
+      errorMessage: (m.error_message as string) ?? null,
+      sentBy: (m.sent_by as string) ?? null,
+      createdAt: toIso(m.created_at) || "",
+    })),
+  };
+}
+
+/**
+ * A person marked the conversation handled: clears the "Needs CSR" flag and any
+ * "waiting" texts up to now. The AI's on/paused switch is not changed. A new
+ * text from the customer after this time shows up as waiting again.
+ */
+export async function markHandoffHandled(phone: string, by: string, at: Date): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations SET handoff_resolved_at = ${iso(at)}::timestamptz,
+      handoff_resolved_by = ${by.slice(0, 120)}, updated_at = now()
+    WHERE phone = ${phone} RETURNING id`;
+  return rows.length > 0;
+}
+
+/**
+ * A person is texting this customer: the AI stops answering this number and any
+ * open "Needs CSR" flag counts as handled. Keeps the AI's handoff reason if there was one.
+ */
+export async function takeOverConversation(phone: string, by: string, at: Date) {
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET bot_status = 'paused',
+      handoff_reason = COALESCE(handoff_reason, 'csr_took_over'),
+      handoff_at = COALESCE(handoff_at, ${iso(at)}::timestamptz),
+      handoff_resolved_at = ${iso(at)}::timestamptz, handoff_resolved_by = ${by.slice(0, 120)}, updated_at = now()
+    WHERE id = ${contact.conversationId}`;
+}
+
+/** Name a CSR typed for this number (we only know phone numbers until lead intake exists). */
+export async function setContactName(phone: string, firstName: string | null, lastName: string | null): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_contacts SET first_name = ${firstName ? firstName.slice(0, 60) : null},
+      last_name = ${lastName ? lastName.slice(0, 60) : null}, updated_at = now()
+    WHERE phone = ${phone} RETURNING phone`;
+  return rows.length > 0;
+}
+
+/** Twilio's link for a photo a customer texted us (needs the Twilio login to open). */
+export async function inboundMediaUrl(messageId: number, index: number): Promise<string | null> {
+  const sql = await db();
+  const rows = await sql`SELECT media FROM sms_messages WHERE id = ${messageId} AND direction = 'inbound'`;
+  if (!rows.length) return null;
+  return mediaList(rows[0].media)[index] ?? null;
+}
+
+/** Direction of the text just before this one (to alert only on the first unanswered text). */
+export async function previousMessageDirection(phone: string, messageId: number): Promise<"inbound" | "outbound" | null> {
+  const sql = await db();
+  const rows = await sql`SELECT direction FROM sms_messages WHERE phone = ${phone} AND id < ${messageId}
+    AND status <> 'send_failed' ORDER BY id DESC LIMIT 1`;
+  if (!rows.length) return null;
+  return rows[0].direction === "outbound" ? "outbound" : "inbound";
 }
 
 // ---------------------------------------------------------------------------
