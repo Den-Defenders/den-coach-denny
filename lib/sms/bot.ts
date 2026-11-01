@@ -469,6 +469,11 @@ export function trimRepeatedPrice(reply: string, priceAlreadyGiven: boolean): st
     .trim();
 }
 
+/** "I've passed your Tuesday time to our team" (said before request_booking ran). */
+export function saysPassedToTeam(reply: string): boolean {
+  return /\b(passed|sent|forwarded|handed)\b[^.?!]{0,60}\b(to|over to|along to) (our|the) team\b/i.test(reply);
+}
+
 /** "A team member will text you…", "our team will call you" etc. */
 export function promisesTeamFollowUp(reply: string): boolean {
   return /\b(team member|our team|the team|someone (from|on) (our|the) team|our specialist|a specialist|our office)\b[^.?!]{0,40}\b(will|'ll|is going to)\b[^.?!]{0,40}\b(text|call|reach out|contact|follow up|get back|send)/i.test(reply);
@@ -572,6 +577,11 @@ function cleanArg(value: unknown, max: number): string {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
 }
 
+/** Step 4a: a ready_to_book flag WITHOUT a picked time keeps the AI on (a customer can still pick a weekday). */
+export function isSoftHandoff(reason: string, booking?: BookingRequest): boolean {
+  return reason === "ready_to_book" && !booking;
+}
+
 export type ComposeResult =
   | { kind: "reply"; reply: string; media: string[]; handedOff: { reason: string } | null; model: string }
   | { kind: "opted_out" }
@@ -615,6 +625,7 @@ export async function composeBotReply(
   let media: string[] = [];
   let photoNudged = false;
   let bookingNudged = false;
+  let pickNudged = false;
   let usedModel = botModel();
 
   const saveZip = async (zip: string) => {
@@ -706,11 +717,11 @@ export async function composeBotReply(
     return {
       ok: true,
       picked: timeWords(pick),
-      message: "Saved. Unless you already have both, ask in one short text for their full name and the street address of the home. If you have both, call request_booking now. Don't say anything is booked, scheduled or confirmed.",
+      message: "Saved. Unless you already have both, ask in one short text for their full name and the street address of the home. If you have both, call request_booking now. Don't say it's passed to the team yet (that's request_booking's job), and don't say anything is booked, scheduled or confirmed.",
     };
   };
 
-  const requestBooking = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+  const requestBooking = async (args: Record<string, unknown>, lastText: string | null = null): Promise<Record<string, unknown>> => {
     const open = openTimesFrom(notes);
     const chosen = chosenTimeFrom(notes);
     if (!open || !chosen) return { ok: false, error: "NO_TIME_PICKED", message: "Ask which of the offered times works, then call choose_time." };
@@ -750,6 +761,7 @@ export async function composeBotReply(
       doorCount: notes.door_count || null,
       slotCheck,
       requestedAt: input.now.toISOString(),
+      lastText,
     };
     const summary = ["The customer picked a consultation time by text. Book it in ServiceTitan, then click \"Booked in ServiceTitan\".", ...bookingLines(booking, "", notes).filter((l) => !l.startsWith("Phone:"))].join("\n");
     await fx.handOff("ready_to_book", summary, notes, false, booking);
@@ -792,6 +804,17 @@ export async function composeBotReply(
         messages.push({
           role: "system",
           content: "Check (from the system, not the customer): your reply says photos are attached, but none are. If they want to see a style, call send_door_photos now and then write the reply. Otherwise rewrite the reply without mentioning photos.",
+        });
+        reply = "";
+        continue;
+      }
+      // A time is picked but the AI wrote a "passed to the team" goodbye without request_booking.
+      if (!handedOff && !pickNudged && round < MAX_ROUNDS - 1 && chosenTimeFrom(notes) && saysPassedToTeam(reply)) {
+        pickNudged = true;
+        await fx.log("bot_request_booking_retry", "skipped_tool", {}, "system");
+        messages.push({
+          role: "system",
+          content: "Check (from the system, not the customer): they picked a time, but you haven't called request_booking. If you have their full name and street address (or they'd rather not text the address), call request_booking now and then write the final message. If you still need them, ask for them without saying it's been passed to the team.",
         });
         reply = "";
         continue;
@@ -902,16 +925,26 @@ export async function composeBotReply(
   }
 
   // Safety net: the AI told them the team will follow up but forgot to hand off.
-  if (!handedOff && promisesTeamFollowUp(reply)) {
-    const reason = /\b(times?|day|days|schedul|consultation|appointment)\b/i.test(reply) ? "ready_to_book" : "question_for_team";
+  if (!handedOff && (promisesTeamFollowUp(reply) || (chosenTimeFrom(notes) && saysPassedToTeam(reply)))) {
     const lastText = [...thread].reverse().find((m) => m.direction === "inbound")?.body || "";
-    const summary = [
-      "Flagged by code: the AI told the customer our team will follow up but didn't hand off.",
-      lastText ? `Their last text: "${lastText.slice(0, 200)}".` : "",
-      notesLine(notes),
-    ].filter(Boolean).join(" ");
-    await fx.handOff(reason, summary, notes, true);
-    handedOff = { reason };
+    if (chosenTimeFrom(notes)) {
+      // They picked a real time: make the full "📅 Ready to book" request from code (name/address are likely in their last text).
+      await fx.log("bot_booking_by_code", "skipped_tool", {}, "system");
+      const made = await requestBooking({}, lastText || null);
+      if (!made.ok) {
+        // The time filled up while we were checking: say that instead of the AI's goodbye.
+        reply = "Sorry, that time just filled up. Which of the other times works for you?";
+      }
+    } else {
+      const reason = /\b(times?|day|days|schedul|consultation|appointment)\b/i.test(reply) ? "ready_to_book" : "question_for_team";
+      // The Slack alert adds the notes itself, so they aren't repeated here.
+      const summary = [
+        "Flagged by code: the AI told the customer our team will follow up but didn't hand off.",
+        lastText ? `Their last text: "${lastText.slice(0, 200)}".` : "",
+      ].filter(Boolean).join(" ");
+      await fx.handOff(reason, summary, notes, true);
+      handedOff = { reason };
+    }
   }
 
   // After hours (7 PM - 8 AM), tell them when a person will pick this up.
@@ -948,7 +981,8 @@ function liveEffects(phone: string, inboundId: number): BotEffects {
     log: (action, reason, detail = {}, actor = "denny-ai") => audit({ phone, action, reason, detail: { inboundId, ...detail }, actor }),
     saveNotes: (fresh) => saveCustomerNotes(phone, fresh),
     handOff: async (reason, summary, notes, auto, booking) => {
-      await setHandoff(phone, reason, summary, smsNow());
+      // "Wants to book" with no picked time: flag it for the team but keep the AI answering.
+      await setHandoff(phone, reason, summary, smsNow(), { keepAi: isSoftHandoff(reason, booking) });
       if (booking) {
         await saveBookingRequest(phone, booking);
         if (booking.name) await nameContactIfEmpty(phone, booking.name);

@@ -190,6 +190,8 @@ export type BookingRequest = {
   doorCount: string | null;
   slotCheck: SlotCheck;
   requestedAt: string;
+  /** Set when code made the request because the AI skipped request_booking: name/address are probably in here. */
+  lastText?: string | null;
 };
 
 export function bookingFrom(value: unknown): BookingRequest | null {
@@ -245,6 +247,7 @@ export function bookingLines(b: BookingRequest, phoneLabel: string, notes: Recor
     `Address: ${[b.address || "not given", b.zip && !(b.address || "").includes(b.zip) ? b.zip : ""].filter(Boolean).join(", ")}${b.area ? ` (${b.area})` : ""}`,
     `Project: ${[b.product, b.doorCount].filter(Boolean).join(", ") || "not given"}`,
     otherNotes ? `Notes: ${otherNotes}`.slice(0, 500) : "",
+    b.lastText ? `Their last text: "${b.lastText.slice(0, 200)}" (name/address may be here)` : "",
     `Time check: ${slotCheckWords(b.slotCheck)}`,
   ].filter(Boolean);
 }
