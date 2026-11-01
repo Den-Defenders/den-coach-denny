@@ -478,6 +478,12 @@ export async function outboundSinceMessage(phone: string, messageId: number): Pr
 // Texting inbox (step 3): conversation list, one thread, CSR actions
 // ---------------------------------------------------------------------------
 
+/**
+ * sent_by of the automatic "a team member will get back to you" text. It answers
+ * nothing, so it never counts as a reply: the customer still shows as waiting.
+ */
+export const HOLD_SENDER = "denny-hold";
+
 export type InboxRow = {
   phone: string;
   firstName: string | null;
@@ -532,7 +538,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
     LEFT JOIN sms_opt_outs o ON o.phone = v.phone
     LEFT JOIN LATERAL (
       SELECT direction, body, media, sent_by, status, created_at FROM sms_messages
-      WHERE conversation_id = v.id AND status <> 'send_failed'
+      WHERE conversation_id = v.id AND status <> 'send_failed' AND coalesce(sent_by, '') <> ${HOLD_SENDER}
       ORDER BY created_at DESC, id DESC LIMIT 1
     ) m ON true
     WHERE m.created_at IS NOT NULL
@@ -679,13 +685,22 @@ export async function inboundMediaUrl(messageId: number, index: number): Promise
   return mediaList(rows[0].media)[index] ?? null;
 }
 
-/** Direction of the text just before this one (to alert only on the first unanswered text). */
+/** Direction of the text just before this one (to alert only on the first unanswered text). Hold texts don't count. */
 export async function previousMessageDirection(phone: string, messageId: number): Promise<"inbound" | "outbound" | null> {
   const sql = await db();
   const rows = await sql`SELECT direction FROM sms_messages WHERE phone = ${phone} AND id < ${messageId}
-    AND status <> 'send_failed' ORDER BY id DESC LIMIT 1`;
+    AND status <> 'send_failed' AND coalesce(sent_by, '') <> ${HOLD_SENDER} ORDER BY id DESC LIMIT 1`;
   if (!rows.length) return null;
   return rows[0].direction === "outbound" ? "outbound" : "inbound";
+}
+
+/** The newest text we sent this number (hold texts included): who sent it and when. */
+export async function lastOutbound(phone: string): Promise<{ sentBy: string | null; createdAt: string } | null> {
+  const sql = await db();
+  const rows = await sql`SELECT sent_by, created_at FROM sms_messages WHERE phone = ${phone} AND direction = 'outbound'
+    AND status <> 'send_failed' ORDER BY created_at DESC, id DESC LIMIT 1`;
+  if (!rows.length) return null;
+  return { sentBy: (rows[0].sent_by as string) ?? null, createdAt: toIso(rows[0].created_at) || "" };
 }
 
 // ---------------------------------------------------------------------------

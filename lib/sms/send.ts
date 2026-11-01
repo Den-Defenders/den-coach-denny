@@ -16,7 +16,7 @@
  *                             automated texts: form consent (care/marketing), not just "they texted us"
  *                             promo texts: SMS_PROMO_TEXTS_ENABLED=true + form consent
  *   7. "reply" only within 24 hours of their last text
- *   8. sending hours in the customer's time: reply 8 AM–7 PM, manual 8 AM–9 PM, automated 9 AM–5 PM
+ *   8. sending hours in the customer's time: reply any hour (they texted us), manual 8 AM–7 PM, automated 9 AM–5 PM
  *   9. no automated texts on the holiday list
  *  10. caps: per number 8/hour and 20/day, 2 automated/day, 300/day for everyone (env can lower/raise)
  */

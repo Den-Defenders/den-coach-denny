@@ -146,8 +146,8 @@ export function isConfirmationKind(kind: SendKind): kind is "opt_out_confirmatio
 
 /** [start hour, end hour) in the customer's local time. */
 export const SENDING_HOURS: Record<Exclude<SendKind, "opt_out_confirmation" | "opt_in_confirmation">, [number, number]> = {
-  reply: [8, 19],      // 8 AM - 7 PM (Melanie, 2026-10-22)
-  manual: [8, 21],     // 8 AM - 9 PM (quiet-hours rule)
+  reply: [0, 24],      // any hour: the AI answers a text they just sent us (Steven, 2026-11-01; was 8 AM - 7 PM)
+  manual: [8, 19],     // 8 AM - 7 PM, every day: when a person (CSR) may text (Steven, 2026-11-01; was 8 AM - 9 PM)
   automated: [9, 17],  // 9 AM - 5 PM (Melanie, 2026-10-22)
 };
 
@@ -187,9 +187,18 @@ export function withinSendingHours(kind: SendKind, local: LocalTime): boolean {
   return local.hour >= start && local.hour < end;
 }
 
+/** Team (CSR) texting hours = the "manual" hours. The AI tells customers about these after hours. */
+export const TEAM_HOURS_TEXT = "8 AM to 7 PM";
+
+/** Is the team texting right now in this time zone (8 AM - 7 PM)? */
+export function teamIsTexting(now: Date, timeZone: string): boolean {
+  return withinSendingHours("manual", localTime(now, timeZone));
+}
+
 export function describeHours(kind: SendKind): string {
   if (isConfirmationKind(kind)) return "any time";
   const [start, end] = SENDING_HOURS[kind];
+  if (start === 0 && end === 24) return "any time";
   const fmt = (h: number) => `${((h + 11) % 12) + 1} ${h < 12 ? "AM" : "PM"}`;
   return `${fmt(start)}–${fmt(end)}`;
 }
