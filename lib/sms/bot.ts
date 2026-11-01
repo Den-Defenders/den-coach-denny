@@ -27,7 +27,7 @@ import salesZipDirectory from "@/app/lib/salesZipDirectory.json";
 import { COMPANY_FACTS, NV_ASK_TEAM_CITIES, NV_SERVED_CITIES } from "@/lib/ai/companyFacts";
 import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
 import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from "@/lib/doorPhotos";
-import { inboxLink, pilotTag, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
+import { inboxLink, ownerMention, pilotTag, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
@@ -431,8 +431,9 @@ export function withAfterHoursNote(reply: string, now: Date, timeZone = DEFAULT_
 
 async function postHandoffToSlack(phone: string, reason: string, summary: string, notes: Record<string, string> = {}) {
   if (!slackAlertsEnabled()) return;
+  const mention = await ownerMention(phone);
   const text = [
-    `${pilotTag()}:raising_hand: *Texting: Needs CSR* - ${formatPhone(phone)}`,
+    `${pilotTag()}${mention}:raising_hand: *Texting: Needs CSR* - ${formatPhone(phone)}`,
     `Reason: ${reason.replace(/_/g, " ")}`,
     summary,
     notesLine(notes),

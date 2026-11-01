@@ -11,15 +11,19 @@
  *   POST {action:"resume_bot", phone}   -> turn the AI back on for this number
  *   POST {action:"mark_handled", phone} -> clear "Needs CSR" (AI on/off unchanged)
  *   POST {action:"set_name", phone, name}
+ *   POST {action:"claim", phone}        -> "Take it": this customer is mine
+ *   POST {action:"release", phone}      -> back to the shared queue (own customer, or owner/manager)
+ *   POST {action:"assign", phone, to}   -> owners/managers give the customer to a team member (email)
  */
 import { NextResponse } from "next/server";
-import { canUseTextingInbox } from "@/lib/access";
+import { canUseTextingInbox, type DennyAccess } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
 import { formatPhone, normalizePhone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
 import {
   HOLD_SENDER,
+  assignConversation,
   audit,
   inboxThread,
   listInboxConversations,
@@ -29,6 +33,7 @@ import {
   smsDatabaseConfigured,
   takeOverConversation,
 } from "@/lib/sms/store";
+import { listTeamMembers, normalizeEmail, teamDatabaseConfigured, type TeamMember } from "@/lib/teamStore";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,6 +49,27 @@ async function requireInboxUser() {
   return access && canUseTextingInbox(access.role) ? access : null;
 }
 
+/** Owners and managers may hand a customer to someone else; everyone can take an unowned one. */
+function canAssignOthers(access: DennyAccess): boolean {
+  return access.role === "owner" || access.role === "manager";
+}
+
+/** Active team members who can work the inbox (for names and the "Assign to" list). */
+async function inboxTeam(): Promise<TeamMember[]> {
+  if (!teamDatabaseConfigured()) return [];
+  try {
+    return (await listTeamMembers()).filter((m) => m.active && canUseTextingInbox(m.role));
+  } catch (error) {
+    console.error("SMS inbox team list failed:", error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
+function nameFor(email: string | null, team: TeamMember[]): string | null {
+  if (!email) return null;
+  return team.find((m) => m.email === email)?.displayName || email.split("@")[0];
+}
+
 /** Inbound photos are Twilio links that need our Twilio login, so the page loads them through /api/sms/inbox/media. */
 function viewableMedia(messageId: number, direction: "inbound" | "outbound", media: string[]): string[] {
   if (direction === "outbound") return media;
@@ -51,7 +77,8 @@ function viewableMedia(messageId: number, direction: "inbound" | "outbound", med
 }
 
 export async function GET(request: Request) {
-  if (!await requireInboxUser()) return json({ error: "You don't have access to the Texting inbox." }, 403);
+  const access = await requireInboxUser();
+  if (!access) return json({ error: "You don't have access to the Texting inbox." }, 403);
   if (!smsDatabaseConfigured()) return json({ error: "Texting database isn't set up." }, 500);
   const url = new URL(request.url);
   const now = smsNow();
@@ -74,27 +101,35 @@ export async function GET(request: Request) {
         lastBody: last?.body || "",
         lastAt: last?.createdAt || "",
       }, now);
+      const team = await inboxTeam();
       return json({
         thread: {
           ...thread,
+          assignedName: nameFor(thread.assignedTo, team),
           phoneLabel: formatPhone(phone),
           handoffLabel: thread.handoffReason ? handoffLabel(thread.handoffReason) : null,
           messages: thread.messages.map((m) => ({ ...m, media: viewableMedia(m.id, m.direction, m.media) })),
         },
         flag,
         reply: replyBlockers(thread, now),
+        me: access.email,
+        canAssign: canAssignOthers(access),
+        team: canAssignOthers(access) ? team.map((m) => ({ email: m.email, name: m.displayName })) : [],
       });
     }
 
     const rows = await listInboxConversations({ search: url.searchParams.get("q") || undefined });
+    const team = await inboxTeam();
     const conversations = sortInbox(rows.map((row) => ({
       ...row,
+      assignedName: nameFor(row.assignedTo, team),
       phoneLabel: formatPhone(row.phone),
       flag: inboxFlag(row, now),
     })));
     return json({
       conversations,
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
+      me: access.email,
       now: now.toISOString(),
     });
   } catch (error) {
@@ -144,6 +179,34 @@ export async function POST(request: Request) {
         await markHandoffHandled(phone, who, now);
         await audit({ phone, action: "handoff_handled", reason: thread.handoffReason, actor: who });
         return json({ ok: true, message: "Marked handled." });
+      }
+      case "claim": {
+        if (!access.email) return json({ ok: false, message: "Your login has no email, so it can't own customers." }, 400);
+        if (thread.assignedTo && thread.assignedTo !== access.email && !canAssignOthers(access)) {
+          return json({ ok: false, message: `${nameFor(thread.assignedTo, await inboxTeam())} already has this customer. Ask a manager to reassign it.` }, 409);
+        }
+        await assignConversation(phone, access.email, now);
+        await audit({ phone, action: "assigned", reason: "claimed", detail: { from: thread.assignedTo }, actor: who });
+        return json({ ok: true, message: "This customer is yours now." });
+      }
+      case "release": {
+        if (!thread.assignedTo) return json({ ok: true, message: "Nobody owns this customer." });
+        if (thread.assignedTo !== access.email && !canAssignOthers(access)) {
+          return json({ ok: false, message: "Only the owner or a manager can release this customer." }, 403);
+        }
+        await assignConversation(phone, null, now);
+        await audit({ phone, action: "assigned", reason: "released", detail: { from: thread.assignedTo }, actor: who });
+        return json({ ok: true, message: "Back in the shared queue." });
+      }
+      case "assign": {
+        if (!canAssignOthers(access)) return json({ ok: false, message: "Only owners and managers can assign customers." }, 403);
+        const to = normalizeEmail(String(body.to || ""));
+        const team = await inboxTeam();
+        const member = team.find((m) => m.email === to);
+        if (!member) return json({ ok: false, message: "Pick an active team member who can use the Texting inbox." }, 400);
+        await assignConversation(phone, member.email, now);
+        await audit({ phone, action: "assigned", reason: "assigned", detail: { from: thread.assignedTo, to: member.email }, actor: who });
+        return json({ ok: true, message: `Assigned to ${member.displayName}.` });
       }
       case "set_name": {
         const name = String(body.name || "").replace(/\s+/g, " ").trim().slice(0, 120);

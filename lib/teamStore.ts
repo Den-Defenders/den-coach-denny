@@ -37,6 +37,8 @@ export type TeamMember = {
   stTechnicianName: string | null;
   timeZone: TeamTimeZone;
   active: boolean;
+  /** Slack member ID (like U01ABC23DEF) so texting alerts can @mention them. Optional. */
+  slackMemberId: string | null;
   updatedAt: string;
   updatedBy: string;
 };
@@ -49,6 +51,7 @@ export type TeamMemberInput = {
   stTechnicianName: string | null;
   timeZone: TeamTimeZone;
   active: boolean;
+  slackMemberId?: string | null;
 };
 
 type SqlClient = ReturnType<typeof neon>;
@@ -91,6 +94,8 @@ async function ensureTable(sql: SqlClient) {
         updated_by TEXT NOT NULL
       )`;
       await upgradeRoleCheck(sql);
+      // Texting inbox: @mention the CSR who owns a customer in Slack alerts.
+      await sql`ALTER TABLE den_team_members ADD COLUMN IF NOT EXISTS slack_member_id TEXT`;
     })().catch((error) => {
       tableReady = null;
       throw error;
@@ -122,6 +127,11 @@ async function upgradeRoleCheck(sql: SqlClient) {
   }
 }
 
+/** Slack member IDs look like U01ABC23DEF (or W… on Enterprise Grid). */
+export function isSlackMemberId(value: unknown): value is string {
+  return typeof value === "string" && /^[UW][A-Z0-9]{6,14}$/.test(value);
+}
+
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
@@ -148,6 +158,7 @@ function rowToMember(row: Record<string, unknown>): TeamMember {
     stTechnicianName: row.st_technician_name ? String(row.st_technician_name) : null,
     timeZone,
     active: row.active === true,
+    slackMemberId: row.slack_member_id ? String(row.slack_member_id) : null,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at ?? ""),
     updatedBy: String(row.updated_by ?? ""),
   };
@@ -171,10 +182,11 @@ export async function saveTeamMember(input: TeamMemberInput, updatedBy: string):
   const sql = sqlClient();
   await ensureTable(sql);
   const rows = (await sql`INSERT INTO den_team_members
-      (email, display_name, role, st_technician_id, st_technician_name, time_zone, active, updated_by)
+      (email, display_name, role, st_technician_id, st_technician_name, time_zone, active, slack_member_id, updated_by)
     VALUES
       (${normalizeEmail(input.email)}, ${input.displayName.trim()}, ${input.role},
-       ${input.stTechnicianId}, ${input.stTechnicianName}, ${input.timeZone}, ${input.active}, ${updatedBy})
+       ${input.stTechnicianId}, ${input.stTechnicianName}, ${input.timeZone}, ${input.active},
+       ${input.slackMemberId ?? null}, ${updatedBy})
     ON CONFLICT (email) DO UPDATE SET
       display_name = EXCLUDED.display_name,
       role = EXCLUDED.role,
@@ -182,6 +194,7 @@ export async function saveTeamMember(input: TeamMemberInput, updatedBy: string):
       st_technician_name = EXCLUDED.st_technician_name,
       time_zone = EXCLUDED.time_zone,
       active = EXCLUDED.active,
+      slack_member_id = EXCLUDED.slack_member_id,
       updated_at = now(),
       updated_by = EXCLUDED.updated_by
     RETURNING *`) as Record<string, unknown>[];

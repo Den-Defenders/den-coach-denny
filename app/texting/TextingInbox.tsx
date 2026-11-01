@@ -11,6 +11,8 @@ type Conversation = {
   lastName: string | null;
   botStatus: "on" | "paused";
   handoffReason: string | null;
+  assignedTo: string | null;
+  assignedName: string | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -47,14 +49,23 @@ type Thread = {
   handoffResolvedAt: string | null;
   handoffResolvedBy: string | null;
   leadStatus: string | null;
+  assignedTo: string | null;
+  assignedName: string | null;
   customerNotes: Record<string, string>;
   optOut: { optedOutAt: string; source: string; keyword: string | null } | null;
   messages: Message[];
 };
 
-type ThreadResponse = { thread: Thread; flag: Flag; reply: { blockers: string[]; canSend: boolean; localTimeLabel: string } };
+type ThreadResponse = {
+  thread: Thread;
+  flag: Flag;
+  reply: { blockers: string[]; canSend: boolean; localTimeLabel: string };
+  me: string | null;
+  canAssign: boolean;
+  team: { email: string; name: string }[];
+};
 
-type Filter = "all" | "needs" | "ai" | "paused" | "optout";
+type Filter = "all" | "needs" | "mine" | "unassigned" | "ai" | "paused" | "optout";
 
 const MAX_CHARS = 640;
 const LIST_REFRESH_MS = 10_000;
@@ -105,8 +116,10 @@ function segments(text: string) {
   return text.length <= single ? 1 : Math.ceil(text.length / multi);
 }
 
-function matchesFilter(c: Conversation, filter: Filter) {
+function matchesFilter(c: Conversation, filter: Filter, me: string | null) {
   if (filter === "needs") return c.flag.needsCsr;
+  if (filter === "mine") return Boolean(me) && c.assignedTo === me;
+  if (filter === "unassigned") return !c.assignedTo && !c.optedOut;
   if (filter === "ai") return c.botStatus === "on" && !c.optedOut;
   if (filter === "paused") return c.botStatus === "paused" && !c.optedOut;
   if (filter === "optout") return c.optedOut;
@@ -133,6 +146,7 @@ export default function TextingInbox() {
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [me, setMe] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const lastCount = useRef(0);
   const searchRef = useRef(search);
@@ -143,6 +157,7 @@ export default function TextingInbox() {
     const json = response ? await response.json().catch(() => ({})) : {};
     if (response?.ok) {
       setConversations(json.conversations || []);
+      setMe(json.me || null);
       setListError("");
     } else {
       setListError(json.error || "Could not load the inbox.");
@@ -243,8 +258,9 @@ export default function TextingInbox() {
     setEditingName(false);
   }
 
-  const visible = conversations.filter((c) => matchesFilter(c, filter));
+  const visible = conversations.filter((c) => matchesFilter(c, filter, me));
   const needsCount = conversations.filter((c) => c.flag.needsCsr).length;
+  const myNeeds = conversations.filter((c) => c.flag.needsCsr && me && c.assignedTo === me).length;
   const thread = data?.thread;
   const flag = data?.flag;
   const reply = data?.reply;
@@ -265,7 +281,7 @@ export default function TextingInbox() {
             aria-label="Search conversations"
           />
           <div className="inbox-filters" role="tablist" aria-label="Filter">
-            {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
+            {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["mine", `Mine${myNeeds ? ` (${myNeeds})` : ""}`], ["unassigned", "Unassigned"], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>
             ))}
           </div>
@@ -288,6 +304,7 @@ export default function TextingInbox() {
                   </span>
                   <span className="inbox-badges">
                     {c.flag.needsCsr && <span className="inbox-badge red">Needs CSR · {c.flag.reason}</span>}
+                    {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
                     {c.optedOut ? <span className="inbox-badge gray">Opted out</span>
                       : c.botStatus === "paused" ? <span className="inbox-badge amber">AI paused</span>
                         : <span className="inbox-badge teal">AI on</span>}
@@ -333,6 +350,22 @@ export default function TextingInbox() {
                 {!thread.optOut && thread.botStatus === "paused" && <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("resume_bot")}>Turn AI back on</button>}
               </div>
             </header>
+
+            <div className="inbox-owner">
+              <span>👤 Owner: <b>{!thread.assignedTo ? "Nobody yet (shared queue)" : thread.assignedTo === data.me ? "You" : thread.assignedName}</b></span>
+              {thread.assignedTo !== data.me && (!thread.assignedTo || data.canAssign) && (
+                <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("claim")}>Take it</button>
+              )}
+              {thread.assignedTo && (thread.assignedTo === data.me || data.canAssign) && (
+                <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("release")}>Release</button>
+              )}
+              {data.canAssign && data.team.length > 0 && (
+                <select aria-label="Assign to" value="" disabled={busy} onChange={(e) => { if (e.target.value) act("assign", { to: e.target.value }); }}>
+                  <option value="">Assign to…</option>
+                  {data.team.filter((m) => m.email !== thread.assignedTo).map((m) => <option key={m.email} value={m.email}>{m.name}</option>)}
+                </select>
+              )}
+            </div>
 
             <div className="inbox-status">
               {flag.needsCsr && <span className="inbox-badge red">Needs CSR · {flag.reason}</span>}
@@ -396,6 +429,7 @@ export default function TextingInbox() {
                 <span className={`team-hint${tooLong ? " inbox-too-long" : ""}`}>
                   {draft.trim().length}/{MAX_CHARS} · {segments(draft.trim())} segment{segments(draft.trim()) === 1 ? "" : "s"} (≈ {(segments(draft.trim()) * 1.2).toFixed(1)}¢)
                   {thread.botStatus === "on" && !thread.optOut ? " · sending pauses the AI for this customer" : ""}
+                  {!thread.assignedTo && !thread.optOut ? " · replying makes this customer yours" : ""}
                 </span>
                 <button className="btn btn-teal btn-small" disabled={busy || !reply.canSend || !draft.trim() || tooLong} onClick={send}>Send text</button>
               </div>
