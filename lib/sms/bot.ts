@@ -53,6 +53,7 @@ import {
   matchOffered,
   openTimesFrom,
   partOfDay,
+  teamNotesText,
   timeWords,
   weekdaysArg,
   withoutBookingClaim,
@@ -69,6 +70,7 @@ import {
   conversationState,
   ensureContact,
   findOptOut,
+  clearLeadStatus,
   latestInboundId,
   nameContactIfEmpty,
   outboundSinceMessage,
@@ -490,8 +492,9 @@ export function linksSent(thread: ThreadMessage[]): string[] {
 
 /** One line of saved notes for the team's Slack alert. */
 function notesLine(notes: Record<string, string>): string {
-  const parts = Object.entries(notes).filter(([, v]) => v).map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`);
-  return parts.length ? `Notes: ${parts.join("; ")}`.slice(0, 600) : "";
+  // Code-only "_" keys (open times, photo file names) never go to the team.
+  const text = teamNotesText(notes);
+  return text ? `Notes: ${text}`.slice(0, 600) : "";
 }
 
 function todayPacific(now: Date): string {
@@ -949,6 +952,8 @@ function liveEffects(phone: string, inboundId: number): BotEffects {
       if (booking) {
         await saveBookingRequest(phone, booking);
         if (booking.name) await nameContactIfEmpty(phone, booking.name);
+        // They asked for a time, so an old "not interested" no longer applies.
+        await clearLeadStatus(phone);
       }
       await audit({
         phone,
