@@ -102,6 +102,9 @@ async function createTables(sql: Sql) {
   // Step 3 (Texting inbox): when a person last marked this conversation handled (clears "Needs CSR" up to then).
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_resolved_at TIMESTAMPTZ`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS handoff_resolved_by TEXT`;
+  // Who owns this customer in the inbox (a team member's login email), set by "Take it" or their first reply.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS assigned_to TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -494,6 +497,7 @@ export type InboxRow = {
   handoffAt: string | null;
   handoffResolvedAt: string | null;
   leadStatus: string | null;
+  assignedTo: string | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -530,7 +534,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
   const limit = Math.min(Math.max(options.limit ?? 300, 1), 500);
   const { text, digits } = searchPatterns(options.search);
   const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.lead_status, c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
+      v.lead_status, v.assigned_to, c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
       m.status AS last_status, m.created_at AS last_at
     FROM sms_conversations v
@@ -559,6 +563,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
     handoffAt: toIso(r.handoff_at),
     handoffResolvedAt: toIso(r.handoff_resolved_at),
     leadStatus: (r.lead_status as string) ?? null,
+    assignedTo: (r.assigned_to as string) ?? null,
     optedOut: r.opted_out === true,
     lastDirection: r.last_direction === "outbound" ? "outbound" : "inbound",
     lastBody: String(r.last_body || ""),
@@ -594,6 +599,8 @@ export type InboxThread = {
   handoffResolvedAt: string | null;
   handoffResolvedBy: string | null;
   leadStatus: string | null;
+  assignedTo: string | null;
+  assignedAt: string | null;
   customerNotes: Record<string, string>;
   optOut: OptOut | null;
   consent: ConsentType[];
@@ -604,7 +611,7 @@ export type InboxThread = {
 export async function inboxThread(phone: string, limit = 200): Promise<InboxThread | null> {
   const sql = await db();
   const rows = await sql`SELECT v.id, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.handoff_resolved_by, v.lead_status, v.customer_notes, c.first_name, c.last_name, c.time_zone
+      v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.customer_notes, c.first_name, c.last_name, c.time_zone
     FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone WHERE v.phone = ${phone}`;
   if (!rows.length) return null;
   const v = rows[0];
@@ -623,6 +630,8 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
     handoffResolvedAt: toIso(v.handoff_resolved_at),
     handoffResolvedBy: (v.handoff_resolved_by as string) ?? null,
     leadStatus: (v.lead_status as string) ?? null,
+    assignedTo: (v.assigned_to as string) ?? null,
+    assignedAt: toIso(v.assigned_at),
     customerNotes: notesFrom(v.customer_notes),
     optOut: await findOptOut(phone),
     consent: await activeConsentTypes(phone),
@@ -664,8 +673,27 @@ export async function takeOverConversation(phone: string, by: string, at: Date) 
   await sql`UPDATE sms_conversations SET bot_status = 'paused',
       handoff_reason = COALESCE(handoff_reason, 'csr_took_over'),
       handoff_at = COALESCE(handoff_at, ${iso(at)}::timestamptz),
-      handoff_resolved_at = ${iso(at)}::timestamptz, handoff_resolved_by = ${by.slice(0, 120)}, updated_at = now()
+      handoff_resolved_at = ${iso(at)}::timestamptz, handoff_resolved_by = ${by.slice(0, 120)},
+      assigned_at = CASE WHEN assigned_to IS NULL THEN ${iso(at)}::timestamptz ELSE assigned_at END,
+      assigned_to = COALESCE(assigned_to, ${by.slice(0, 120)}),
+      updated_at = now()
     WHERE id = ${contact.conversationId}`;
+}
+
+/** Give this customer to a team member (email), or null to put them back in the shared queue. */
+export async function assignConversation(phone: string, to: string | null, at: Date): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations SET assigned_to = ${to ? to.slice(0, 120) : null},
+      assigned_at = ${to ? iso(at) : null}::timestamptz, updated_at = now()
+    WHERE phone = ${phone} RETURNING id`;
+  return rows.length > 0;
+}
+
+/** Who owns this customer in the inbox (null = nobody yet). */
+export async function conversationAssignee(phone: string): Promise<string | null> {
+  const sql = await db();
+  const rows = await sql`SELECT assigned_to FROM sms_conversations WHERE phone = ${phone}`;
+  return rows.length ? ((rows[0].assigned_to as string) ?? null) : null;
 }
 
 /** Name a CSR typed for this number (we only know phone numbers until lead intake exists). */

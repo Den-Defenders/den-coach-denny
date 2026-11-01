@@ -3,6 +3,7 @@ import { OWNER_ONLY_ROLES, canManageTeam, clearAccessCache, isFieldRole } from "
 import { getCurrentAccess } from "@/lib/currentAccess";
 import {
   findTeamMember,
+  isSlackMemberId,
   isTeamRole,
   isTeamTimeZone,
   listTeamMembers,
@@ -60,6 +61,11 @@ function parseInput(body: unknown): { input?: TeamMemberInput; error?: string } 
     return { error: "Sales reps, installers and team leads must be linked to their ServiceTitan technician." };
   }
 
+  const slackRaw = typeof raw.slackMemberId === "string" ? raw.slackMemberId.trim().toUpperCase() : "";
+  if (slackRaw && !isSlackMemberId(slackRaw)) {
+    return { error: "Slack member ID should look like U01ABC23DEF (Slack → their profile → ⋮ → Copy member ID)." };
+  }
+
   const stTechnicianName = typeof raw.stTechnicianName === "string" && raw.stTechnicianName.trim()
     ? raw.stTechnicianName.trim().slice(0, 120)
     : null;
@@ -73,6 +79,7 @@ function parseInput(body: unknown): { input?: TeamMemberInput; error?: string } 
       stTechnicianName: stTechnicianId ? stTechnicianName : null,
       timeZone,
       active: raw.active !== false,
+      slackMemberId: slackRaw || null,
     },
   };
 }

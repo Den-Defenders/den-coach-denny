@@ -12,6 +12,7 @@ type Member = {
   stTechnicianName: string | null;
   timeZone: string;
   active: boolean;
+  slackMemberId: string | null;
   updatedAt: string;
   updatedBy: string;
 };
@@ -52,6 +53,7 @@ const EMPTY_FORM = {
   stTechnicianId: "",
   timeZone: "America/Los_Angeles",
   active: true,
+  slackMemberId: "",
 };
 
 function timeZoneLabel(zone: string) {
@@ -134,6 +136,7 @@ export default function TeamManager({ viewerRole }: { viewerRole: "owner" | "man
       stTechnicianId: member.stTechnicianId ? String(member.stTechnicianId) : "",
       timeZone: member.timeZone,
       active: member.active,
+      slackMemberId: member.slackMemberId || "",
     });
     setStatus("");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -179,6 +182,7 @@ export default function TeamManager({ viewerRole }: { viewerRole: "owner" | "man
       stTechnicianId: member.stTechnicianId ? String(member.stTechnicianId) : "",
       timeZone: member.timeZone,
       active: !member.active,
+      slackMemberId: member.slackMemberId || "",
     }, member.stTechnicianName);
   }
 
@@ -227,6 +231,10 @@ export default function TeamManager({ viewerRole }: { viewerRole: "owner" | "man
               {TIME_ZONES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
+          <label>
+            <span>Slack member ID (optional, for texting alerts)</span>
+            <input value={form.slackMemberId} onChange={(event) => setForm({ ...form, slackMemberId: event.target.value })} placeholder="U01ABC23DEF" />
+          </label>
           <label className="team-check">
             <input type="checkbox" checked={form.active} onChange={(event) => setForm({ ...form, active: event.target.checked })} />
             <span>Access turned on</span>
@@ -236,6 +244,7 @@ export default function TeamManager({ viewerRole }: { viewerRole: "owner" | "man
           {form.role === "owner" && "Owners see everything, including this page and the Owner Dashboard."}
           {form.role === "manager" && "Managers see everything except the Owner Dashboard. On this page they can manage everyone except owners and managers. In Talk with Coach Denny they can ask about any technician."}
           {form.role === "csr" && "CSRs see Chat, Let Denny Listen and the Smart Scheduler."}
+          {form.slackMemberId.trim() && " Texting alerts for customers they own will @mention them in Slack. To find the ID: in Slack click their name → View full profile → ⋮ → Copy member ID."}
           {(form.role === "sales_rep" || form.role === "installer") && "Sales reps and installers see the Smart Scheduler and Talk with Coach Denny, for their own schedule only. \"My schedule\" uses the ServiceTitan technician picked above."}
           {form.role === "installer_lead" && "Installer team leads see what installers see, and can also ask Denny about any installer's schedule and jobs (anyone with the Installer position in ServiceTitan) and add notes to those jobs."}
           {form.role === "sales_lead" && "Sales team leads see what sales reps see, and can also ask Denny about any sales rep's schedule and appointments (anyone with the Sales position in ServiceTitan) and add notes to those jobs."}
@@ -255,7 +264,7 @@ export default function TeamManager({ viewerRole }: { viewerRole: "owner" | "man
           <div className="owner-table-wrap">
             <table className="team-table">
               <thead>
-                <tr><th>Name</th><th>Email</th><th>Role</th><th>ServiceTitan</th><th>Time zone</th><th>Access</th><th /></tr>
+                <tr><th>Name</th><th>Email</th><th>Role</th><th>ServiceTitan</th><th>Time zone</th><th>Slack</th><th>Access</th><th /></tr>
               </thead>
               <tbody>
                 {members.map((member) => (
@@ -265,6 +274,7 @@ export default function TeamManager({ viewerRole }: { viewerRole: "owner" | "man
                     <td>{ROLE_LABELS[member.role]}</td>
                     <td>{member.stTechnicianName || (member.stTechnicianId ? `#${member.stTechnicianId}` : "—")}</td>
                     <td>{timeZoneLabel(member.timeZone)}</td>
+                    <td>{member.slackMemberId ? "✓" : "—"}</td>
                     <td>{member.active ? "On" : "Off"}</td>
                     <td className="team-actions">
                       {canEdit(member) ? (
