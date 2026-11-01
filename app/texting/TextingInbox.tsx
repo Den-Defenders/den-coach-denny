@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type Flag = { needsCsr: boolean; reason: string | null; waiting: boolean };
+type Flag = { needsCsr: boolean; pinned: boolean; reason: string | null; waiting: boolean };
 
 type Conversation = {
   phone: string;
@@ -19,7 +19,17 @@ type Conversation = {
   lastMediaCount: number;
   lastSentBy: string | null;
   lastAt: string;
+  bookingTime: string | null;
   flag: Flag;
+};
+
+/** Step 4a: the open time the customer picked by text, ready for a CSR to book in ServiceTitan. */
+type Booking = {
+  lines: string[];
+  time: string;
+  requestedAt: string;
+  doneAt: string | null;
+  doneBy: string | null;
 };
 
 type Message = {
@@ -52,6 +62,7 @@ type Thread = {
   assignedTo: string | null;
   assignedName: string | null;
   customerNotes: Record<string, string>;
+  booking: Booking | null;
   optOut: { optedOutAt: string; source: string; keyword: string | null } | null;
   messages: Message[];
 };
@@ -94,7 +105,7 @@ function longWhen(iso: string | null) {
 /** Who sent an outgoing text, in plain words. */
 function senderLabel(sentBy: string | null) {
   if (!sentBy) return "Den Defenders";
-  if (sentBy === "denny-ai") return "AI";
+  if (sentBy === "denny-ai" || sentBy === "denny-checking") return "AI";
   if (sentBy === "system" || sentBy === "denny-hold") return "Automatic";
   if (sentBy === "drip") return "Drip";
   return sentBy.includes("@") ? sentBy.split("@")[0] : sentBy;
@@ -253,6 +264,15 @@ export default function TextingInbox() {
     if (result?.ok) setDraft("");
   }
 
+  async function copyBooking(lines: string[]) {
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setNotice("Copied. Paste it into ServiceTitan.");
+    } catch {
+      setNotice("Couldn't copy. Select the details and copy them yourself.");
+    }
+  }
+
   async function saveName() {
     await act("set_name", { name: nameDraft });
     setEditingName(false);
@@ -297,18 +317,19 @@ export default function TextingInbox() {
             const prefix = c.lastDirection === "outbound" ? `${senderLabel(c.lastSentBy)}: ` : "";
             return (
               <li key={c.phone}>
-                <button className={`inbox-item${c.phone === selected ? " active" : ""}${c.flag.needsCsr ? " needs" : ""}`} onClick={() => open(c.phone)}>
+                <button className={`inbox-item${c.phone === selected ? " active" : ""}${c.flag.pinned ? " book" : c.flag.needsCsr ? " needs" : ""}`} onClick={() => open(c.phone)}>
                   <span className="inbox-item-top">
                     <strong>{displayName(c)}</strong>
                     <span className="inbox-when">{shortWhen(c.lastAt, now)}</span>
                   </span>
                   <span className="inbox-badges">
-                    {c.flag.needsCsr && <span className="inbox-badge red">Needs CSR · {c.flag.reason}</span>}
+                    {c.flag.needsCsr && <span className={`inbox-badge ${c.flag.pinned ? "green" : "red"}`}>{c.flag.pinned ? c.flag.reason : `Needs CSR · ${c.flag.reason}`}</span>}
                     {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
                     {c.optedOut ? <span className="inbox-badge gray">Opted out</span>
                       : c.botStatus === "paused" ? <span className="inbox-badge amber">AI paused</span>
                         : <span className="inbox-badge teal">AI on</span>}
                   </span>
+                  {c.flag.pinned && c.bookingTime && <span className="inbox-booking-when">{c.bookingTime}</span>}
                   <span className={`inbox-preview${c.flag.waiting ? " unread" : ""}`}>{prefix}{preview}</span>
                 </button>
               </li>
@@ -368,14 +389,37 @@ export default function TextingInbox() {
             </div>
 
             <div className="inbox-status">
-              {flag.needsCsr && <span className="inbox-badge red">Needs CSR · {flag.reason}</span>}
+              {flag.needsCsr && <span className={`inbox-badge ${flag.pinned ? "green" : "red"}`}>{flag.pinned ? flag.reason : `Needs CSR · ${flag.reason}`}</span>}
               {thread.optOut ? <span className="inbox-badge gray">Opted out {longWhen(thread.optOut.optedOutAt)}</span>
                 : thread.botStatus === "paused" ? <span className="inbox-badge amber">AI paused: a person answers this customer</span>
                   : <span className="inbox-badge teal">AI is answering this customer</span>}
               {thread.leadStatus && <span className="inbox-badge gray">{thread.leadStatus.replace(/_/g, " ")}</span>}
             </div>
 
-            {(thread.handoffSummary || (thread.handoffLabel && thread.handoffReason !== "csr_took_over")) && (
+            {thread.booking && (
+              <div className={`inbox-booking${thread.booking.doneAt ? " done" : ""}`} aria-label="Ready to book">
+                <div className="inbox-booking-head">
+                  <b>{thread.booking.doneAt ? "✅ Booked in ServiceTitan" : "📅 Ready to book"}</b>
+                  <span>{thread.booking.doneAt ? `by ${thread.booking.doneBy || "a team member"} · ${longWhen(thread.booking.doneAt)}` : `picked ${longWhen(thread.booking.requestedAt)}`}</span>
+                </div>
+                <ul>
+                  {thread.booking.lines.map((line) => {
+                    const at = line.indexOf(": ");
+                    return at > 0 && at < 20
+                      ? <li key={line}><b>{line.slice(0, at)}:</b> {line.slice(at + 2)}</li>
+                      : <li key={line} className="inbox-booking-check">⚠️ {line}</li>;
+                  })}
+                </ul>
+                <div className="inbox-booking-actions">
+                  <button className="btn btn-outline btn-small" onClick={() => copyBooking(thread.booking!.lines)}>Copy details</button>
+                  {!thread.booking.doneAt && (
+                    <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("mark_booked")}>Booked in ServiceTitan</button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {!(thread.booking && thread.handoffReason === "ready_to_book") && (thread.handoffSummary || (thread.handoffLabel && thread.handoffReason !== "csr_took_over")) && (
               <div className={`inbox-handoff${thread.handoffResolvedAt ? " done" : ""}`}>
                 <b>AI handoff: {thread.handoffLabel}</b>{thread.handoffAt ? ` · ${longWhen(thread.handoffAt)}` : ""}
                 {thread.handoffSummary && <p>{thread.handoffSummary}</p>}
@@ -392,7 +436,7 @@ export default function TextingInbox() {
             <div className="inbox-messages">
               {thread.messages.map((m) => {
                 const failed = ["send_failed", "failed", "undelivered"].includes(m.status);
-                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" ? "system" : "person";
+                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" || m.sentBy === "denny-checking" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" ? "system" : "person";
                 return (
                   <div key={m.id} className={`inbox-row inbox-${who}${failed ? " failed" : ""}`}>
                     <div className="sim-who">{m.direction === "inbound" ? displayName(thread) : senderLabel(m.sentBy)} · {longWhen(m.createdAt)}</div>

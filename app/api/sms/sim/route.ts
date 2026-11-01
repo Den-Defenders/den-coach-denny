@@ -28,7 +28,8 @@ import { smsDatabaseConfigured } from "@/lib/sms/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Room for a live open-times lookup (up to 40 s) plus the address re-check (up to 25 s).
+export const maxDuration = 150;
 
 const NO_STORE = { "Cache-Control": "private, no-store" };
 
@@ -50,7 +51,8 @@ function asNotes(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>).slice(0, 40)) {
-    if (typeof v === "string" && v.trim()) out[k.slice(0, 40)] = v.slice(0, 300);
+    // "_" keys are code-only bookkeeping (offered open times, the picked time) and can be longer.
+    if (typeof v === "string" && v.trim()) out[k.slice(0, 40)] = v.slice(0, k.startsWith("_") ? 1500 : 300);
   }
   return out;
 }

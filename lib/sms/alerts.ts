@@ -5,6 +5,7 @@
  * Every alert carries a link that opens the conversation in Den Coach Denny.
  * Alerts never block a webhook or a reply: failures are only logged.
  */
+import { bookingLines, type BookingRequest } from "@/lib/sms/booking";
 import { formatPhone } from "@/lib/sms/rules";
 import { allowList } from "@/lib/sms/send";
 import { conversationAssignee } from "@/lib/sms/store";
@@ -77,5 +78,27 @@ export async function postCustomerWaitingAlert(phone: string, body: string, phot
     "The AI is paused for this number, so nobody answers until someone replies.",
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
   ].filter(Boolean).join("\n");
+  return postSmsSlack(text);
+}
+
+/**
+ * Step 4a: the customer picked a real open time by text. Goes right away (the time can
+ * fill up if it sits) with everything a CSR needs to book it in ServiceTitan without
+ * re-asking. Tags the owner if someone owns this customer, otherwise @here
+ * (Steven, 2026-11-01: @here only on Ready to book; other unowned alerts stay untagged).
+ */
+export async function postReadyToBookAlert(phone: string, booking: BookingRequest, notes: Record<string, string> = {}): Promise<void> {
+  if (!slackAlertsEnabled()) return;
+  const mention = (await ownerMention(phone)) || "<!here> ";
+  const lines = bookingLines(booking, formatPhone(phone), notes).map((line) => {
+    const at = line.indexOf(": ");
+    return at > 0 && at < 20 ? `*${line.slice(0, at)}:* ${line.slice(at + 2)}` : line;
+  });
+  const text = [
+    `${pilotTag()}${mention}:calendar: *Texting: Ready to book* - ${formatPhone(phone)}`,
+    ...lines,
+    "Book it in ServiceTitan, then click *Booked in ServiceTitan* in the inbox.",
+    `<${inboxLink(phone)}|Open in the Texting inbox>`,
+  ].join("\n");
   return postSmsSlack(text);
 }

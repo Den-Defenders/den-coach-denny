@@ -105,6 +105,10 @@ async function createTables(sql: Sql) {
   // Who owns this customer in the inbox (a team member's login email), set by "Take it" or their first reply.
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS assigned_to TEXT`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ`;
+  // Step 4a: the open time the customer picked by text ("📅 Ready to book") and when a CSR booked it in ServiceTitan.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_request JSONB`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_done_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_done_by TEXT`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -403,12 +407,15 @@ export async function conversationState(phone: string): Promise<ConversationStat
   };
 }
 
-/** Merge new details into the customer's notes (empty values never wipe a saved one). */
+/**
+ * Merge new details into the customer's notes (empty values never wipe a saved one).
+ * Code-only "_" keys (offered times, the picked time) may be longer than the AI's notes.
+ */
 export async function saveCustomerNotes(phone: string, notes: Record<string, string>) {
   const clean: Record<string, string> = {};
   for (const [k, v] of Object.entries(notes)) {
     const value = String(v ?? "").trim();
-    if (value) clean[k.slice(0, 40)] = value.slice(0, 200);
+    if (value) clean[k.slice(0, 40)] = value.slice(0, k.startsWith("_") ? 1500 : 200);
   }
   if (!Object.keys(clean).length) return;
   const contact = await ensureContact(phone);
@@ -426,6 +433,37 @@ export async function setHandoff(phone: string, reason: string, summary: string,
       handoff_summary = ${summary.slice(0, 1500)}, handoff_at = ${iso(at)}::timestamptz,
       handoff_resolved_at = NULL, handoff_resolved_by = NULL, updated_at = now()
     WHERE id = ${contact.conversationId}`;
+}
+
+/**
+ * Step 4a: the customer picked a real open time. Stored as JSON (lib/sms/booking.ts
+ * BookingRequest); a new request replaces the old one and clears "booked".
+ */
+export async function saveBookingRequest(phone: string, booking: object) {
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET booking_request = ${JSON.stringify(booking)}::jsonb,
+      booking_done_at = NULL, booking_done_by = NULL, updated_at = now()
+    WHERE id = ${contact.conversationId}`;
+}
+
+/** A CSR clicked "Booked in ServiceTitan". */
+export async function markBookingDone(phone: string, by: string, at: Date): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations SET booking_done_at = ${iso(at)}::timestamptz,
+      booking_done_by = ${by.slice(0, 120)}, updated_at = now()
+    WHERE phone = ${phone} AND booking_request IS NOT NULL RETURNING id`;
+  return rows.length > 0;
+}
+
+/** Save the name the customer texted, unless someone already named this contact. */
+export async function nameContactIfEmpty(phone: string, fullName: string) {
+  const [first, ...rest] = fullName.replace(/\s+/g, " ").trim().split(" ");
+  if (!first) return;
+  const sql = await db();
+  await sql`UPDATE sms_contacts SET first_name = ${first.slice(0, 60)}, last_name = ${rest.join(" ").slice(0, 60) || null},
+      updated_at = now()
+    WHERE phone = ${phone} AND coalesce(first_name, '') = '' AND coalesce(last_name, '') = ''`;
 }
 
 /** A person turned the bot back on for this number (inbox or test page). */
@@ -469,11 +507,14 @@ export async function latestInboundId(phone: string): Promise<number | null> {
   return rows.length ? Number(rows[0].id) : null;
 }
 
-/** Was anything sent to this number after a given text of theirs? */
+/**
+ * Was anything sent to this number after a given text of theirs? The AI's own
+ * "checking our calendar" text (step 4a) answers nothing, so it doesn't count.
+ */
 export async function outboundSinceMessage(phone: string, messageId: number): Promise<boolean> {
   const sql = await db();
   const rows = await sql`SELECT 1 FROM sms_messages WHERE phone = ${phone} AND direction = 'outbound'
-    AND status <> 'send_failed' AND id > ${messageId} LIMIT 1`;
+    AND status <> 'send_failed' AND coalesce(sent_by, '') <> ${CHECKING_SENDER} AND id > ${messageId} LIMIT 1`;
   return rows.length > 0;
 }
 
@@ -487,6 +528,9 @@ export async function outboundSinceMessage(phone: string, messageId: number): Pr
  */
 export const HOLD_SENDER = "denny-hold";
 
+/** sent_by of the AI's "checking our calendar now" text (step 4a). It answers nothing either. */
+export const CHECKING_SENDER = "denny-checking";
+
 export type InboxRow = {
   phone: string;
   firstName: string | null;
@@ -498,6 +542,8 @@ export type InboxRow = {
   handoffResolvedAt: string | null;
   leadStatus: string | null;
   assignedTo: string | null;
+  bookingRequest: unknown;
+  bookingDoneAt: string | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -534,7 +580,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
   const limit = Math.min(Math.max(options.limit ?? 300, 1), 500);
   const { text, digits } = searchPatterns(options.search);
   const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.lead_status, v.assigned_to, c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
+      v.lead_status, v.assigned_to, v.booking_request, v.booking_done_at, c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
       m.status AS last_status, m.created_at AS last_at
     FROM sms_conversations v
@@ -542,7 +588,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
     LEFT JOIN sms_opt_outs o ON o.phone = v.phone
     LEFT JOIN LATERAL (
       SELECT direction, body, media, sent_by, status, created_at FROM sms_messages
-      WHERE conversation_id = v.id AND status <> 'send_failed' AND coalesce(sent_by, '') <> ${HOLD_SENDER}
+      WHERE conversation_id = v.id AND status <> 'send_failed' AND coalesce(sent_by, '') NOT IN (${HOLD_SENDER}, ${CHECKING_SENDER})
       ORDER BY created_at DESC, id DESC LIMIT 1
     ) m ON true
     WHERE m.created_at IS NOT NULL
@@ -550,7 +596,9 @@ export async function listInboxConversations(options: { search?: string; limit?:
         OR v.phone LIKE ${digits}::text
         OR (coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) ILIKE ${text}::text
         OR EXISTS (SELECT 1 FROM sms_messages s WHERE s.conversation_id = v.id AND s.body ILIKE ${text}::text))
-    ORDER BY (v.bot_status = 'paused' AND v.handoff_reason IS NOT NULL AND v.handoff_resolved_at IS NULL) DESC,
+    ORDER BY (v.bot_status = 'paused' AND v.handoff_reason = 'ready_to_book' AND v.handoff_resolved_at IS NULL
+        AND v.booking_request IS NOT NULL AND v.booking_done_at IS NULL) DESC,
+      (v.bot_status = 'paused' AND v.handoff_reason IS NOT NULL AND v.handoff_resolved_at IS NULL) DESC,
       m.created_at DESC
     LIMIT ${limit}`;
   return rows.map((r) => ({
@@ -564,6 +612,8 @@ export async function listInboxConversations(options: { search?: string; limit?:
     handoffResolvedAt: toIso(r.handoff_resolved_at),
     leadStatus: (r.lead_status as string) ?? null,
     assignedTo: (r.assigned_to as string) ?? null,
+    bookingRequest: r.booking_request ?? null,
+    bookingDoneAt: toIso(r.booking_done_at),
     optedOut: r.opted_out === true,
     lastDirection: r.last_direction === "outbound" ? "outbound" : "inbound",
     lastBody: String(r.last_body || ""),
@@ -601,6 +651,9 @@ export type InboxThread = {
   leadStatus: string | null;
   assignedTo: string | null;
   assignedAt: string | null;
+  bookingRequest: unknown;
+  bookingDoneAt: string | null;
+  bookingDoneBy: string | null;
   customerNotes: Record<string, string>;
   optOut: OptOut | null;
   consent: ConsentType[];
@@ -611,7 +664,8 @@ export type InboxThread = {
 export async function inboxThread(phone: string, limit = 200): Promise<InboxThread | null> {
   const sql = await db();
   const rows = await sql`SELECT v.id, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.customer_notes, c.first_name, c.last_name, c.time_zone
+      v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.booking_request, v.booking_done_at, v.booking_done_by,
+      v.customer_notes, c.first_name, c.last_name, c.time_zone
     FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone WHERE v.phone = ${phone}`;
   if (!rows.length) return null;
   const v = rows[0];
@@ -632,6 +686,9 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
     leadStatus: (v.lead_status as string) ?? null,
     assignedTo: (v.assigned_to as string) ?? null,
     assignedAt: toIso(v.assigned_at),
+    bookingRequest: v.booking_request ?? null,
+    bookingDoneAt: toIso(v.booking_done_at),
+    bookingDoneBy: (v.booking_done_by as string) ?? null,
     customerNotes: notesFrom(v.customer_notes),
     optOut: await findOptOut(phone),
     consent: await activeConsentTypes(phone),

@@ -15,8 +15,13 @@
  *   4. send it through THE send helper (lib/sms/send.ts) as kind "reply", so every
  *      guardrail still applies: opt-outs, allow-list, 24-hour window, hours, caps
  *
- * Handoffs ("Needs CSR") pause the bot for that number until an owner turns it
- * back on at /sms-test. The Texting inbox (step 3) will show them too.
+ * Handoffs ("Needs CSR") pause the bot for that number until a person turns it
+ * back on in the Texting inbox.
+ *
+ * Step 4a (lib/sms/booking.ts): find_open_times offers REAL open consultation times
+ * from the Denny scheduler (read-only); choose_time + request_booking turn the one the
+ * customer picks into a "📅 Ready to book" handoff a CSR books in ServiceTitan.
+ * The AI never books and code removes any "booked / scheduled / confirmed" claim.
  *
  * composeBotReply() is the brain on its own (no sending); the Simulator
  * (lib/sms/simulator.ts, /sms-sim) runs it with an AI playing the customer.
@@ -27,18 +32,48 @@ import salesZipDirectory from "@/app/lib/salesZipDirectory.json";
 import { COMPANY_FACTS, NV_ASK_TEAM_CITIES, NV_SERVED_CITIES } from "@/lib/ai/companyFacts";
 import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
 import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from "@/lib/doorPhotos";
-import { inboxLink, ownerMention, pilotTag, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
+import { inboxLink, ownerMention, pilotTag, postReadyToBookAlert, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
+import {
+  CHECKING_TEXT,
+  CHOSEN_TIME_KEY,
+  LOOKUPS_KEY,
+  MAX_LOOKUPS_PER_DAY,
+  MAX_TIMES_OFFERED,
+  OPEN_TIMES_KEY,
+  SAFE_BOOKING_GOODBYE,
+  bookingLines,
+  checkTimeAtAddress,
+  chosenTimeFrom,
+  claimsBooked,
+  datesArg,
+  hasTwoOrMoreDoors,
+  isSlow,
+  lookupOpenTimes,
+  lookupsToday,
+  matchOffered,
+  openTimesFrom,
+  partOfDay,
+  timeWords,
+  weekdaysArg,
+  withoutBookingClaim,
+  type BookingRequest,
+  type OfferedTime,
+  type SlotCheck,
+} from "@/lib/sms/booking";
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
 import {
+  CHECKING_SENDER,
   audit,
   conversationState,
   ensureContact,
   findOptOut,
   latestInboundId,
+  nameContactIfEmpty,
   outboundSinceMessage,
   recordOptOut,
+  saveBookingRequest,
   saveCustomerNotes,
   setHandoff,
   setLeadStatus,
@@ -213,6 +248,61 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           variant: { type: "string", enum: ["single", "double"], description: "double for double / French doors" },
         },
         required: ["category"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_open_times",
+      description:
+        "Look up REAL open in-home consultation times near their ZIP (live calendar). Call when they want a consultation and you know the product and single/double (or how many). Offer only the times this returns.",
+      parameters: {
+        type: "object",
+        properties: {
+          zip: { type: "string", pattern: "^\\d{5}$" },
+          product: { type: "string", description: "What they want, e.g. 'security door (Centurion)', 'sliding security door', 'window screens'" },
+          door_count: { type: "string", description: "Single, double, or how many doors or windows" },
+          weekdays: {
+            type: "array",
+            items: { type: "string", enum: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] },
+            description: "Only days they asked for",
+          },
+          part_of_day: { type: "string", enum: ["morning", "afternoon", "any"] },
+          dates: { type: "array", items: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, description: "Exact dates they asked for (YYYY-MM-DD)" },
+        },
+        required: ["zip", "product", "door_count"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "choose_time",
+      description: "The customer picked one of the times find_open_times returned. Pass its option number (or its date).",
+      parameters: {
+        type: "object",
+        properties: {
+          option: { type: "integer", minimum: 1, maximum: 3 },
+          date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "request_booking",
+      description:
+        "Pass the picked time to the team to book (you can't book). Call after choose_time, once you have their full name and street address, or they'd rather not text the address. Then send one short final message.",
+      parameters: {
+        type: "object",
+        properties: {
+          full_name: { type: "string", description: "First and last name, as they wrote it" },
+          street_address: { type: "string", description: "Street address of the home (with city if given). Empty if they won't share it by text." },
+          backup_option: { type: "integer", minimum: 1, maximum: 3, description: "Only if they said another offered time also works" },
+        },
+        required: ["full_name"],
       },
     },
   },
@@ -455,12 +545,29 @@ export type BotEffects = {
   /** Guardrail-log line (real) or a Simulator event. */
   log: (action: string, reason: string, detail?: Record<string, unknown>, actor?: string) => Promise<void>;
   saveNotes: (fresh: Record<string, string>) => Promise<void>;
-  /** auto = flagged by code (the AI promised a follow-up without handing off). */
-  handOff: (reason: string, summary: string, notes: Record<string, string>, auto: boolean) => Promise<void>;
+  /**
+   * auto = flagged by code (the AI promised a follow-up without handing off).
+   * booking = the customer picked a real open time ("📅 Ready to book", step 4a).
+   */
+  handOff: (reason: string, summary: string, notes: Record<string, string>, auto: boolean, booking?: BookingRequest) => Promise<void>;
   outcome: (outcome: LeadStatus) => Promise<void>;
   /** Natural-language opt-out: record it and send the standard confirmation. */
   optOut: () => Promise<void>;
+  /** The open-times lookup is slow: one short "checking our calendar" text (real) or an event (Simulator). */
+  progress?: (text: string) => Promise<void>;
 };
+
+const NO_TIMES_MESSAGE =
+  "No open times to offer. Don't invent any. Call hand_off_to_team with reason ready_to_book, with their product, ZIP and preferred days in the summary; final message: a team member will text them open times.";
+
+/** "2026-11-01" in Pacific time (the lookup counter resets each day). */
+function pacificDate(now: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: DEFAULT_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+}
+
+function cleanArg(value: unknown, max: number): string {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
+}
 
 export type ComposeResult =
   | { kind: "reply"; reply: string; media: string[]; handedOff: { reason: string } | null; model: string }
@@ -477,7 +584,15 @@ export async function composeBotReply(
 ): Promise<ComposeResult> {
   const { thread } = input;
   const notes = { ...input.notes };
-  const known: KnownAboutCustomer = { notes, priceAlreadyGiven: priceAlreadyGiven(thread), linksSent: linksSent(thread) };
+  const offered = openTimesFrom(notes);
+  const picked = chosenTimeFrom(notes);
+  const known: KnownAboutCustomer = {
+    notes,
+    priceAlreadyGiven: priceAlreadyGiven(thread),
+    linksSent: linksSent(thread),
+    openTimes: offered?.times.map((t) => `${t.n}. ${timeWords(t)}`),
+    chosenTime: picked ? timeWords(picked) : undefined,
+  };
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: smsBotSystemPrompt(todayPacific(input.now), known) },
   ];
@@ -496,7 +611,151 @@ export async function composeBotReply(
   let reply = "";
   let media: string[] = [];
   let photoNudged = false;
+  let bookingNudged = false;
   let usedModel = botModel();
+
+  const saveZip = async (zip: string) => {
+    const result = checkServiceZip(zip);
+    await fx.log("bot_zip_check", result.result, { zip, city: result.city, state: result.state });
+    const place = result.city ? ` ${result.city}, ${result.state}` : "";
+    notes.zip = `${zip}${place}: ${result.result.toLowerCase().replace(/_/g, " ")}`;
+    await fx.saveNotes({ zip: notes.zip });
+    return result;
+  };
+
+  // --- Step 4a: real open times -------------------------------------------------
+  const findOpenTimes = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const zip = cleanArg(args.zip, 5);
+    if (!/^\d{5}$/.test(zip)) return { ok: false, error: "NEED_ZIP", message: "Ask for the 5-digit ZIP of the home first." };
+    const area = await saveZip(zip);
+    if (area.result === "NOT_SERVED" || area.result === "NEEDS_TEAM_CHECK") {
+      return { ok: false, zipResult: area.result, message: ZIP_TOOL_ANSWER[area.result] };
+    }
+    const product = cleanArg(args.product, 120);
+    const doorCount = cleanArg(args.door_count, 80);
+    if (!product || !doorCount) {
+      return { ok: false, error: "MISSING", message: "First find out the product and single or double (or how many). Ask only for the one that's missing." };
+    }
+    if (area.result === "IN_AREA_NV_TWO_DOOR_MINIMUM" && !hasTwoOrMoreDoors(doorCount)) {
+      return { ok: false, error: "NEVADA_TWO_DOORS", message: "Nevada projects need at least two doors. Follow the Nevada rule; don't offer times." };
+    }
+    const fresh: Record<string, string> = {};
+    if (!notes.product) fresh.product = product;
+    if (!notes.door_count) fresh.door_count = doorCount;
+
+    const today = pacificDate(input.now);
+    const used = lookupsToday(notes, today);
+    if (used >= MAX_LOOKUPS_PER_DAY) {
+      await fx.log("bot_open_times", "lookup_limit", { used });
+      return { ok: false, error: "LOOKUP_LIMIT", message: NO_TIMES_MESSAGE };
+    }
+    fresh[LOOKUPS_KEY] = `${today}:${used + 1}`;
+    Object.assign(notes, fresh);
+    await fx.saveNotes(fresh);
+
+    const work = lookupOpenTimes({
+      location: zip,
+      ...partOfDay(args.part_of_day),
+      requestedWeekdays: weekdaysArg(args.weekdays),
+      requestedDates: datesArg(args.dates),
+      maxOptions: 6,
+    });
+    if (fx.progress && await isSlow(work)) await fx.progress(CHECKING_TEXT);
+    let found: Awaited<typeof work>;
+    try {
+      found = await work;
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      console.error("SMS bot open-times lookup failed:", why);
+      await fx.log("bot_open_times", "lookup_failed", { zip, error: why.slice(0, 200) });
+      return { ok: false, error: "LOOKUP_FAILED", message: NO_TIMES_MESSAGE };
+    }
+    await fx.log("bot_open_times", found.status, { zip, count: found.options.length });
+    if (found.status === "outside_service_area") {
+      return { ok: false, error: "OUTSIDE_AREA", message: ZIP_TOOL_ANSWER.NEEDS_TEAM_CHECK };
+    }
+    if (!found.options.length) return { ok: false, error: "NO_TIMES", message: NO_TIMES_MESSAGE };
+
+    const times: OfferedTime[] = found.options.slice(0, MAX_TIMES_OFFERED).map((o, i) => ({
+      n: i + 1, date: o.date, weekday: o.weekday, window: o.arrivalWindow, rep: o.consultantName,
+    }));
+    const saved = { [OPEN_TIMES_KEY]: JSON.stringify({ zip, at: input.now.toISOString(), times }), [CHOSEN_TIME_KEY]: "none" };
+    Object.assign(notes, saved);
+    await fx.saveNotes(saved);
+    return {
+      ok: true,
+      times: times.map((t) => ({ option: t.n, say: timeWords(t) })),
+      mentionPriceFirst: !known.priceAlreadyGiven,
+      message: `Offer these times, each on its own line, in these words, then ask which works best.${known.priceAlreadyGiven ? "" : " Price hasn't come up yet: start with the price range in one short line."} Never offer any other time and never say a time is held or booked.`,
+    };
+  };
+
+  const chooseTime = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const open = openTimesFrom(notes);
+    if (!open?.times.length) return { ok: false, error: "NO_TIMES_OFFERED", message: "Call find_open_times first; only offer times it returns." };
+    const pick = matchOffered(open.times, args);
+    if (!pick) {
+      return { ok: false, error: "NOT_OFFERED", message: "That isn't one of the times you offered. Offer the listed times again, or call find_open_times with their new days. Never accept a time that wasn't offered." };
+    }
+    notes[CHOSEN_TIME_KEY] = JSON.stringify(pick);
+    await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
+    await fx.log("bot_time_chosen", pick.date, { window: pick.window });
+    return {
+      ok: true,
+      picked: timeWords(pick),
+      message: "Saved. Unless you already have both, ask in one short text for their full name and the street address of the home. If you have both, call request_booking now. Don't say anything is booked, scheduled or confirmed.",
+    };
+  };
+
+  const requestBooking = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const open = openTimesFrom(notes);
+    const chosen = chosenTimeFrom(notes);
+    if (!open || !chosen) return { ok: false, error: "NO_TIME_PICKED", message: "Ask which of the offered times works, then call choose_time." };
+    const name = cleanArg(args.full_name, 80) || (notes.first_name || "");
+    const address = cleanArg(args.street_address, 160);
+    let slotCheck: SlotCheck = "zip_only";
+    let rep = chosen.rep;
+    if (address) {
+      try {
+        const slot = await checkTimeAtAddress(address.includes(open.zip) ? address : `${address}, ${open.zip}`, chosen.date, chosen.window);
+        if (!slot) {
+          notes[CHOSEN_TIME_KEY] = "none";
+          await fx.saveNotes({ [CHOSEN_TIME_KEY]: "none" });
+          await fx.log("bot_slot_gone", chosen.date, { window: chosen.window });
+          return { ok: false, error: "SLOT_GONE", message: "That time just filled up for their address. Apologize briefly and offer the other times you listed (or call find_open_times again). Don't hand off and don't call request_booking until they pick again." };
+        }
+        slotCheck = "open_at_address";
+        rep = slot.consultantName || rep;
+      } catch (error) {
+        console.error("SMS bot address re-check failed:", error instanceof Error ? error.message : error);
+        slotCheck = "check_failed";
+      }
+    }
+    const others = open.times.filter((t) => !(t.date === chosen.date && t.window === chosen.window));
+    const saidOk = args.backup_option ? matchOffered(others, { option: args.backup_option }) : null;
+    const backup = saidOk || others[0] || null;
+    const area = checkServiceZip(open.zip);
+    const booking: BookingRequest = {
+      chosen: { date: chosen.date, weekday: chosen.weekday, window: chosen.window },
+      backup: backup ? { date: backup.date, weekday: backup.weekday, window: backup.window, customerSaidOk: Boolean(saidOk) } : null,
+      suggestedRep: rep,
+      name: name || null,
+      address: address || null,
+      zip: open.zip,
+      area: area.city ? `${area.city}, ${area.state}` : null,
+      product: notes.product || null,
+      doorCount: notes.door_count || null,
+      slotCheck,
+      requestedAt: input.now.toISOString(),
+    };
+    const summary = ["The customer picked a consultation time by text. Book it in ServiceTitan, then click \"Booked in ServiceTitan\".", ...bookingLines(booking, "", notes).filter((l) => !l.startsWith("Phone:"))].join("\n");
+    await fx.handOff("ready_to_book", summary, notes, false, booking);
+    handedOff = { reason: "ready_to_book" };
+    return {
+      ok: true,
+      message: `Passed to the team. Now send one short final message: thank them and say you've passed ${timeWords(chosen)} to our team and a team member will text them shortly to finish setting it up. Never say booked, scheduled, confirmed, reserved or "see you".`,
+    };
+  };
 
   for (let round = 0; round < MAX_ROUNDS && !reply; round++) {
     const params = (model: string): CompletionParams => ({
@@ -534,6 +793,17 @@ export async function composeBotReply(
         reply = "";
         continue;
       }
+      // The AI can't book: never let it say something is booked, scheduled or confirmed.
+      if (!bookingNudged && round < MAX_ROUNDS - 1 && claimsBooked(reply)) {
+        bookingNudged = true;
+        await fx.log("bot_booking_claim_retry", "said_booked", {}, "system");
+        messages.push({
+          role: "system",
+          content: "Check (from the system, not the customer): your reply says something is booked, scheduled, confirmed or set. You can't book; only the team can. Rewrite it without saying that (for example: you've passed their time to the team and a team member will text them to finish setting it up).",
+        });
+        reply = "";
+        continue;
+      }
       break;
     }
 
@@ -545,12 +815,15 @@ export async function composeBotReply(
 
       if (name === "check_service_zip") {
         const zip = String(args.zip || "");
-        const result = checkServiceZip(zip);
-        await fx.log("bot_zip_check", result.result, { zip, city: result.city, state: result.state });
-        const place = result.city ? ` ${result.city}, ${result.state}` : "";
-        notes.zip = `${zip}${place}: ${result.result.toLowerCase().replace(/_/g, " ")}`;
-        await fx.saveNotes({ zip: notes.zip });
+        const result = await saveZip(zip);
         answer({ result: result.result, city: result.city, state: result.state, message: ZIP_TOOL_ANSWER[result.result] });
+      } else if (name === "find_open_times") {
+        answer(await findOpenTimes(args));
+      } else if (name === "choose_time") {
+        answer(await chooseTime(args));
+      } else if (name === "request_booking") {
+        if (handedOff) answer({ ok: false, message: "Already passed to the team. Write your final message." });
+        else answer(await requestBooking(args));
       } else if (name === "hand_off_to_team") {
         const reason = HANDOFF_REASONS.includes(args.reason as HandoffReason) ? String(args.reason) : "question_for_team";
         const summary = String(args.summary || "").trim() || "No summary given.";
@@ -619,6 +892,12 @@ export async function composeBotReply(
     reply = withoutPhotoClaim(reply);
   }
 
+  // Still says booked/scheduled/confirmed after the retry: code takes those sentences out.
+  if (claimsBooked(reply)) {
+    await fx.log("bot_booking_claim_removed", "said_booked", {}, "system");
+    reply = withoutBookingClaim(reply) || SAFE_BOOKING_GOODBYE;
+  }
+
   // Safety net: the AI told them the team will follow up but forgot to hand off.
   if (!handedOff && promisesTeamFollowUp(reply)) {
     const reason = /\b(times?|day|days|schedul|consultation|appointment)\b/i.test(reply) ? "ready_to_book" : "question_for_team";
@@ -665,16 +944,28 @@ function liveEffects(phone: string, inboundId: number): BotEffects {
   return {
     log: (action, reason, detail = {}, actor = "denny-ai") => audit({ phone, action, reason, detail: { inboundId, ...detail }, actor }),
     saveNotes: (fresh) => saveCustomerNotes(phone, fresh),
-    handOff: async (reason, summary, notes, auto) => {
+    handOff: async (reason, summary, notes, auto, booking) => {
       await setHandoff(phone, reason, summary, smsNow());
+      if (booking) {
+        await saveBookingRequest(phone, booking);
+        if (booking.name) await nameContactIfEmpty(phone, booking.name);
+      }
       await audit({
         phone,
         action: "bot_handoff",
         reason,
-        detail: auto ? { summary, inboundId, auto: true } : { summary: summary.slice(0, 500), inboundId },
+        detail: auto ? { summary, inboundId, auto: true } : { summary: summary.slice(0, 500), inboundId, booking: Boolean(booking) },
         actor: auto ? "system" : "denny-ai",
       });
-      await postHandoffToSlack(phone, reason, summary, notes);
+      // "📅 Ready to book" gets its own alert (@here when nobody owns the customer yet).
+      if (booking) await postReadyToBookAlert(phone, booking, notes);
+      else await postHandoffToSlack(phone, reason, summary, notes);
+    },
+    progress: async (text) => {
+      // A person took over while the AI was looking: say nothing.
+      if ((await conversationState(phone)).botStatus === "paused") return;
+      const sent = await sendSms({ to: phone, body: text, kind: "reply", purpose: "care", sentBy: CHECKING_SENDER });
+      await audit({ phone, action: "checking_text", reason: sent.ok ? "sent" : `blocked:${sent.reason}`, detail: { inboundId }, actor: "denny-ai" });
     },
     outcome: async (outcome) => {
       await setLeadStatus(phone, outcome, smsNow());

@@ -34,8 +34,9 @@ import { emptyTwiml, verifyTwilioRequest } from "@/lib/sms/twilio";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Room for the AI reply that runs after the response (debounce + OpenAI + Twilio).
-export const maxDuration = 60;
+// Room for the AI reply that runs after the response (debounce + OpenAI + Twilio), including
+// a live open-times lookup (up to 40 s) and the address re-check (up to 25 s) from step 4a.
+export const maxDuration = 150;
 
 /**
  * The customer texted a number a person has taken over (AI paused). Two things:
