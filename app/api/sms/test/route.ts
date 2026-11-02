@@ -3,10 +3,12 @@
  *   GET  -> texting settings, recent texts, opt-outs and the guardrail log
  *   POST -> send one test text through the real send helper (all rules apply)
  *   POST {action:"resume_bot", phone} -> turn the AI back on for a number after a handoff
+ * GET also returns the newest Zapier leads (/api/leads, step 5) with every field.
  */
 import { NextResponse } from "next/server";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { botEnabled, botModel } from "@/lib/sms/bot";
+import { leadsMode, leadsSecretConfigured, recentLeads } from "@/lib/sms/leads";
 import { formatPhone, normalizePhone, type SendKind } from "@/lib/sms/rules";
 import { allowList, promoTextsEnabled, sendSms, sendingEnabled, smsLimits } from "@/lib/sms/send";
 import { audit, recentActivity, resumeBot, smsDatabaseConfigured } from "@/lib/sms/store";
@@ -39,14 +41,21 @@ function settings() {
     botModel: botModel(),
     openAiConfigured: Boolean(process.env.OPENAI_API_KEY),
     slackAlerts: Boolean((process.env.SMS_SLACK_WEBHOOK_URL || "").trim()),
+    leadsSecretSet: leadsSecretConfigured(),
+    leadsMode: leadsMode(),
+    leadsUrl: base ? `${base}/api/leads` : null,
   };
 }
 
 export async function GET() {
   if (!await requireOwner()) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
-  if (!smsDatabaseConfigured()) return NextResponse.json({ settings: settings(), messages: [], optOuts: [], audit: [], handoffs: [] }, { headers: NO_STORE });
+  if (!smsDatabaseConfigured()) return NextResponse.json({ settings: settings(), messages: [], optOuts: [], audit: [], handoffs: [], leads: [] }, { headers: NO_STORE });
   try {
-    return NextResponse.json({ settings: settings(), ...(await recentActivity(50)) }, { headers: NO_STORE });
+    const leads = await recentLeads(25).catch((error) => {
+      console.error("SMS test leads failed:", error);
+      return [];
+    });
+    return NextResponse.json({ settings: settings(), ...(await recentActivity(50)), leads }, { headers: NO_STORE });
   } catch (error) {
     console.error("SMS test GET failed:", error);
     return NextResponse.json({ error: "Could not load texting activity.", settings: settings() }, { status: 500, headers: NO_STORE });

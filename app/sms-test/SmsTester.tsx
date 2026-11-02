@@ -16,6 +16,9 @@ type Settings = {
   botModel: string;
   openAiConfigured: boolean;
   slackAlerts: boolean;
+  leadsSecretSet: boolean;
+  leadsMode: string;
+  leadsUrl: string | null;
 };
 
 type Message = {
@@ -25,6 +28,13 @@ type Message = {
 };
 type OptOut = { phone: string; opted_out_at: string; source: string; keyword: string | null };
 type Handoff = { phone: string; handoff_reason: string | null; handoff_summary: string | null; handoff_at: string | null; lead_status: string | null };
+type LeadFields = {
+  firstName: string | null; lastName: string | null; phone: string | null; phoneAsSent: string | null; zip: string | null;
+  email: string | null; leadSource: string | null; campaignName: string | null; adName: string | null; formName: string | null;
+  submittedAt: string | null; submittedAtAsSent: string | null; smsConsent: "yes" | "no" | "not_sent"; smsConsentAsSent: string | null;
+  consentText: string | null; projectInterest: string | null; bestTime: string | null; other: Record<string, string>;
+};
+type Lead = { id: number; receivedAt: string; mode: string; result: string; fields: LeadFields; raw: Record<string, string>; missing: string[]; warnings: string[] };
 type AuditRow = { id: number; phone: string | null; action: string; reason: string | null; detail: Record<string, unknown> | null; actor: string | null; created_at: string };
 
 const MAX = 640;
@@ -56,6 +66,7 @@ export default function SmsTester() {
   const [optOuts, setOptOuts] = useState<OptOut[]>([]);
   const [auditRows, setAuditRows] = useState<AuditRow[]>([]);
   const [handoffs, setHandoffs] = useState<Handoff[]>([]);
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [to, setTo] = useState("");
   const [body, setBody] = useState("Den Defenders test: texting from Denny works. Reply to this text to test incoming.");
   const [kind, setKind] = useState("manual");
@@ -71,6 +82,7 @@ export default function SmsTester() {
     setOptOuts(data.optOuts || []);
     setAuditRows(data.audit || []);
     setHandoffs(data.handoffs || []);
+    setLeads(data.leads || []);
     setStatus(response.ok ? "" : data.error || "Could not load texting activity.");
   }, []);
 
@@ -159,6 +171,56 @@ export default function SmsTester() {
           <button className="btn btn-outline" onClick={load}>Refresh</button>
         </div>
         {status && <div className="notice" style={{ marginTop: 12 }}>{status}</div>}
+      </section>
+
+      <section className="surface team-list">
+        <h2>Lead intake (Zapier test leads)</h2>
+        {settings && (
+          <ul style={{ listStyle: "none", padding: 0, margin: "0 0 10px", display: "grid", gap: 6 }}>
+            <Check ok={settings.leadsSecretSet} label={settings.leadsSecretSet ? "Lead secret set (SMS_LEADS_SECRET)" : "SMS_LEADS_SECRET not set in Vercel (Zapier gets an error)"} />
+            <li className="team-hint">Mode: <b>{settings.leadsMode === "log_only" ? "LOG ONLY: leads are saved and shown here, no texts are sent" : settings.leadsMode}</b></li>
+            {settings.leadsUrl && <li className="team-hint">Zapier URL (POST, json): <code>{settings.leadsUrl}</code> · header <code>X-Denny-Secret</code></li>}
+          </ul>
+        )}
+        {leads.length === 0 ? <p className="team-hint">No leads yet. Send a test lead from the Zap.</p> : (
+          <div className="owner-table-wrap">
+            <table className="team-table">
+              <thead><tr><th>Received</th><th>Name</th><th>Phone</th><th>ZIP</th><th>Email</th><th>Source / campaign / ad / form</th><th>Submitted</th><th>SMS consent</th><th>Interest · best time</th><th>Check</th></tr></thead>
+              <tbody>
+                {leads.map((l) => {
+                  const f = l.fields;
+                  return (
+                    <tr key={l.id}>
+                      <td>{when(l.receivedAt)}<br /><span className="team-hint">#{l.id} · {l.result.replace(/_/g, " ")}</span></td>
+                      <td>{[f.firstName, f.lastName].filter(Boolean).join(" ") || "—"}</td>
+                      <td>{f.phone ? phoneLabel(f.phone) : <span style={{ color: "#b3261e" }}>{f.phoneAsSent || "missing"}</span>}</td>
+                      <td>{f.zip || "—"}</td>
+                      <td>{f.email || "—"}</td>
+                      <td style={{ whiteSpace: "pre-wrap", maxWidth: 260 }}>{[f.leadSource, f.campaignName, f.adName, f.formName].map((v) => v || "—").join("\n")}</td>
+                      <td>{f.submittedAt ? when(f.submittedAt) : f.submittedAtAsSent || "—"}</td>
+                      <td style={{ fontWeight: 700, color: f.smsConsent === "yes" ? "var(--teal-dark)" : "#b3261e" }}>
+                        {f.smsConsent === "yes" ? "✓ Yes" : f.smsConsent === "no" ? "✗ No" : "Not sent"}
+                        {f.smsConsentAsSent ? <><br /><span className="team-hint" style={{ fontWeight: 400 }}>sent: &quot;{f.smsConsentAsSent}&quot;</span></> : null}
+                      </td>
+                      <td style={{ whiteSpace: "pre-wrap", maxWidth: 200 }}>{f.projectInterest || "—"}{f.bestTime ? `\n${f.bestTime}` : ""}</td>
+                      <td style={{ maxWidth: 320 }}>
+                        {l.missing.length ? <div style={{ color: "#b3261e" }}>Missing: {l.missing.join(", ")}</div> : <div style={{ color: "var(--teal-dark)" }}>All fields ✓</div>}
+                        {l.warnings.map((w) => <div key={w} className="team-hint">⚠ {w}</div>)}
+                        <details>
+                          <summary>All fields as sent ({Object.keys(l.raw).length})</summary>
+                          <div style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 12 }}>
+                            {Object.entries(l.raw).map(([k, v]) => `${k}: ${v}`).join("\n")}
+                          </div>
+                          {f.consentText && <p className="team-hint">Consent wording sent: {f.consentText}</p>}
+                        </details>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className="surface team-list">
