@@ -484,6 +484,11 @@ export function priceAlreadyGiven(thread: ThreadMessage[]): boolean {
   return thread.some((m) => m.direction === "outbound" && /\$[\d,]+ to \$[\d,]+/.test(m.body));
 }
 
+/** Did we already tell them what the price includes ("…door, hardware, installation and tax")? */
+export function inclusionsAlreadyGiven(thread: ThreadMessage[]): boolean {
+  return thread.some((m) => m.direction === "outbound" && /hardware,?\s*installation,?\s*and\s+tax/i.test(m.body));
+}
+
 /** Which of our links already went out in this thread (so the bot doesn't resend them). */
 export function linksSent(thread: ThreadMessage[]): string[] {
   const links: Array<[string, string]> = [
@@ -602,6 +607,7 @@ export async function composeBotReply(
   const known: KnownAboutCustomer = {
     notes,
     priceAlreadyGiven: priceAlreadyGiven(thread),
+    inclusionsAlreadyGiven: inclusionsAlreadyGiven(thread),
     linksSent: linksSent(thread),
     openTimes: offered?.times.map((t) => `${t.n}. ${timeWords(t)}`),
     chosenTime: picked ? timeWords(picked) : undefined,
@@ -796,7 +802,9 @@ export async function composeBotReply(
     messages.push(message);
     const calls = (message.tool_calls || []).filter((c) => c.type === "function");
     if (!calls.length) {
-      reply = trimRepeatedPrice(ensurePriceInclusions(cleanSmsText(message.content || ""), known.priceAlreadyGiven), known.priceAlreadyGiven);
+      // Inclusions are said once per conversation: either with the first price, or in the door-type question before it.
+      const inclusionsSaid = known.priceAlreadyGiven || Boolean(known.inclusionsAlreadyGiven);
+      reply = trimRepeatedPrice(ensurePriceInclusions(cleanSmsText(message.content || ""), inclusionsSaid), inclusionsSaid);
       // The AI said photos are attached but never attached any: one more try.
       if (!media.length && !photoNudged && round < MAX_ROUNDS - 1 && claimsPhotos(reply)) {
         photoNudged = true;
