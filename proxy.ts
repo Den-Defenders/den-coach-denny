@@ -19,6 +19,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Zapier lead intake. No login; the route rejects any request without the
+  // SMS_LEADS_SECRET in its X-Denny-Secret header (lib/sms/leads.ts).
+  if (pathname === "/api/leads") {
+    return NextResponse.next();
+  }
+
   // Twilio texting webhooks. No login, but each route rejects any request
   // without a valid X-Twilio-Signature (lib/sms/twilio.ts).
   if (pathname === "/api/sms/inbound" || pathname === "/api/sms/status") {
