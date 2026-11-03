@@ -182,9 +182,26 @@ type DripRow = {
   repliedAfterStart: boolean;
 };
 
+/**
+ * A booking stops the drip only if it's still open (nobody clicked "Booked in
+ * ServiceTitan" yet) or it was picked after this drip started. An old, finished
+ * booking from an earlier conversation doesn't block a new lead's drip.
+ */
+export function bookingBlocksDrip(booking: unknown, doneAt: unknown, dripStartedAt: Date | null): boolean {
+  if (!booking) return false;
+  if (doneAt == null) return true;
+  let b: unknown = booking;
+  if (typeof b === "string") {
+    try { b = JSON.parse(b); } catch { b = null; }
+  }
+  const requestedAt = b && typeof b === "object" ? Date.parse(String((b as { requestedAt?: unknown }).requestedAt || "")) : NaN;
+  if (!dripStartedAt || !Number.isFinite(requestedAt)) return false;
+  return requestedAt >= dripStartedAt.getTime();
+}
+
 async function loadDrip(phone: string): Promise<DripRow | null> {
   const sql = await smsDb();
-  const rows = await sql`SELECT v.id, v.phone, v.bot_status, v.lead_status, (v.booking_request IS NOT NULL) AS has_booking,
+  const rows = await sql`SELECT v.id, v.phone, v.bot_status, v.lead_status, v.booking_request, v.booking_done_at,
       v.drip_status, v.drip_step, v.drip_next_at, v.drip_day1, v.drip_started_at, v.drip_last_sent_at, v.st_check, v.st_test_bypass,
       c.time_zone, c.first_name,
       EXISTS (SELECT 1 FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'inbound'
@@ -201,7 +218,7 @@ async function loadDrip(phone: string): Promise<DripRow | null> {
     firstName: niceFirstName(r.first_name as string),
     botStatus: String(r.bot_status || "on"),
     leadStatus: (r.lead_status as string) ?? null,
-    hasBooking: r.has_booking === true,
+    hasBooking: bookingBlocksDrip(r.booking_request, r.booking_done_at, d(r.drip_started_at)),
     step: Number(r.drip_step || 0),
     nextAt: d(r.drip_next_at),
     day1: (r.drip_day1 as string) ?? null,
