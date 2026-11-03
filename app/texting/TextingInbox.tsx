@@ -71,6 +71,9 @@ type Thread = {
     dripStatus: string | null;
     dripLabel: string;
     stCheck: string | null;
+    followUp: string;
+    followUpsOff: boolean;
+    canStop: boolean;
   } | null;
   optOut: { optedOutAt: string; source: string; keyword: string | null } | null;
   messages: Message[];
@@ -118,6 +121,7 @@ function longWhen(iso: string | null) {
 function senderLabel(sentBy: string | null) {
   if (!sentBy) return "Den Defenders";
   if (sentBy === "denny-ai" || sentBy === "denny-checking") return "AI";
+  if (sentBy === "denny-followup") return "AI follow-up";
   if (sentBy === "system" || sentBy === "denny-hold") return "Automatic";
   if (sentBy === "drip") return "Drip";
   return sentBy.includes("@") ? sentBy.split("@")[0] : sentBy;
@@ -456,10 +460,12 @@ export default function TextingInbox() {
                   </ul>
                 )}
                 {thread.lead.dripLabel && <div className="inbox-lead-drip">📨 {thread.lead.dripLabel}</div>}
+                {thread.lead.followUp && <div className="inbox-lead-drip">🤖 {thread.lead.followUp}</div>}
+                {thread.lead.followUpsOff && <div className="team-hint">Auto texts stopped for this customer (no drip, no AI follow-ups).</div>}
                 {thread.lead.stCheck && <div className="team-hint">{thread.lead.stCheck}</div>}
-                {thread.lead.dripStatus === "active" && (
+                {thread.lead.canStop && (
                   <div className="inbox-booking-actions">
-                    <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("stop_drip")}>Stop drip</button>
+                    <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("stop_drip")}>Stop auto texts</button>
                   </div>
                 )}
               </div>
@@ -474,7 +480,7 @@ export default function TextingInbox() {
             <div className="inbox-messages">
               {thread.messages.map((m) => {
                 const failed = ["send_failed", "failed", "undelivered"].includes(m.status);
-                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" || m.sentBy === "denny-checking" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" || m.sentBy === "drip" ? "system" : "person";
+                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" || m.sentBy === "denny-checking" || m.sentBy === "denny-followup" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" || m.sentBy === "drip" ? "system" : "person";
                 return (
                   <div key={m.id} className={`inbox-row inbox-${who}${failed ? " failed" : ""}`}>
                     <div className="sim-who">{m.direction === "inbound" ? displayName(thread) : senderLabel(m.sentBy)} · {longWhen(m.createdAt)}</div>
