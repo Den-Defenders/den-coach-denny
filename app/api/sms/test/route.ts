@@ -4,11 +4,14 @@
  *   POST -> send one test text through the real send helper (all rules apply)
  *   POST {action:"resume_bot", phone} -> turn the AI back on for a number after a handoff
  * GET also returns the newest Zapier leads (/api/leads, step 5) with every field.
+ *   POST {action:"reset_lead_test", phone, skipServiceTitan} -> let the next lead for this test
+ *        number start a fresh drip (texts stay); optionally skip the ServiceTitan check for it
  */
 import { NextResponse } from "next/server";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { botEnabled, botModel } from "@/lib/sms/bot";
-import { leadsMode, leadsSecretConfigured, recentLeads } from "@/lib/sms/leads";
+import { dripEnabled, DRIP_STEPS } from "@/lib/sms/drip";
+import { consentSources, leadsMode, leadsSecretConfigured, recentLeads, resetLeadForTest } from "@/lib/sms/leads";
 import { formatPhone, normalizePhone, type SendKind } from "@/lib/sms/rules";
 import { allowList, promoTextsEnabled, sendSms, sendingEnabled, smsLimits } from "@/lib/sms/send";
 import { audit, recentActivity, resumeBot, smsDatabaseConfigured } from "@/lib/sms/store";
@@ -44,6 +47,10 @@ function settings() {
     leadsSecretSet: leadsSecretConfigured(),
     leadsMode: leadsMode(),
     leadsUrl: base ? `${base}/api/leads` : null,
+    dripEnabled: dripEnabled(),
+    dripSteps: DRIP_STEPS.length,
+    timerSecretSet: (process.env.SMS_TIMER_SECRET || "").trim().length >= 24,
+    consentSources: consentSources().join(", "),
   };
 }
 
@@ -69,6 +76,24 @@ export async function POST(request: Request) {
   if (!access) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body) return NextResponse.json({ error: "Invalid request." }, { status: 400, headers: NO_STORE });
+
+  if (body.action === "reset_lead_test") {
+    const phone = normalizePhone(String(body.phone || ""));
+    if (!phone) return NextResponse.json({ ok: false, message: "Invalid number." }, { status: 400, headers: NO_STORE });
+    // Only pilot test numbers (never a real lead once the list is "*").
+    const allowed = allowList();
+    if (allowed.everyone || !allowed.numbers.includes(phone)) {
+      return NextResponse.json({ ok: false, message: "Only numbers on the pilot test list (SMS_ALLOWED_TO) can be reset." }, { status: 400, headers: NO_STORE });
+    }
+    try {
+      const ok = await resetLeadForTest(phone, { skipServiceTitan: body.skipServiceTitan === true });
+      if (ok) await audit({ phone, action: "lead_test_reset", reason: body.skipServiceTitan === true ? "skip ServiceTitan check" : null, actor: access.email || "owner" });
+      return NextResponse.json({ ok, message: ok ? `Ready: the next test lead for ${formatPhone(phone)} starts a fresh drip.` : "No conversation for that number yet (a new lead will start fresh anyway)." }, { headers: NO_STORE });
+    } catch (error) {
+      console.error("SMS lead test reset failed:", error);
+      return NextResponse.json({ ok: false, message: "Could not reset that number." }, { status: 500, headers: NO_STORE });
+    }
+  }
 
   if (body.action === "resume_bot") {
     const phone = normalizePhone(String(body.phone || ""));

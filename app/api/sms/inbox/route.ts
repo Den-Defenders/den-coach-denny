@@ -16,11 +16,14 @@
  *   POST {action:"assign", phone, to}   -> owners/managers give the customer to a team member (email)
  *   POST {action:"mark_booked", phone}  -> "Booked in ServiceTitan" (step 4a): clears the "📅 Ready to book"
  *                                          flag; an unowned customer becomes the booker's
+ *   POST {action:"stop_drip", phone}    -> step 5: stop this lead's drip for good
  */
 import { NextResponse } from "next/server";
 import { canUseTextingInbox, type DennyAccess } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { bookingFrom, bookingLines, shortTimeWords } from "@/lib/sms/booking";
+import { dripLabel, stopDrip } from "@/lib/sms/drip";
+import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
 import { formatPhone, normalizePhone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
@@ -127,6 +130,16 @@ export async function GET(request: Request) {
             : null,
           assignedName: nameFor(thread.assignedTo, team),
           phoneLabel: formatPhone(phone),
+          lead: thread.lead.at || thread.lead.drip.status
+            ? {
+                at: thread.lead.at,
+                count: thread.lead.count,
+                info: thread.lead.info,
+                dripStatus: thread.lead.drip.status,
+                dripLabel: dripLabel(thread.lead.drip, thread.timeZone),
+                stCheck: thread.lead.stCheck ? stCheckSummary(thread.lead.stCheck as StCheck) : null,
+              }
+            : null,
           handoffLabel: thread.handoffReason
             ? (thread.handoffReason === "ready_to_book" && booking ? READY_TO_BOOK_LABEL : handoffLabel(thread.handoffReason))
             : null,
@@ -191,6 +204,10 @@ export async function POST(request: Request) {
         await takeOverConversation(phone, who, now);
         await audit({ phone, action: "csr_reply", reason: thread.botStatus === "on" ? "ai_paused" : null, detail: { messageId: result.messageId }, actor: who });
         return json({ ...result, message: "Sent. The AI is paused for this number." });
+      }
+      case "stop_drip": {
+        const stopped = await stopDrip(phone, `stopped by ${who}`, who, now);
+        return json({ ok: stopped, message: stopped ? "Drip stopped for this customer. No more automated texts." : "This customer has no running drip." });
       }
       case "take_over": {
         await takeOverConversation(phone, who, now);

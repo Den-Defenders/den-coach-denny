@@ -134,10 +134,17 @@ export const DENNY_ONLY_OPT_OUT_SOURCES = new Set(["keyword_extra", "ai_detected
  *   reply      - an automatic (AI) answer to a text they sent in the last 24 hours
  *   manual     - a person typing in Denny
  *   automated  - drip and follow-ups nobody asked for just now
+ *   welcome    - the FIRST drip text right after a lead form (step 5): automated rules,
+ *                but 8 AM - 8 PM, and it doesn't count toward the automated daily cap
  *   opt_out_confirmation - the one confirmation after an opt-out (internal only)
  *   opt_in_confirmation  - the one confirmation after START, when Twilio won't send it (internal only)
  */
-export type SendKind = "reply" | "manual" | "automated" | "opt_out_confirmation" | "opt_in_confirmation";
+export type SendKind = "reply" | "manual" | "automated" | "welcome" | "opt_out_confirmation" | "opt_in_confirmation";
+
+/** Automated kinds: need form consent, no holidays, ServiceTitan exclusions checked first. */
+export function isAutomatedKind(kind: SendKind): boolean {
+  return kind === "automated" || kind === "welcome";
+}
 
 /** Keyword confirmations: sent right away, any hour, once per keyword. */
 export function isConfirmationKind(kind: SendKind): kind is "opt_out_confirmation" | "opt_in_confirmation" {
@@ -149,6 +156,7 @@ export const SENDING_HOURS: Record<Exclude<SendKind, "opt_out_confirmation" | "o
   reply: [0, 24],      // any hour: the AI answers a text they just sent us (Steven, 2026-11-01; was 8 AM - 7 PM)
   manual: [8, 19],     // 8 AM - 7 PM, every day: when a person (CSR) may text (Steven, 2026-11-01; was 8 AM - 9 PM)
   automated: [9, 17],  // 9 AM - 5 PM (Melanie, 2026-10-22)
+  welcome: [8, 20],    // 8 AM - 8 PM: the first drip text right after a lead form (Steven, 2026-11-02)
 };
 
 export type LocalTime = { year: number; month: number; day: number; hour: number; minute: number; weekday: number };

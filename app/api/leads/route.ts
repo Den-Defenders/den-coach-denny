@@ -4,16 +4,31 @@
  * Public in proxy.ts (Zapier can't log in); this route rejects any request
  * without the SMS_LEADS_SECRET in the X-Denny-Secret header.
  *
- * PR 1 = "log only" test mode: the lead is saved with every field and shown on
- * /sms-test. No texts, no contact, no conversation, no Slack.
+ * SMS_LEADS_MODE:
+ *   log_only (default) - the lead is saved with every field and shown on /sms-test. No texts.
+ *   live               - one conversation per phone (re-submits join it), consent saved,
+ *                        the lead shows in the Texting inbox, and the drip starts
+ *                        (welcome sent right after we answer Zapier; lib/sms/drip.ts).
  */
 import { NextResponse } from "next/server";
-import { leadsMode, leadsSecretConfigured, leadsSecretMatches, MAX_LEAD_BYTES, parseLead, readLeadBody, saveLead } from "@/lib/sms/leads";
+import { dripEnabled, scheduleWelcome } from "@/lib/sms/drip";
+import {
+  leadsMode,
+  leadsSecretConfigured,
+  leadsSecretMatches,
+  MAX_LEAD_BYTES,
+  parseLead,
+  processLiveLead,
+  readLeadBody,
+  saveLead,
+} from "@/lib/sms/leads";
 import { smsNow } from "@/lib/sms/send";
 import { audit, smsDatabaseConfigured } from "@/lib/sms/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// The welcome text (ServiceTitan check + Twilio) runs after Zapier gets its answer.
+export const maxDuration = 60;
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
@@ -48,20 +63,34 @@ export async function POST(request: Request) {
   const mode = leadsMode();
   const now = smsNow();
   try {
-    const leadId = await saveLead(lead, { mode, result: "logged_only", userAgent: request.headers.get("user-agent"), at: now });
+    const leadId = await saveLead(lead, { mode, result: mode === "live" ? "received" : "logged_only", userAgent: request.headers.get("user-agent"), at: now });
     await audit({
       phone: lead.fields.phone,
       action: "lead_received",
-      reason: `${mode}: no texts sent`,
+      reason: mode === "live" ? "live" : `${mode}: no texts sent`,
       detail: { leadId, source: lead.fields.leadSource, form: lead.fields.formName, consent: lead.fields.smsConsent, missing: lead.missing },
       actor: "zapier",
     });
+    let result: string = "logged_only";
+    if (mode === "live") {
+      result = await processLiveLead(lead, leadId, now, { dripOn: dripEnabled() });
+      const phone = lead.fields.phone;
+      if (result === "drip_started" && phone) scheduleWelcome(phone);
+    }
+    const MESSAGES: Record<string, string> = {
+      logged_only: "Test lead saved. No texts were sent (log only mode). See it on dencoachdenny.com/sms-test under Lead intake.",
+      drip_started: "Lead saved and the drip started (the welcome text goes out now if it's 8 AM to 8 PM their time).",
+      joined_existing: "Lead saved. We already have this number, so it joined that conversation (no drip restart).",
+      no_consent: "Lead saved and shown in the Texting inbox. No automated texts (no SMS consent).",
+      drip_off: "Lead saved and shown in the Texting inbox. No automated texts (the drip is switched off).",
+      no_valid_phone: "Lead saved, but the phone number can't get texts.",
+    };
     return NextResponse.json({
       ok: true,
       mode,
       leadId,
-      textsSent: 0,
-      message: "Test lead saved. No texts were sent (log only mode). See it on dencoachdenny.com/sms-test under Lead intake.",
+      result,
+      message: MESSAGES[result] || "Lead saved.",
       understood: {
         first_name: lead.fields.firstName,
         last_name: lead.fields.lastName,

@@ -25,6 +25,7 @@ import {
   OPT_IN_CONFIRMATION,
   OPT_OUT_CONFIRMATION,
   describeHours,
+  isAutomatedKind,
   isConfirmationKind,
   holidayName,
   localTime,
@@ -123,7 +124,7 @@ export function smsNow(): Date {
   return clock();
 }
 
-const KINDS: SendKind[] = ["reply", "manual", "automated", "opt_out_confirmation", "opt_in_confirmation"];
+const KINDS: SendKind[] = ["reply", "manual", "automated", "welcome", "opt_out_confirmation", "opt_in_confirmation"];
 
 export async function sendSms(request: SendRequest): Promise<SendResult> {
   const now = clock();
@@ -189,7 +190,7 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
       if (!promoTextsEnabled()) return block("promo_texts_disabled", "Promo texts are turned off (SMS_PROMO_TEXTS_ENABLED).");
       if (!formConsent) return block("no_marketing_consent", "Promo texts need form consent, not just an incoming text.");
     }
-    if (kind === "automated" && !formConsent) {
+    if (isAutomatedKind(kind) && !formConsent) {
       return block("no_consent", "Automated texts need form consent, not just an incoming text.", { consent });
     }
 
@@ -206,7 +207,7 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
     if (!withinSendingHours(kind, local)) {
       return block("outside_hours", `Outside sending hours (${describeHours(kind)} ${contact.timeZone}).`, { localHour: local.hour, timeZone: contact.timeZone });
     }
-    if (kind === "automated") {
+    if (isAutomatedKind(kind)) {
       const holiday = holidayName(local);
       if (holiday) return block("holiday", `No automated texts on ${holiday}.`, { holiday });
     }

@@ -19,6 +19,10 @@ type Settings = {
   leadsSecretSet: boolean;
   leadsMode: string;
   leadsUrl: string | null;
+  dripEnabled: boolean;
+  dripSteps: number;
+  timerSecretSet: boolean;
+  consentSources: string;
 };
 
 type Message = {
@@ -67,6 +71,8 @@ export default function SmsTester() {
   const [auditRows, setAuditRows] = useState<AuditRow[]>([]);
   const [handoffs, setHandoffs] = useState<Handoff[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [resetPhone, setResetPhone] = useState("");
+  const [skipSt, setSkipSt] = useState(true);
   const [to, setTo] = useState("");
   const [body, setBody] = useState("Den Defenders test: texting from Denny works. Reply to this text to test incoming.");
   const [kind, setKind] = useState("manual");
@@ -105,6 +111,17 @@ export default function SmsTester() {
     const data = await response.json().catch(() => ({}));
     setStatus(data.ok ? `Sent ✓ (Twilio status: ${data.status}). Check your phone.` : `Blocked: ${data.message || data.error || "unknown"} [${data.reason || response.status}]`);
     setSending(false);
+    load();
+  }
+
+  async function resetLead() {
+    const response = await fetch("/api/sms/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "reset_lead_test", phone: resetPhone, skipServiceTitan: skipSt }),
+    });
+    const data = await response.json().catch(() => ({}));
+    setStatus(data.message || (response.ok ? "Done." : "Could not reset that number."));
     load();
   }
 
@@ -178,10 +195,24 @@ export default function SmsTester() {
         {settings && (
           <ul style={{ listStyle: "none", padding: 0, margin: "0 0 10px", display: "grid", gap: 6 }}>
             <Check ok={settings.leadsSecretSet} label={settings.leadsSecretSet ? "Lead secret set (SMS_LEADS_SECRET)" : "SMS_LEADS_SECRET not set in Vercel (Zapier gets an error)"} />
-            <li className="team-hint">Mode: <b>{settings.leadsMode === "log_only" ? "LOG ONLY: leads are saved and shown here, no texts are sent" : settings.leadsMode}</b></li>
+            <li className="team-hint">Mode: <b>{settings.leadsMode === "log_only" ? "LOG ONLY: leads are saved and shown here, no texts are sent (SMS_LEADS_MODE)" : "LIVE: leads go to the Texting inbox and start the drip (SMS_LEADS_MODE=live)"}</b></li>
+            <Check ok={settings.dripEnabled} label={`Drip ${settings.dripEnabled ? "ON" : "OFF"} (SMS_DRIP_ENABLED) · ${settings.dripSteps} texts over 60 days · promo steps ${settings.promoTextsEnabled ? "ON" : "skipped (promo off)"}`} />
+            <Check ok={settings.timerSecretSet} label={settings.timerSecretSet ? "Timer secret set (SMS_TIMER_SECRET): GitHub runs the drip every 15 min" : "SMS_TIMER_SECRET not set: only the first texts go out"} />
+            <li className="team-hint">Sources that count as SMS consent: <b>{settings.consentSources}</b></li>
             {settings.leadsUrl && <li className="team-hint">Zapier URL (POST, json): <code>{settings.leadsUrl}</code> · header <code>X-Denny-Secret</code></li>}
           </ul>
         )}
+        <div className="team-grid" style={{ alignItems: "end", marginBottom: 10 }}>
+          <label>
+            <span>Test again with a pilot number</span>
+            <input value={resetPhone} onChange={(e) => setResetPhone(e.target.value)} placeholder="Your test cell" inputMode="tel" />
+          </label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="checkbox" checked={skipSt} onChange={(e) => setSkipSt(e.target.checked)} style={{ width: "auto" }} />
+            <span>Skip the ServiceTitan check for this number</span>
+          </label>
+          <button className="btn btn-outline" disabled={!resetPhone} onClick={resetLead}>Let the next lead start a fresh drip</button>
+        </div>
         {leads.length === 0 ? <p className="team-hint">No leads yet. Send a test lead from the Zap.</p> : (
           <div className="owner-table-wrap">
             <table className="team-table">

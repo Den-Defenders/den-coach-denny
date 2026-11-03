@@ -109,6 +109,24 @@ async function createTables(sql: Sql) {
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_request JSONB`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_done_at TIMESTAMPTZ`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_done_by TEXT`;
+  // Step 5 (Zapier leads + drip): the lead form, the drip's progress, and the ServiceTitan exclusion check.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_info JSONB`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS lead_count INT NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_status TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_step INT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_next_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_day1 TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_started_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_last_sent_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_stop_reason TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_stopped_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_stopped_by TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS drip_restart_ok BOOLEAN NOT NULL DEFAULT false`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS st_check JSONB`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS st_checked_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS st_test_bypass BOOLEAN NOT NULL DEFAULT false`;
+  await sql`CREATE INDEX IF NOT EXISTS sms_conversations_drip_due ON sms_conversations (drip_next_at) WHERE drip_status = 'active'`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -557,6 +575,9 @@ export type InboxRow = {
   assignedTo: string | null;
   bookingRequest: unknown;
   bookingDoneAt: string | null;
+  /** Step 5: when their lead form came in, and the drip's state (null = no drip). */
+  leadAt: string | null;
+  dripStatus: string | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -593,7 +614,8 @@ export async function listInboxConversations(options: { search?: string; limit?:
   const limit = Math.min(Math.max(options.limit ?? 300, 1), 500);
   const { text, digits } = searchPatterns(options.search);
   const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.lead_status, v.assigned_to, v.booking_request, v.booking_done_at, c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
+      v.lead_status, v.assigned_to, v.booking_request, v.booking_done_at, v.lead_at, v.drip_status,
+      c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
       m.status AS last_status, m.created_at AS last_at
     FROM sms_conversations v
@@ -604,7 +626,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
       WHERE conversation_id = v.id AND status <> 'send_failed' AND coalesce(sent_by, '') NOT IN (${HOLD_SENDER}, ${CHECKING_SENDER})
       ORDER BY created_at DESC, id DESC LIMIT 1
     ) m ON true
-    WHERE m.created_at IS NOT NULL
+    WHERE (m.created_at IS NOT NULL OR v.lead_at IS NOT NULL)
       AND (${text}::text IS NULL
         OR v.phone LIKE ${digits}::text
         OR (coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) ILIKE ${text}::text
@@ -612,7 +634,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
     ORDER BY (v.bot_status = 'paused' AND v.handoff_reason = 'ready_to_book' AND v.handoff_resolved_at IS NULL
         AND v.booking_request IS NOT NULL AND v.booking_done_at IS NULL) DESC,
       (v.handoff_reason IS NOT NULL AND v.handoff_resolved_at IS NULL) DESC,
-      m.created_at DESC
+      coalesce(m.created_at, v.lead_at) DESC
     LIMIT ${limit}`;
   return rows.map((r) => ({
     phone: String(r.phone),
@@ -627,13 +649,16 @@ export async function listInboxConversations(options: { search?: string; limit?:
     assignedTo: (r.assigned_to as string) ?? null,
     bookingRequest: r.booking_request ?? null,
     bookingDoneAt: toIso(r.booking_done_at),
+    leadAt: toIso(r.lead_at),
+    dripStatus: (r.drip_status as string) ?? null,
     optedOut: r.opted_out === true,
-    lastDirection: r.last_direction === "outbound" ? "outbound" : "inbound",
-    lastBody: String(r.last_body || ""),
+    // A lead with no texts yet shows as an outbound "New lead" row (nothing to answer).
+    lastDirection: r.last_at == null || r.last_direction === "outbound" ? "outbound" : "inbound",
+    lastBody: r.last_at == null ? "New lead from a form (no texts yet)" : String(r.last_body || ""),
     lastMediaCount: mediaList(r.last_media).length,
-    lastSentBy: (r.last_sent_by as string) ?? null,
+    lastSentBy: r.last_at == null ? "system" : (r.last_sent_by as string) ?? null,
     lastStatus: String(r.last_status || ""),
-    lastAt: toIso(r.last_at) || "",
+    lastAt: toIso(r.last_at) || toIso(r.lead_at) || "",
   }));
 }
 
@@ -670,6 +695,24 @@ export type InboxThread = {
   customerNotes: Record<string, string>;
   optOut: OptOut | null;
   consent: ConsentType[];
+  /** Step 5: the newest lead form and the drip. */
+  lead: {
+    at: string | null;
+    count: number;
+    info: Record<string, unknown> | null;
+    drip: {
+      status: string | null;
+      step: number | null;
+      nextAt: string | null;
+      startedAt: string | null;
+      lastSentAt: string | null;
+      stopReason: string | null;
+      stoppedAt: string | null;
+      stoppedBy: string | null;
+    };
+    stCheck: unknown;
+    stCheckedAt: string | null;
+  };
   messages: InboxMessage[];
 };
 
@@ -678,7 +721,9 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
   const sql = await db();
   const rows = await sql`SELECT v.id, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
       v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.booking_request, v.booking_done_at, v.booking_done_by,
-      v.customer_notes, c.first_name, c.last_name, c.time_zone
+      v.customer_notes, v.lead_at, v.lead_count, v.lead_info, v.drip_status, v.drip_step, v.drip_next_at, v.drip_started_at,
+      v.drip_last_sent_at, v.drip_stop_reason, v.drip_stopped_at, v.drip_stopped_by, v.st_check, v.st_checked_at,
+      c.first_name, c.last_name, c.time_zone
     FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone WHERE v.phone = ${phone}`;
   if (!rows.length) return null;
   const v = rows[0];
@@ -705,6 +750,23 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
     customerNotes: notesFrom(v.customer_notes),
     optOut: await findOptOut(phone),
     consent: await activeConsentTypes(phone),
+    lead: {
+      at: toIso(v.lead_at),
+      count: Number(v.lead_count || 0),
+      info: (v.lead_info as Record<string, unknown>) ?? null,
+      drip: {
+        status: (v.drip_status as string) ?? null,
+        step: v.drip_step == null ? null : Number(v.drip_step),
+        nextAt: toIso(v.drip_next_at),
+        startedAt: toIso(v.drip_started_at),
+        lastSentAt: toIso(v.drip_last_sent_at),
+        stopReason: (v.drip_stop_reason as string) ?? null,
+        stoppedAt: toIso(v.drip_stopped_at),
+        stoppedBy: (v.drip_stopped_by as string) ?? null,
+      },
+      stCheck: v.st_check ?? null,
+      stCheckedAt: toIso(v.st_checked_at),
+    },
     messages: messages.reverse().map((m) => ({
       id: Number(m.id),
       direction: m.direction === "outbound" ? "outbound" : "inbound",

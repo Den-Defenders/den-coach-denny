@@ -19,9 +19,9 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Zapier lead intake. No login; the route rejects any request without the
-  // SMS_LEADS_SECRET in its X-Denny-Secret header (lib/sms/leads.ts).
-  if (pathname === "/api/leads") {
+  // Zapier lead intake and the texting timer (GitHub Actions). No login; each
+  // route rejects any request without its secret (SMS_LEADS_SECRET / SMS_TIMER_SECRET).
+  if (pathname === "/api/leads" || pathname === "/api/sms/timer") {
     return NextResponse.next();
   }
 

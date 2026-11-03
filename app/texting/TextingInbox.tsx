@@ -63,6 +63,15 @@ type Thread = {
   assignedName: string | null;
   customerNotes: Record<string, string>;
   booking: Booking | null;
+  /** Step 5: their lead form and the drip. */
+  lead: {
+    at: string | null;
+    count: number;
+    info: Record<string, string | null> | null;
+    dripStatus: string | null;
+    dripLabel: string;
+    stCheck: string | null;
+  } | null;
   optOut: { optedOutAt: string; source: string; keyword: string | null } | null;
   messages: Message[];
 };
@@ -288,7 +297,8 @@ export default function TextingInbox() {
   const flag = data?.flag;
   const reply = data?.reply;
   // Notes starting with "_" are code-only bookkeeping (like which photo files were sent).
-  const notes = Object.entries(thread?.customerNotes || {}).filter(([k]) => !k.startsWith("_"));
+  // The lead card shows the form, so its notes aren't repeated as chips.
+  const notes = Object.entries(thread?.customerNotes || {}).filter(([k]) => !k.startsWith("_") && k !== "lead_form" && k !== "form_zip");
   const tooLong = draft.trim().length > MAX_CHARS;
 
   return (
@@ -430,6 +440,31 @@ export default function TextingInbox() {
               </div>
             )}
 
+            {thread.lead && (
+              <div className="inbox-lead" aria-label="Lead form and drip">
+                <div className="inbox-lead-head">
+                  <b>📝 Lead form{thread.lead.count > 1 ? ` (${thread.lead.count} submits)` : ""}</b>
+                  {thread.lead.at && <span>{longWhen(thread.lead.at)}</span>}
+                </div>
+                {thread.lead.info && (
+                  <ul>
+                    {([
+                      ["Source", thread.lead.info.source], ["Form", thread.lead.info.form], ["Campaign", thread.lead.info.campaign],
+                      ["Ad", thread.lead.info.ad], ["ZIP", thread.lead.info.zip], ["Email", thread.lead.info.email],
+                      ["Interested in", thread.lead.info.projectInterest], ["Best time", thread.lead.info.bestTime],
+                    ] as [string, string | null | undefined][]).filter(([, v]) => v).map(([k, v]) => <li key={k}><b>{k}:</b> {v}</li>)}
+                  </ul>
+                )}
+                {thread.lead.dripLabel && <div className="inbox-lead-drip">📨 {thread.lead.dripLabel}</div>}
+                {thread.lead.stCheck && <div className="team-hint">{thread.lead.stCheck}</div>}
+                {thread.lead.dripStatus === "active" && (
+                  <div className="inbox-booking-actions">
+                    <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("stop_drip")}>Stop drip</button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {notes.length > 0 && (
               <div className="inbox-notes" aria-label="What the customer told the AI">
                 {notes.map(([k, v]) => <span key={k} className="inbox-note"><b>{NOTE_LABELS[k] || k.replace(/_/g, " ")}:</b> {v}</span>)}
@@ -439,7 +474,7 @@ export default function TextingInbox() {
             <div className="inbox-messages">
               {thread.messages.map((m) => {
                 const failed = ["send_failed", "failed", "undelivered"].includes(m.status);
-                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" || m.sentBy === "denny-checking" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" ? "system" : "person";
+                const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" || m.sentBy === "denny-checking" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" || m.sentBy === "drip" ? "system" : "person";
                 return (
                   <div key={m.id} className={`inbox-row inbox-${who}${failed ? " failed" : ""}`}>
                     <div className="sim-who">{m.direction === "inbound" ? displayName(thread) : senderLabel(m.sentBy)} · {longWhen(m.createdAt)}</div>
