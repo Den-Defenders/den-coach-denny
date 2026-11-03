@@ -25,7 +25,7 @@
 import { after } from "next/server";
 import { holidayName, localTime, safeTimeZone, withinSendingHours } from "@/lib/sms/rules";
 import { promoTextsEnabled, sendSms, smsNow, type SendPurpose } from "@/lib/sms/send";
-import { checkServiceTitan, freshCheck, stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
+import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
 import { audit, findOptOut, setHandoff, smsDb } from "@/lib/sms/store";
 
 export const DRIP_SENDER = "drip";
@@ -260,12 +260,6 @@ async function retryLater(row: DripRow, at: Date) {
   await sql`UPDATE sms_conversations SET drip_next_at = ${at.toISOString()}::timestamptz, updated_at = now() WHERE id = ${row.id}`;
 }
 
-async function saveStCheck(id: number, check: StCheck) {
-  const sql = await smsDb();
-  await sql`UPDATE sms_conversations SET st_check = ${JSON.stringify(check)}::jsonb, st_checked_at = ${check.checkedAt}::timestamptz,
-      updated_at = now() WHERE id = ${id}`;
-}
-
 export type DripOutcome =
   | "sent" | "skipped_promo" | "stopped" | "retry_later" | "not_due" | "busy" | "done" | "drip_off" | "not_active";
 
@@ -306,18 +300,15 @@ export async function processDrip(phone: string, now: Date = smsNow()): Promise<
 
   // ServiceTitan exclusions (reused for 12 hours).
   if (!row.stBypass) {
-    let check = freshCheck(row.stCheck, now);
-    if (!check) {
-      check = await checkServiceTitan(phone, now);
-      await saveStCheck(row.id, check);
-    }
+    const { check } = await stCheckFor(phone, now);
     if (!check.ok) {
       await audit({ phone, action: "drip_st_check_failed", reason: check.error || "error", actor: DRIP_SENDER });
       await retryLater(row, new Date(now.getTime() + HOUR));
       return "retry_later";
     }
     if (check.blocked) {
-      await stopDrip(phone, stCheckSummary(check).slice(0, 120), "servicetitan", now);
+      // Short reason on the card; the full ServiceTitan line shows under it and in the handoff.
+      await stopDrip(phone, "ServiceTitan exclusion (see below)", "servicetitan", now);
       await setHandoff(phone, "st_excluded", `${stCheckSummary(check)}. No automated texts. A person decides whether to reach out.`, now, { keepAi: true });
       return "stopped";
     }

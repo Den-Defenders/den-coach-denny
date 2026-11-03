@@ -470,7 +470,9 @@ export async function resetLeadForTest(phone: string, options: { skipServiceTita
   const rows = await sql`UPDATE sms_conversations SET drip_status = NULL, drip_step = NULL, drip_next_at = NULL, drip_day1 = NULL,
       drip_started_at = NULL, drip_last_sent_at = NULL, drip_stop_reason = NULL, drip_stopped_at = NULL, drip_stopped_by = NULL,
       lead_at = NULL, lead_info = NULL, lead_count = 0, st_check = NULL, st_checked_at = NULL,
-      st_test_bypass = ${options.skipServiceTitan}, drip_restart_ok = true,
+      st_test_bypass = ${options.skipServiceTitan}, drip_restart_ok = true, followups_off = false, followup_lock_until = NULL,
+      handoff_summary = CASE WHEN handoff_reason IN ('new_lead_no_texts', 'lead_resubmitted', 'st_excluded') THEN NULL ELSE handoff_summary END,
+      handoff_at = CASE WHEN handoff_reason IN ('new_lead_no_texts', 'lead_resubmitted', 'st_excluded') THEN NULL ELSE handoff_at END,
       handoff_reason = CASE WHEN handoff_reason IN ('new_lead_no_texts', 'lead_resubmitted', 'st_excluded') THEN NULL ELSE handoff_reason END,
       updated_at = now()
     WHERE phone = ${phone} RETURNING id`;

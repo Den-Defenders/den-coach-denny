@@ -17,6 +17,7 @@
  * If the check fails (MCP down, permission), the result is ok:false and NO
  * automated text goes out (the drip tries again later).
  */
+import { smsDb } from "@/lib/sms/store";
 import { callTextingReadTool } from "@/lib/websiteBotMcp";
 
 /** Melanie's list (2026-11-02). "Warranty" isn't a ServiceTitan tag; the closest is "Warranty Call". */
@@ -95,6 +96,7 @@ export async function checkServiceTitan(phone: string, now: Date): Promise<StChe
     }
 
     const recentJobIds: number[] = [];
+    const canceledDays: string[] = [];
     const cutoffCanceled = now.getTime() - CANCELED_DAYS * 24 * 60 * 60 * 1000;
     const cutoffTags = now.getTime() - 2 * 365 * 24 * 60 * 60 * 1000;
     for (const id of ids) {
@@ -104,11 +106,17 @@ export async function checkServiceTitan(phone: string, now: Date): Promise<StChe
         if (OPEN_JOB_STATUSES.includes(status)) reasons.push(`Open job (${job.status}) created ${day(job.createdOn)}`);
         if (status === "canceled" || status === "cancelled") {
           const when = Date.parse(job.modifiedOn || job.completedOn || job.createdOn || "") || 0;
-          if (when >= cutoffCanceled) reasons.push(`Job canceled ${day(job.modifiedOn || job.completedOn || job.createdOn)}`);
+          if (when >= cutoffCanceled) canceledDays.push(day(job.modifiedOn || job.completedOn || job.createdOn));
         }
         const created = Date.parse(job.createdOn || "") || 0;
         if (job.jobId && created >= cutoffTags && recentJobIds.length < 50) recentJobIds.push(job.jobId);
       }
+    }
+    if (canceledDays.length) {
+      // One line, newest first: "Job canceled 2026-11-02 (+5 more in the last 90 days)".
+      canceledDays.sort().reverse();
+      const more = canceledDays.length - 1;
+      reasons.push(`Job canceled ${canceledDays[0]}${more ? ` (+${more} more in the last ${CANCELED_DAYS} days)` : ""}`);
     }
     if (recentJobIds.length) {
       const jobTags = (await reader("get_job_tags", { jobIds: recentJobIds })) as JobTagsResult;
@@ -148,4 +156,29 @@ export function stCheckSummary(c: StCheck): string {
   if (!c.ok) return "ServiceTitan check failed, will retry";
   if (!c.blocked) return c.customers.length ? "ServiceTitan: OK to auto-text" : "Not in ServiceTitan yet (new lead)";
   return `ServiceTitan: ${c.reasons.join("; ")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Saved result per conversation (sms_conversations.st_check, reused 12 hours)
+// ---------------------------------------------------------------------------
+
+export type SavedStCheck = { check: StCheck; bypass: boolean };
+
+/**
+ * The ServiceTitan result for this phone: the saved one while it's fresh, else a
+ * new check (saved). bypass = an owner's test number skips the exclusions.
+ */
+export async function stCheckFor(phone: string, now: Date): Promise<SavedStCheck> {
+  const sql = await smsDb();
+  const rows = await sql`SELECT id, st_check, st_test_bypass FROM sms_conversations WHERE phone = ${phone}`;
+  const row = rows[0];
+  const bypass = row?.st_test_bypass === true;
+  const fresh = freshCheck(row?.st_check, now);
+  if (fresh) return { check: fresh, bypass };
+  const check = await checkServiceTitan(phone, now);
+  if (row) {
+    await sql`UPDATE sms_conversations SET st_check = ${JSON.stringify(check)}::jsonb, st_checked_at = ${check.checkedAt}::timestamptz,
+        updated_at = now() WHERE id = ${row.id}`;
+  }
+  return { check, bypass };
 }
