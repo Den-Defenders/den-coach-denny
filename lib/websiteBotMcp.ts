@@ -27,6 +27,17 @@ export const WEBSITE_BOT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "get_job_invoices",
 ]);
 
+/**
+ * Texting step 5: read-only tools for the ServiceTitan exclusion check before any
+ * automated text (lib/sms/stCheck.ts). Results never reach a chat model.
+ */
+export const TEXTING_READ_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+  "search_customers",
+  "get_customer_jobs",
+  "get_customer_tags",
+  "get_job_tags",
+]);
+
 export const WEBSITE_BOT_WRITE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "book_sales_appointment",
   "add_job_note", // only to save the chat transcript on the job it just booked
@@ -110,7 +121,7 @@ export async function getWebsiteBotMcpToken(): Promise<string> {
 type McpResult = { isError?: boolean; content?: { type: string; text?: string }[] };
 
 async function callWebsiteBotTool(name: string, args: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
-  if (!WEBSITE_BOT_TOOL_ALLOWLIST.has(name) && !WEBSITE_BOT_WRITE_TOOL_ALLOWLIST.has(name)) {
+  if (!WEBSITE_BOT_TOOL_ALLOWLIST.has(name) && !WEBSITE_BOT_WRITE_TOOL_ALLOWLIST.has(name) && !TEXTING_READ_TOOL_ALLOWLIST.has(name)) {
     throw new WebsiteBotMcpError("TOOL_NOT_ALLOWED", `Tool ${name} is not allowed for the website bot.`);
   }
 
@@ -175,6 +186,12 @@ export type AvailabilityRequest = {
  * Same windows the booking tool uses: 8-12, 10-2 or 12-4 containing the start;
  * 2-6 for starts at 4:00 PM or later.
  */
+/** Texting exclusion check only: one read tool from TEXTING_READ_TOOL_ALLOWLIST. */
+export async function callTextingReadTool(name: string, args: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
+  if (!TEXTING_READ_TOOL_ALLOWLIST.has(name)) throw new WebsiteBotMcpError("TOOL_NOT_ALLOWED", `Tool ${name} is not allowed for texting.`);
+  return callWebsiteBotTool(name, args, timeoutMs);
+}
+
 export function arrivalWindowForStart(hhmm: string): string {
   const [h] = hhmm.split(":").map(Number);
   if (h >= 16) return "2 PM - 6 PM";

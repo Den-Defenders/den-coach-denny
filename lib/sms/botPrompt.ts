@@ -182,6 +182,8 @@ const NOTE_LABELS: Record<string, string> = {
   decision_makers: "Others deciding",
   preferred_days: "Preferred days",
   zip: "ZIP check",
+  lead_form: "Their lead form (they asked us to reach out)",
+  form_zip: "ZIP on their form (run check_service_zip before saying we serve it; don't ask for the ZIP again)",
   photos_sent: "Photos already sent",
   other: "Other",
 };

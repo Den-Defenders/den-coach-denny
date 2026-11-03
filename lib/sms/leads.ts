@@ -1,29 +1,37 @@
 /**
  * lib/sms/leads.ts
  *
- * Lead intake from Zapier (POST /api/leads). Build step 5, first PR = "log only"
- * test mode: every lead is saved with all of its fields and shown on the
- * Texting setup & test page (/sms-test), and NO texts are sent, no contact or
- * conversation is created.
+ * Lead intake from Zapier (POST /api/leads), build step 5.
  *
  *   sms_leads   one row per form submission Zapier sends us (raw payload + the
  *               fields we understood), newest first on /sms-test
+ *
+ * Modes (Vercel env SMS_LEADS_MODE):
+ *   log_only (default)  save + show the lead, NO texts, no conversation
+ *   live                one conversation per phone (a re-submit joins it, never
+ *                       restarts), consent saved, lead shown in the Texting inbox,
+ *                       and the drip starts (lib/sms/drip.ts) when there's consent
+ *                       and SMS_DRIP_ENABLED=true
+ *
+ * Consent (Steven, 2026-11-03): Facebook lead forms have carried SMS consent for
+ * years, so a Facebook lead counts as form consent ("care") unless the payload
+ * says sms_consent = no. Sources: SMS_CONSENT_SOURCES (default facebook, fb,
+ * instagram, ig, meta). Other sources: the lead shows in the inbox, no auto texts.
  *
  * The secret: Vercel env SMS_LEADS_SECRET. Zapier sends it in the
  * X-Denny-Secret header (or "Authorization: Bearer <secret>").
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { normalizePhone } from "@/lib/sms/rules";
-import { smsDb } from "@/lib/sms/store";
+import { addConsent, audit, ensureContact, saveCustomerNotes, setContactName, setHandoff, smsDb } from "@/lib/sms/store";
 
 /** Largest request we accept (a lead form is a few hundred bytes). */
 export const MAX_LEAD_BYTES = 20_000;
 
-export type LeadsMode = "log_only";
+export type LeadsMode = "log_only" | "live";
 
-/** Step 5 PR 1: intake only logs. Real intake (texts) comes in the next PR. */
 export function leadsMode(): LeadsMode {
-  return "log_only";
+  return (process.env.SMS_LEADS_MODE || "").trim().toLowerCase() === "live" ? "live" : "log_only";
 }
 
 export function leadsSecretConfigured(): boolean {
@@ -315,4 +323,156 @@ export async function recentLeads(limit = 25): Promise<LeadRow[]> {
     missing: (r.missing || []) as string[],
     warnings: (r.warnings || []) as string[],
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Live intake (SMS_LEADS_MODE=live)
+// ---------------------------------------------------------------------------
+
+export type LiveResult =
+  | "drip_started"      // new lead, consent, drip on: welcome goes out now (or at 8 AM)
+  | "joined_existing"   // we already have this number: no restart
+  | "no_consent"        // shown in the inbox, no automated texts
+  | "drip_off"          // SMS_DRIP_ENABLED is off: shown in the inbox, no automated texts
+  | "no_valid_phone";   // nothing to text: saved on /sms-test only
+
+const DEFAULT_CONSENT_SOURCES = ["facebook", "fb", "instagram", "ig", "meta"];
+
+export function consentSources(): string[] {
+  const raw = (process.env.SMS_CONSENT_SOURCES || "").trim();
+  return raw ? raw.split(/[,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) : DEFAULT_CONSENT_SOURCES;
+}
+
+/** Does this lead give us form consent to text (Steven, 2026-11-03)? */
+export function leadHasConsent(fields: LeadFields): boolean {
+  if (fields.smsConsent === "no" && fields.smsConsentAsSent) return false;
+  if (fields.smsConsent === "yes") return true;
+  const source = (fields.leadSource || "").toLowerCase();
+  return Boolean(source) && consentSources().some((s) => source.split(/[^a-z0-9]+/).includes(s) || source === s);
+}
+
+/** Arizona doesn't change clocks; everything else we serve is Pacific. */
+export function timeZoneForZip(zip: string | null): string {
+  return zip && /^8[56]\d{3}$/.test(zip) ? "America/Phoenix" : "America/Los_Angeles";
+}
+
+/** What the inbox and the AI see about the form (no raw ROAS fields). */
+export function leadInfo(lead: ParsedLead, leadId: number, receivedAt: Date) {
+  const f = lead.fields;
+  return {
+    leadId,
+    receivedAt: receivedAt.toISOString(),
+    submittedAt: f.submittedAt,
+    source: f.leadSource,
+    campaign: f.campaignName,
+    ad: f.adName,
+    form: f.formName,
+    zip: f.zip,
+    email: f.email,
+    projectInterest: f.projectInterest,
+    bestTime: f.bestTime,
+    consent: leadHasConsent(f) ? "yes" : "no",
+  };
+}
+
+function shortDate(iso: string, timeZone: string) {
+  return new Intl.DateTimeFormat("en-US", { timeZone, month: "short", day: "numeric" }).format(new Date(iso));
+}
+
+async function markLeadResult(leadId: number, result: string) {
+  const sql = await leadsDb();
+  await sql`UPDATE sms_leads SET result = ${result} WHERE id = ${leadId}`;
+}
+
+/**
+ * One live lead. Returns what happened; when it's "drip_started" the caller
+ * sends the welcome (processDrip) after answering Zapier.
+ */
+export async function processLiveLead(lead: ParsedLead, leadId: number, now: Date, options: { dripOn: boolean }): Promise<LiveResult> {
+  const f = lead.fields;
+  const phone = f.phone;
+  if (!phone) {
+    await markLeadResult(leadId, "no_valid_phone");
+    return "no_valid_phone";
+  }
+  const info = leadInfo(lead, leadId, now);
+  const timeZone = timeZoneForZip(f.zip);
+  const consent = leadHasConsent(f);
+  const sql = await smsDb();
+
+  const existingRows = await sql`SELECT v.id, v.lead_at, v.drip_status, v.drip_restart_ok,
+      EXISTS (SELECT 1 FROM sms_messages m WHERE m.conversation_id = v.id) AS has_messages
+    FROM sms_conversations v WHERE v.phone = ${phone}`;
+  const existing = existingRows[0];
+  const isExisting = Boolean(existing) && existing.drip_restart_ok !== true
+    && (existing.lead_at != null || existing.has_messages === true || existing.drip_status != null);
+
+  await ensureContact(phone);
+  if (consent) {
+    await addConsent(phone, "care", "facebook_lead_form", JSON.stringify({
+      leadId, form: f.formName, campaign: f.campaignName, source: f.leadSource, submittedAt: f.submittedAt,
+      basis: "Facebook lead form submit; Steven 2026-11-03: these forms carry SMS consent",
+    }), now);
+  }
+  const named = await sql`SELECT first_name, last_name FROM sms_contacts WHERE phone = ${phone}`;
+  if (!named[0]?.first_name && !named[0]?.last_name && (f.firstName || f.lastName)) await setContactName(phone, f.firstName, f.lastName);
+
+  const formWords = [
+    `${f.leadSource || "Lead"} form${f.formName ? ` "${f.formName}"` : ""} on ${shortDate(f.submittedAt || now.toISOString(), timeZone)}`,
+    f.projectInterest ? `interested in: ${f.projectInterest}` : "",
+    f.bestTime ? `best time to reach: ${f.bestTime}` : "",
+  ].filter(Boolean).join("; ");
+  const notes: Record<string, string> = { lead_form: formWords.slice(0, 200) };
+  if (f.firstName) notes.first_name = f.firstName;
+  if (f.zip) notes.form_zip = `${f.zip} (from their form, not checked yet)`;
+  await saveCustomerNotes(phone, notes);
+
+  if (isExisting) {
+    await sql`UPDATE sms_conversations SET lead_at = ${now.toISOString()}::timestamptz, lead_info = ${JSON.stringify(info)}::jsonb,
+        lead_count = lead_count + 1, updated_at = now()
+      WHERE phone = ${phone}`;
+    await audit({ phone, action: "lead_resubmitted", reason: existing.drip_status ? `drip ${existing.drip_status}` : "existing conversation", detail: { leadId }, actor: "zapier" });
+    if (existing.drip_status !== "active") {
+      await setHandoff(phone, "lead_resubmitted", `Sent another lead form (${formWords}). We already have a conversation with them, so no drip restarted.`, now, { keepAi: true });
+    }
+    await markLeadResult(leadId, "joined_existing");
+    return "joined_existing";
+  }
+
+  await sql`UPDATE sms_contacts SET time_zone = ${timeZone}, updated_at = now() WHERE phone = ${phone}`;
+  const result: LiveResult = !consent ? "no_consent" : !options.dripOn ? "drip_off" : "drip_started";
+  if (result === "drip_started") {
+    await sql`UPDATE sms_conversations SET lead_at = ${now.toISOString()}::timestamptz, lead_info = ${JSON.stringify(info)}::jsonb,
+        lead_count = lead_count + 1, drip_status = 'active', drip_step = 0, drip_next_at = ${now.toISOString()}::timestamptz,
+        drip_day1 = NULL, drip_started_at = ${now.toISOString()}::timestamptz, drip_last_sent_at = NULL,
+        drip_stop_reason = NULL, drip_stopped_at = NULL, drip_stopped_by = NULL, drip_restart_ok = false, updated_at = now()
+      WHERE phone = ${phone}`;
+  } else {
+    const why = result === "no_consent" ? "no SMS consent on this form" : "the drip is switched off";
+    await sql`UPDATE sms_conversations SET lead_at = ${now.toISOString()}::timestamptz, lead_info = ${JSON.stringify(info)}::jsonb,
+        lead_count = lead_count + 1, drip_status = 'off', drip_step = NULL, drip_next_at = NULL,
+        drip_stop_reason = ${why}, drip_restart_ok = false, updated_at = now()
+      WHERE phone = ${phone}`;
+    await setHandoff(phone, "new_lead_no_texts", `New lead (${formWords}). No automated texts: ${why}. Call or text them.`, now, { keepAi: true });
+  }
+  await audit({ phone, action: "lead_live", reason: result, detail: { leadId, form: f.formName, consent }, actor: "zapier" });
+  await markLeadResult(leadId, result);
+  return result;
+}
+
+/**
+ * Owners' test button (/sms-test): let the next lead for this number start a
+ * fresh drip, as if it were new. Texts and notes stay. Optionally skip the
+ * ServiceTitan check for this number (test phones are often real customers).
+ */
+export async function resetLeadForTest(phone: string, options: { skipServiceTitan: boolean }): Promise<boolean> {
+  const sql = await smsDb();
+  const rows = await sql`UPDATE sms_conversations SET drip_status = NULL, drip_step = NULL, drip_next_at = NULL, drip_day1 = NULL,
+      drip_started_at = NULL, drip_last_sent_at = NULL, drip_stop_reason = NULL, drip_stopped_at = NULL, drip_stopped_by = NULL,
+      lead_at = NULL, lead_info = NULL, lead_count = 0, st_check = NULL, st_checked_at = NULL,
+      st_test_bypass = ${options.skipServiceTitan}, drip_restart_ok = true,
+      handoff_reason = CASE WHEN handoff_reason IN ('new_lead_no_texts', 'lead_resubmitted', 'st_excluded') THEN NULL ELSE handoff_reason END,
+      updated_at = now()
+    WHERE phone = ${phone} RETURNING id`;
+  return rows.length > 0;
 }

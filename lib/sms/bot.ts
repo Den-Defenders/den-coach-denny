@@ -168,6 +168,9 @@ export function scheduleBotReply(phone: string, inboundId: number) {
 // Tools the model may call
 // ---------------------------------------------------------------------------
 
+/** The only keys save_customer_notes may write (same as its tool schema). */
+const AI_NOTE_FIELDS = new Set(["first_name", "need", "product", "door_count", "style", "concerns", "timing", "decision_makers", "preferred_days", "other"]);
+
 const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: "function",
@@ -894,9 +897,10 @@ export async function composeBotReply(
           }
         }
       } else if (name === "save_customer_notes") {
+        // Only the listed fields (the AI once saved "full name" / "street address" as notes).
         const fresh: Record<string, string> = {};
         for (const [k, v] of Object.entries(args)) {
-          if (typeof v === "string" && v.trim() && k !== "zip" && !k.startsWith("_") && k !== "photos_sent") fresh[k] = v.trim();
+          if (typeof v === "string" && v.trim() && AI_NOTE_FIELDS.has(k)) fresh[k] = v.trim();
         }
         await fx.saveNotes(fresh);
         Object.assign(notes, fresh);

@@ -33,6 +33,9 @@ const HANDOFF_LABELS: Record<string, string> = {
   abusive_or_spam: "Abusive or spam",
   question_for_team: "Question for the team",
   csr_took_over: "A person took over",
+  new_lead_no_texts: "New lead: no auto texts (reach out)",
+  lead_resubmitted: "Sent another lead form",
+  st_excluded: "ServiceTitan: no auto texts",
 };
 
 export function handoffLabel(reason: string | null): string {

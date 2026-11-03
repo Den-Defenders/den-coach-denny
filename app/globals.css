@@ -488,6 +488,13 @@ a { color: inherit; }
 .inbox-booking-check { color: #7a5300; font-weight: 700; }
 .inbox-booking-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .inbox-owner-links { margin-top: 14px; }
+/* Step 5: lead form + drip card */
+.inbox-lead { border: 1px solid #c9d6f2; background: #f5f8fe; color: #1d2f55; border-radius: 12px; padding: 10px 12px; font-size: 14px; display: grid; gap: 6px; }
+.inbox-lead-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; }
+.inbox-lead-head span { color: var(--muted); font-size: 12.5px; }
+.inbox-lead ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 3px 12px; }
+.inbox-lead li { overflow-wrap: anywhere; }
+.inbox-lead-drip { font-weight: 700; }
 @media (max-width: 860px) {
   .inbox { grid-template-columns: 1fr; }
   .inbox.has-thread .inbox-list { display: none; }

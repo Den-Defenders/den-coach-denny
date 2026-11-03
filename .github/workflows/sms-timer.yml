@@ -1,0 +1,30 @@
+# Den Coach Denny texting timer (build step 5).
+# Every 15 minutes, asks Denny to send any drip texts that are due.
+# GitHub may start a scheduled run 5-20 minutes late; that's fine for the drip.
+# Needs the repository secret DENNY_TIMER_SECRET (same value as Vercel's SMS_TIMER_SECRET).
+name: Texting timer
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: sms-timer
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Run due drip texts
+        env:
+          TIMER_SECRET: ${{ secrets.DENNY_TIMER_SECRET }}
+        run: |
+          if [ -z "$TIMER_SECRET" ]; then echo "DENNY_TIMER_SECRET is not set"; exit 1; fi
+          curl -sS --fail-with-body --max-time 90 -X POST \
+            -H "Authorization: Bearer $TIMER_SECRET" \
+            https://den-coach-denny.vercel.app/api/sms/timer
