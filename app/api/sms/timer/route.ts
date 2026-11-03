@@ -1,6 +1,6 @@
 /**
  * /api/sms/timer — the texting timer (build step 5). Sends every drip text
- * that's due. Called every 15 minutes by GitHub Actions
+ * and AI follow-up that's due. Called every 15 minutes by GitHub Actions
  * (.github/workflows/sms-timer.yml) with "Authorization: Bearer <SMS_TIMER_SECRET>".
  *
  * Public in proxy.ts (no login); rejects any request without the secret.
@@ -10,6 +10,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { runDueDrips } from "@/lib/sms/drip";
+import { runDueFollowUps } from "@/lib/sms/followup";
 import { smsDatabaseConfigured } from "@/lib/sms/store";
 
 export const runtime = "nodejs";
@@ -33,8 +34,9 @@ async function run(request: Request) {
   if (!authorized(request)) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401, headers: NO_STORE });
   if (!smsDatabaseConfigured()) return NextResponse.json({ ok: false, error: "Texting database is not configured." }, { status: 503, headers: NO_STORE });
   try {
-    const drips = await runDueDrips({ budgetMs: 45_000 });
-    return NextResponse.json({ ok: true, drips }, { headers: NO_STORE });
+    const drips = await runDueDrips({ budgetMs: 25_000 });
+    const followUps = await runDueFollowUps({ budgetMs: 25_000 });
+    return NextResponse.json({ ok: true, drips, followUps }, { headers: NO_STORE });
   } catch (error) {
     console.error("SMS timer failed:", error instanceof Error ? error.message : error);
     return NextResponse.json({ ok: false, error: "Timer run failed." }, { status: 500, headers: NO_STORE });

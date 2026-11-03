@@ -62,6 +62,8 @@ import {
   type SlotCheck,
 } from "@/lib/sms/booking";
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
+import { maybeSendHoldText } from "@/lib/sms/inbox";
+import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
 import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
 import {
@@ -1047,6 +1049,17 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     const state = await conversationState(phone);
     if (state.botStatus === "paused") return skip(phone, `handed_off:${state.handoffReason || "team"}`, inboundId);
     const contact = await ensureContact(phone);
+
+    // Step 5 (Steven, 2026-11-02): some ServiceTitan tags mean a person answers this customer,
+    // even when they text us first. A failed check never blocks the AI.
+    const st = await stCheckFor(phone, smsNow()).catch(() => null);
+    if (st && !st.bypass && st.check.ok && st.check.csrOnly) {
+      const summary = `${stCheckSummary(st.check)}. This customer's ServiceTitan tag means a person answers them, not the AI.`;
+      await setHandoff(phone, "st_csr_only", summary, smsNow());
+      await postHandoffToSlack(phone, "st_csr_only", summary, state.customerNotes);
+      await maybeSendHoldText(phone, contact.timeZone, smsNow());
+      return skip(phone, "st_csr_only", inboundId);
+    }
     if (!withinSendingHours("reply", localTime(smsNow(), contact.timeZone))) return skip(phone, "outside_reply_hours", inboundId);
     const capHit = await checkCaps(phone, "reply");
     if (capHit) return skip(phone, capHit.reason, inboundId);
@@ -1084,4 +1097,73 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     await audit({ phone, action: "bot_error", reason: message.slice(0, 120), detail: { inboundId }, actor: "denny-ai" });
     return { status: "error", message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Step 5: AI follow-ups when the AI is left on read (lib/sms/followup.ts sends them)
+// ---------------------------------------------------------------------------
+
+export type FollowUpInput = {
+  thread: ThreadMessage[];
+  notes: Record<string, string>;
+  now: Date;
+  /** 1 = first follow-up since their last text. */
+  number: number;
+  daysSinceLast: number;
+  /** They never answered any text (the sheet drip ran out). */
+  neverReplied: boolean;
+};
+
+function followUpInstruction(input: FollowUpInput): string {
+  return [
+    `FOLLOW-UP TEXT. There is no new message from the customer: they haven't answered our last text, sent ${input.daysSinceLast} day${input.daysSinceLast === 1 ? "" : "s"} ago. This is automatic follow-up number ${input.number}.`,
+    "Write ONE short follow-up text (under 300 characters) that:",
+    "- reads naturally after this thread and picks up where it left off (what they told us, the product, our last question);",
+    "- adds one new useful thing: a benefit tied to what they said, the free in-home consultation where we measure and quote on the spot, the warranty, or an offer to check real open times or send installed photos;",
+    "- is different from every earlier text in the thread: no reused sentences, openers or questions;",
+    "- ends with ONE easy question;",
+    "- never guilts or pressures them: no \"just checking in\", \"following up\", \"circling back\", \"haven't heard from you\" or \"last chance\";",
+    "- never mentions discounts, the $400 offer or financing terms unless they asked about them earlier in the thread;",
+    "- never says booked, scheduled or confirmed, never names an open time or an install timeline, never says photos are attached.",
+    input.neverReplied
+      ? "They have never replied to any of our texts, so keep it very light and offer to close their request if the timing isn't right."
+      : "",
+    "Reply with only the text message.",
+  ].filter(Boolean).join("\n");
+}
+
+/** The AI writes one unique follow-up. Null when it can't write a safe one (nothing is sent). */
+export async function composeFollowUp(input: FollowUpInput): Promise<{ text: string; model: string } | null> {
+  const known: KnownAboutCustomer = {
+    notes: input.notes,
+    priceAlreadyGiven: priceAlreadyGiven(input.thread),
+    inclusionsAlreadyGiven: inclusionsAlreadyGiven(input.thread),
+    linksSent: linksSent(input.thread),
+  };
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: "system", content: smsBotSystemPrompt(todayPacific(input.now), known) },
+  ];
+  for (const m of input.thread) {
+    const content = m.body.trim();
+    if (content) messages.push({ role: m.direction === "inbound" ? "user" : "assistant", content });
+  }
+  messages.push({ role: "system", content: followUpInstruction(input) });
+
+  const model = botModel();
+  const message = await complete({ model, messages, temperature: 0.8, max_tokens: 220 });
+  let text = cleanSmsText(String(message?.content || ""));
+  if (claimsBooked(text)) text = withoutBookingClaim(text);
+  if (claimsPhotos(text)) return null;
+  if (/\b(checking in|following up|circling back|haven't heard|last chance)\b/i.test(text)) return null;
+  if (text.length < 20 || !/\?\s*$/.test(text)) return null;
+  // Never send something that mostly repeats an earlier text of ours.
+  const mine = wordSet(text);
+  for (const m of input.thread) {
+    if (m.direction !== "outbound") continue;
+    const theirs = wordSet(m.body);
+    let same = 0;
+    for (const w of mine) if (theirs.has(w)) same++;
+    if (mine.size >= 4 && same / Math.min(mine.size, Math.max(theirs.size, 1)) >= 0.75) return null;
+  }
+  return { text: text.charAt(0).toUpperCase() + text.slice(1), model };
 }

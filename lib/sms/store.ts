@@ -127,6 +127,9 @@ async function createTables(sql: Sql) {
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS st_checked_at TIMESTAMPTZ`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS st_test_bypass BOOLEAN NOT NULL DEFAULT false`;
   await sql`CREATE INDEX IF NOT EXISTS sms_conversations_drip_due ON sms_conversations (drip_next_at) WHERE drip_status = 'active'`;
+  // Step 5 PR 3: AI follow-ups when the AI is left on read ("Stop auto texts" turns them off for good).
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS followups_off BOOLEAN NOT NULL DEFAULT false`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS followup_lock_until TIMESTAMPTZ`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),

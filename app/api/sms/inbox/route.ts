@@ -16,13 +16,14 @@
  *   POST {action:"assign", phone, to}   -> owners/managers give the customer to a team member (email)
  *   POST {action:"mark_booked", phone}  -> "Booked in ServiceTitan" (step 4a): clears the "📅 Ready to book"
  *                                          flag; an unowned customer becomes the booker's
- *   POST {action:"stop_drip", phone}    -> step 5: stop this lead's drip for good
+ *   POST {action:"stop_drip", phone}    -> step 5 "Stop auto texts": no more drip texts or AI follow-ups, for good
  */
 import { NextResponse } from "next/server";
 import { canUseTextingInbox, type DennyAccess } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { bookingFrom, bookingLines, shortTimeWords } from "@/lib/sms/booking";
 import { dripLabel, stopDrip } from "@/lib/sms/drip";
+import { followUpLabel, followUpPlanFor, stopFollowUps } from "@/lib/sms/followup";
 import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
 import { formatPhone, normalizePhone } from "@/lib/sms/rules";
@@ -115,6 +116,7 @@ export async function GET(request: Request) {
         bookingDoneAt: thread.bookingDoneAt,
       }, now);
       const team = await inboxTeam();
+      const followUp = thread.lead.at ? await followUpPlanFor(phone) : null;
       return json({
         thread: {
           ...thread,
@@ -138,6 +140,9 @@ export async function GET(request: Request) {
                 dripStatus: thread.lead.drip.status,
                 dripLabel: dripLabel(thread.lead.drip, thread.timeZone),
                 stCheck: thread.lead.stCheck ? stCheckSummary(thread.lead.stCheck as StCheck) : null,
+                followUp: followUp ? followUpLabel(followUp, thread.timeZone) : "",
+                followUpsOff: Boolean(followUp && "none" in followUp && followUp.none.startsWith("Auto texts stopped")),
+                canStop: thread.lead.drip.status === "active" || Boolean(followUp && !("none" in followUp)),
               }
             : null,
           handoffLabel: thread.handoffReason
@@ -206,8 +211,10 @@ export async function POST(request: Request) {
         return json({ ...result, message: "Sent. The AI is paused for this number." });
       }
       case "stop_drip": {
-        const stopped = await stopDrip(phone, `stopped by ${who}`, who, now);
-        return json({ ok: stopped, message: stopped ? "Drip stopped for this customer. No more automated texts." : "This customer has no running drip." });
+        const dripStopped = await stopDrip(phone, `stopped by ${who}`, who, now);
+        const followUpsStopped = await stopFollowUps(phone, who);
+        const any = dripStopped || followUpsStopped;
+        return json({ ok: any, message: any ? "Auto texts stopped for this customer: no more drip texts or AI follow-ups." : "This customer has no auto texts running." });
       }
       case "take_over": {
         await takeOverConversation(phone, who, now);

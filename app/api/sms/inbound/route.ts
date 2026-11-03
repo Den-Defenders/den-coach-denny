@@ -14,6 +14,7 @@
  */
 import { postCustomerWaitingAlert, slackAlertsEnabled } from "@/lib/sms/alerts";
 import { scheduleBotReply } from "@/lib/sms/bot";
+import { stopDrip } from "@/lib/sms/drip";
 import { maybeSendHoldText } from "@/lib/sms/inbox";
 import { DENNY_ONLY_OPT_OUT_SOURCES, classifyKeyword, normalizePhone } from "@/lib/sms/rules";
 import { sendOptInConfirmation, sendOptOutConfirmation, smsNow } from "@/lib/sms/send";
@@ -100,6 +101,7 @@ export async function POST(request: Request) {
       if (optOut && keyword.handledByTwilio) await markOptOutKnownToTwilio(from);
       await recordOptOut(from, keyword.handledByTwilio ? "keyword" : "keyword_extra", keyword.matched, now);
       await audit({ phone: from, action: "opt_out", reason: keyword.handledByTwilio ? "keyword" : "keyword_extra", detail: { keyword: keyword.matched, sid }, actor: "customer" });
+      await stopDrip(from, "opted out", "customer", now);
       if (!keyword.handledByTwilio) {
         const confirmation = await sendOptOutConfirmation(from);
         if (!confirmation.ok) console.warn("SMS opt-out confirmation not sent:", confirmation.reason);
@@ -121,6 +123,8 @@ export async function POST(request: Request) {
     } else {
       const added = await addConsent(from, "conversational", "inbound_text", body.slice(0, 200), now);
       if (added) await audit({ phone: from, action: "consent_added", reason: "inbound_text", detail: { sid }, actor: "customer" });
+      // Step 5: a lead who replies is done with the sheet drip; the AI takes over.
+      if (saved) await stopDrip(from, "they replied (AI took over)", "customer", now);
       // AI reply, after Twilio has its empty TwiML. All send rules still apply inside.
       if (messageId) scheduleBotReply(from, messageId);
       // Step 3: a person took this number over, so the AI won't answer: hold text + team alert.
