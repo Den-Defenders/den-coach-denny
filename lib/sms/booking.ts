@@ -153,6 +153,69 @@ export function hasTwoOrMoreDoors(doorCount: string): boolean {
   return /\b([2-9]|\d{2,}|two|three|four|five|six|double|doubles|french|pair|both)\b/i.test(doorCount || "");
 }
 
+// --- Session 6: product / door count only from the customer's own words ---------------
+// On Nov 4 (Melanie's test lead) the AI answered "Sure" by guessing "security door
+// (Centurion)" + "single" (copied from a tool example); code saved both as notes and the AI
+// quoted a single-door price nobody asked for. These checks make sure a product or door
+// count only counts when the customer (their texts or their lead form) actually said it.
+
+const PRODUCT_WORDS = new Set([
+  "door", "doors", "slider", "sliders", "sliding", "patio", "screen", "screens", "window", "windows",
+  "centurion", "artisan", "woodhaven", "vistaluxe", "storm", "french", "front", "entry", "back", "side",
+  "garage", "clearbreeze", "gate", "single", "double", "doubles",
+]);
+/** Count words, normalized so "one door" backs up "single" and "pair" backs up "double". */
+const COUNT_WORDS: Record<string, string> = {
+  single: "1", one: "1", "1": "1",
+  double: "2", doubles: "2", french: "2", pair: "2", both: "2", two: "2", "2": "2",
+  three: "3", "3": "3", four: "4", "4": "4", five: "5", "5": "5", six: "6", "6": "6",
+};
+
+function words(text: string): string[] {
+  return (text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+}
+
+/**
+ * True when every product word in the AI's value comes from what the customer wrote
+ * ("front door" from "my front door" is fine; "security door (Centurion)" from "I need a door" is not).
+ */
+export function customerSaidProduct(value: string, customerWords: string): boolean {
+  const said = new Set(words(customerWords));
+  const used = words(value).filter((w) => PRODUCT_WORDS.has(w));
+  return used.length > 0 && used.every((w) => said.has(w) || (w === "doors" && said.has("door")) || (w === "door" && said.has("doors")));
+}
+
+/** True when every count in the AI's door count matches a count the customer wrote. */
+export function customerSaidDoorCount(value: string, customerWords: string): boolean {
+  const said = new Set(words(customerWords).map((w) => COUNT_WORDS[w]).filter(Boolean));
+  const big = (t: string): string[] => t.match(/\b\d{2,}\b/g) || [];
+  const used = words(value).map((w) => COUNT_WORDS[w]).filter(Boolean);
+  if (!used.length) return big(value).length > 0 && big(value).every((n) => big(customerWords).includes(n));
+  return used.every((n) => said.has(n));
+}
+
+/** Front door / French doors / slider / windows: enough to tell the team what the visit is for. */
+export function doorTypeKnown(text: string): boolean {
+  return /\b(front|entry|single|double|doubles|french|slider|sliders|sliding|windows?|vistaluxe|storm)\b/i.test(text || "");
+}
+
+/** The door-type question the AI asks before request_booking (no price in it). */
+export const DOOR_TYPE_QUESTION = "Which door is this for: a front door, French doors, or a sliding patio door?";
+
+/** We already asked them which door type (so a skipped answer doesn't block the booking). */
+export function askedDoorType(ourTexts: string[]): boolean {
+  return ourTexts.some((t) => /\?/.test(t) && /french doors?/i.test(t) && /slid(ing|er)/i.test(t));
+}
+
+/** "95610 (from their form, not checked yet)" -> "95610". */
+export function zipFromNotes(notes: Record<string, string>): string {
+  for (const key of ["zip", "form_zip"]) {
+    const m = /\b(\d{5})\b/.exec(notes[key] || "");
+    if (m) return m[1];
+  }
+  return "";
+}
+
 export function partOfDay(value: unknown): Pick<AvailabilityRequest, "earliestStartTime" | "latestStartTime"> {
   if (value === "morning") return { latestStartTime: "11:00" };
   if (value === "afternoon") return { earliestStartTime: "12:00" };
@@ -245,7 +308,7 @@ export function bookingLines(b: BookingRequest, phoneLabel: string, notes: Recor
     `Name: ${b.name || "not given"}`,
     `Phone: ${phoneLabel}`,
     `Address: ${[b.address || "not given", b.zip && !(b.address || "").includes(b.zip) ? b.zip : ""].filter(Boolean).join(", ")}${b.area ? ` (${b.area})` : ""}`,
-    `Project: ${[b.product, b.doorCount].filter(Boolean).join(", ") || "not given"}`,
+    `Project: ${[b.product, b.doorCount].filter(Boolean).join(", ") || "customer didn't say (ask on the call)"}`,
     otherNotes ? `Notes: ${otherNotes}`.slice(0, 500) : "",
     b.lastText ? `Their last text: "${b.lastText.slice(0, 200)}" (name/address may be here)` : "",
     `Time check: ${slotCheckWords(b.slotCheck)}`,

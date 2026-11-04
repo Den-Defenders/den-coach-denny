@@ -47,6 +47,12 @@ import {
   claimsBooked,
   datesArg,
   hasTwoOrMoreDoors,
+  DOOR_TYPE_QUESTION,
+  askedDoorType,
+  customerSaidDoorCount,
+  customerSaidProduct,
+  doorTypeKnown,
+  zipFromNotes,
   isSlow,
   lookupOpenTimes,
   lookupsToday,
@@ -230,8 +236,8 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         properties: {
           first_name: { type: "string" },
           need: { type: "string", description: "What got them looking / what matters most (airflow, security, look, pets, a break-in...)" },
-          product: { type: "string", description: "Security door, slider, window screens, VistaLuxe; style if said (full-view, decorative, wood)" },
-          door_count: { type: "string", description: "Single, double, how many doors or windows" },
+          product: { type: "string", description: "Only the door or product the customer named, in their words (for example \"front door\", \"sliding patio door\"). Leave empty if they didn't say." },
+          door_count: { type: "string", description: "Only if the customer said how many (single, double, two doors...). Leave empty if they didn't say." },
           style: { type: "string", description: "Color or look they want" },
           concerns: { type: "string", description: "Worries or objections they raised (price, HOA, timing...)" },
           timing: { type: "string" },
@@ -263,13 +269,13 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "find_open_times",
       description:
-        "Look up REAL open in-home consultation times near their ZIP (live calendar). Call when they want a consultation and you know the product and single/double (or how many). Offer only the times this returns.",
+        "Look up REAL open in-home consultation times near their ZIP (live calendar). Call as soon as they want a consultation or say yes to checking times. Only the ZIP is needed (their form ZIP counts); don't ask about the product first. Offer only the times this returns.",
       parameters: {
         type: "object",
         properties: {
-          zip: { type: "string", pattern: "^\\d{5}$" },
-          product: { type: "string", description: "What they want, e.g. 'security door (Centurion)', 'sliding security door', 'window screens'" },
-          door_count: { type: "string", description: "Single, double, or how many doors or windows" },
+          zip: { type: "string", pattern: "^\\d{5}$", description: "The home's ZIP. Leave empty to use the ZIP from their form." },
+          product: { type: "string", description: "Only if the customer named it, in their words. Never guess; leave empty otherwise." },
+          door_count: { type: "string", description: "Only if the customer said how many. Never guess; leave empty otherwise." },
           weekdays: {
             type: "array",
             items: { type: "string", enum: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] },
@@ -278,7 +284,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           part_of_day: { type: "string", enum: ["morning", "afternoon", "any"] },
           dates: { type: "array", items: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, description: "Exact dates they asked for (YYYY-MM-DD)" },
         },
-        required: ["zip", "product", "door_count"],
+        required: [],
       },
     },
   },
@@ -607,6 +613,19 @@ export async function composeBotReply(
 ): Promise<ComposeResult> {
   const { thread } = input;
   const notes = { ...input.notes };
+  // What the customer actually wrote (their texts + "interested in" on their lead form).
+  // A product or door count only counts when it comes from here (Session 6, Melanie's Nov 4 lead).
+  const formInterest = /interested in: ([^;]+)/i.exec(notes.lead_form || "")?.[1] || "";
+  const customerWords = [...thread.filter((m) => m.direction === "inbound").map((m) => m.body), formInterest].join("\n");
+  const ourTexts = thread.filter((m) => m.direction === "outbound").map((m) => m.body);
+  /** Keep only the product / door count the customer said; log what was dropped. */
+  const onlyCustomerSaid = async (fresh: Record<string, string>, source: string): Promise<string[]> => {
+    const dropped: string[] = [];
+    if (fresh.product && !customerSaidProduct(fresh.product, customerWords)) { dropped.push("product"); delete fresh.product; }
+    if (fresh.door_count && !customerSaidDoorCount(fresh.door_count, customerWords)) { dropped.push("door_count"); delete fresh.door_count; }
+    if (dropped.length) await fx.log("bot_note_not_said", dropped.join(","), { source });
+    return dropped;
+  };
   const offered = openTimesFrom(notes);
   const picked = chosenTimeFrom(notes);
   const known: KnownAboutCustomer = {
@@ -650,23 +669,30 @@ export async function composeBotReply(
 
   // --- Step 4a: real open times -------------------------------------------------
   const findOpenTimes = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
-    const zip = cleanArg(args.zip, 5);
+    // Only the ZIP is needed; the ZIP on their lead form counts.
+    const zip = /^\d{5}$/.test(cleanArg(args.zip, 5)) ? cleanArg(args.zip, 5) : zipFromNotes(notes);
     if (!/^\d{5}$/.test(zip)) return { ok: false, error: "NEED_ZIP", message: "Ask for the 5-digit ZIP of the home first." };
     const area = await saveZip(zip);
     if (area.result === "NOT_SERVED" || area.result === "NEEDS_TEAM_CHECK") {
       return { ok: false, zipResult: area.result, message: ZIP_TOOL_ANSWER[area.result] };
     }
-    const product = cleanArg(args.product, 120);
-    const doorCount = cleanArg(args.door_count, 80);
-    if (!product || !doorCount) {
-      return { ok: false, error: "MISSING", message: "First find out the product and single or double (or how many). Ask only for the one that's missing." };
-    }
-    if (area.result === "IN_AREA_NV_TWO_DOOR_MINIMUM" && !hasTwoOrMoreDoors(doorCount)) {
-      return { ok: false, error: "NEVADA_TWO_DOORS", message: "Nevada projects need at least two doors. Follow the Nevada rule; don't offer times." };
-    }
+    // Product and door count are optional and never guessed: the AI's own arguments only
+    // count (and only get saved) when the customer said them.
     const fresh: Record<string, string> = {};
-    if (!notes.product) fresh.product = product;
-    if (!notes.door_count) fresh.door_count = doorCount;
+    const said: Record<string, string> = { product: cleanArg(args.product, 120), door_count: cleanArg(args.door_count, 80) };
+    for (const k of Object.keys(said)) if (!said[k]) delete said[k];
+    await onlyCustomerSaid(said, "find_open_times");
+    for (const k of Object.keys(said)) if (!notes[k]) fresh[k] = said[k];
+    if (area.result === "IN_AREA_NV_TWO_DOOR_MINIMUM") {
+      // Their newest count wins ("two doors" earlier, "just the one" now).
+      const doorCount = said.door_count || notes.door_count || "";
+      if (!doorCount) {
+        return { ok: false, error: "NEED_DOOR_COUNT", message: "Nevada projects need at least two doors. Ask how many doors they want done (one short question, no price) before offering times." };
+      }
+      if (!hasTwoOrMoreDoors(doorCount)) {
+        return { ok: false, error: "NEVADA_TWO_DOORS", message: "Nevada projects need at least two doors. Follow the Nevada rule; don't offer times." };
+      }
+    }
 
     const today = pacificDate(input.now);
     const used = lookupsToday(notes, today);
@@ -710,8 +736,7 @@ export async function composeBotReply(
     return {
       ok: true,
       times: times.map((t) => ({ option: t.n, say: timeWords(t) })),
-      mentionPriceFirst: !known.priceAlreadyGiven,
-      message: `Offer these times, each on its own line, in these words, then ask which works best.${known.priceAlreadyGiven ? "" : " Price hasn't come up yet: start with the price range in one short line."} Never offer any other time and never say a time is held or booked.`,
+      message: "Offer these times, each on its own line, in these words, then ask which works best. No price unless they asked for one. Never offer any other time and never say a time is held or booked.",
     };
   };
 
@@ -725,17 +750,25 @@ export async function composeBotReply(
     notes[CHOSEN_TIME_KEY] = JSON.stringify(pick);
     await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
     await fx.log("bot_time_chosen", pick.date, { window: pick.window });
+    const needType = !doorTypeKnown(`${notes.product || ""} ${notes.door_count || ""}`) && !askedDoorType(ourTexts);
     return {
       ok: true,
       picked: timeWords(pick),
-      message: "Saved. Unless you already have both, ask in one short text for their full name and the street address of the home. If you have both, call request_booking now. Don't say it's passed to the team yet (that's request_booking's job), and don't say anything is booked, scheduled or confirmed.",
+      message: needType
+        ? `Saved. We don't know which door this is for yet. In one short text ask exactly: "${DOOR_TYPE_QUESTION}" No price unless they asked. After they answer, ask for their full name and the street address of the home, then call request_booking. Don't say it's passed to the team yet, and don't say anything is booked, scheduled or confirmed.`
+        : "Saved. Unless you already have both, ask in one short text for their full name and the street address of the home. If you have both, call request_booking now. Don't say it's passed to the team yet (that's request_booking's job), and don't say anything is booked, scheduled or confirmed.",
     };
   };
 
-  const requestBooking = async (args: Record<string, unknown>, lastText: string | null = null): Promise<Record<string, unknown>> => {
+  const requestBooking = async (args: Record<string, unknown>, lastText: string | null = null, safetyNet = false): Promise<Record<string, unknown>> => {
     const open = openTimesFrom(notes);
     const chosen = chosenTimeFrom(notes);
     if (!open || !chosen) return { ok: false, error: "NO_TIME_PICKED", message: "Ask which of the offered times works, then call choose_time." };
+    // Ask the door type first (once). If they skipped the question, the team asks on the call.
+    if (!safetyNet && !doorTypeKnown(`${notes.product || ""} ${notes.door_count || ""}`) && !askedDoorType(ourTexts)) {
+      await fx.log("bot_door_type_first", "asked", {}, "system");
+      return { ok: false, error: "NEED_DOOR_TYPE", message: `Before passing it to the team, ask in one short text exactly: "${DOOR_TYPE_QUESTION}" No price unless they asked. Don't say it's passed to the team yet.` };
+    }
     const name = cleanArg(args.full_name, 80) || (notes.first_name || "");
     const address = cleanArg(args.street_address, 160);
     let slotCheck: SlotCheck = "zip_only";
@@ -904,9 +937,13 @@ export async function composeBotReply(
         for (const [k, v] of Object.entries(args)) {
           if (typeof v === "string" && v.trim() && AI_NOTE_FIELDS.has(k)) fresh[k] = v.trim();
         }
-        await fx.saveNotes(fresh);
+        // Product / door count only when the customer said them (never the AI's guess).
+        const dropped = await onlyCustomerSaid(fresh, "save_customer_notes");
+        if (Object.keys(fresh).length) await fx.saveNotes(fresh);
         Object.assign(notes, fresh);
-        answer({ ok: true, message: "Saved. Now write your reply." });
+        answer(dropped.length
+          ? { ok: true, notSaved: dropped, message: `Saved, except ${dropped.join(" and ")}: the customer didn't say that. Never guess it; ask if you need it. Now write your reply.` }
+          : { ok: true, message: "Saved. Now write your reply." });
       } else if (name === "record_outcome") {
         const outcome = args.outcome === "not_interested" ? "not_interested" : args.outcome === "price_accepted" ? "price_accepted" : null;
         if (outcome) await fx.outcome(outcome);
@@ -944,7 +981,7 @@ export async function composeBotReply(
     if (chosenTimeFrom(notes)) {
       // They picked a real time: make the full "📅 Ready to book" request from code (name/address are likely in their last text).
       await fx.log("bot_booking_by_code", "skipped_tool", {}, "system");
-      const made = await requestBooking({}, lastText || null);
+      const made = await requestBooking({}, lastText || null, true);
       if (!made.ok) {
         // The time filled up while we were checking: say that instead of the AI's goodbye.
         reply = "Sorry, that time just filled up. Which of the other times works for you?";
