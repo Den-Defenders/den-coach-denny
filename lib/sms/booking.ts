@@ -185,9 +185,31 @@ export function customerSaidProduct(value: string, customerWords: string): boole
   return used.length > 0 && used.every((w) => said.has(w) || (w === "doors" && said.has("door")) || (w === "door" && said.has("doors")));
 }
 
+/**
+ * Door counts the customer actually wrote. "single", "double" and "French" count anywhere;
+ * a number word ("one", "2", "both", "pair") only next to a door word ("two doors",
+ * "one slider") or as the whole text ("2", "just one"). Simulator test 2026-11-04:
+ * "The first one works" (picking a time) was read as "one door" = single.
+ */
+function customerCounts(customerWords: string): Set<string> {
+  const said = new Set<string>();
+  const NUM = "one|two|three|four|five|six|[1-9]|pair|both";
+  for (const line of (customerWords || "").toLowerCase().split("\n")) {
+    for (const m of line.matchAll(/\b(single|double|doubles|french)\b/g)) said.add(COUNT_WORDS[m[1]]);
+    const nearDoor = new RegExp(`\\b(${NUM})\\b(?:\\s+[a-z]+){0,2}?\\s+(doors?|sliders?|windows?|screens?|entr(?:y|ies)|openings?)\\b`, "g");
+    for (const m of line.matchAll(nearDoor)) said.add(COUNT_WORDS[m[1]]);
+    const alone = new RegExp(`^\\s*(?:just|only)?\\s*(?:the\\s+)?(${NUM})\\s*(?:of them)?\\s*[.!]*\\s*$`);
+    const a = alone.exec(line);
+    if (a) said.add(COUNT_WORDS[a[1]]);
+    if (/\b(just|only)\s+(the\s+)?one\b/.test(line)) said.add("1");
+  }
+  said.delete(undefined as unknown as string);
+  return said;
+}
+
 /** True when every count in the AI's door count matches a count the customer wrote. */
 export function customerSaidDoorCount(value: string, customerWords: string): boolean {
-  const said = new Set(words(customerWords).map((w) => COUNT_WORDS[w]).filter(Boolean));
+  const said = customerCounts(customerWords);
   const big = (t: string): string[] => t.match(/\b\d{2,}\b/g) || [];
   const used = words(value).map((w) => COUNT_WORDS[w]).filter(Boolean);
   if (!used.length) return big(value).length > 0 && big(value).every((n) => big(customerWords).includes(n));
