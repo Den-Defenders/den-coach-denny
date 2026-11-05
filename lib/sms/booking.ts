@@ -221,6 +221,20 @@ export function doorTypeKnown(text: string): boolean {
   return /\b(front|entry|single|double|doubles|french|slider|sliders|sliding|windows?|vistaluxe|storm)\b/i.test(text || "");
 }
 
+/**
+ * The door type in the customer's own texts (newest first), e.g. "front door", "French doors",
+ * "sliding patio door". Used when the AI didn't save their answer (Simulator test 2026-11-04 4:35 PM:
+ * "Front door" was answered but the card said "customer didn't say").
+ */
+export function doorTypeFromCustomer(customerTexts: string[]): string {
+  const PHRASE = /\b(sliding patio doors?|patio sliders?|sliding (?:glass |screen |security )?doors?|sliders?|french doors?|double (?:front |entry )?doors?|single (?:front |entry )?door|front doors?|entry doors?|side doors?|back doors?|window screens?|windows|vistaluxe|storm doors?)\b/i;
+  for (let i = customerTexts.length - 1; i >= 0; i--) {
+    const m = PHRASE.exec(customerTexts[i] || "");
+    if (m) return m[1].toLowerCase().replace(/\bfrench\b/, "French").replace(/\bvistaluxe\b/, "VistaLuxe");
+  }
+  return "";
+}
+
 /** The door-type question the AI asks before request_booking (no price in it). */
 export const DOOR_TYPE_QUESTION = "Which door is this for: a front door, French doors, or a sliding patio door?";
 
