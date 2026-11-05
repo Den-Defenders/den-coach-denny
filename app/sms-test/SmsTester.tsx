@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import HatchOptOuts from "./HatchOptOuts";
 
 type Settings = {
   sendingEnabled: boolean;
@@ -253,6 +254,8 @@ export default function SmsTester() {
           </div>
         )}
       </section>
+
+      <HatchOptOuts />
 
       <section className="surface team-list">
         <h2>Needs CSR (AI paused for these numbers)</h2>
