@@ -6,6 +6,11 @@
  * GET also returns the newest Zapier leads (/api/leads, step 5) with every field.
  *   POST {action:"reset_lead_test", phone, skipServiceTitan} -> let the next lead for this test
  *        number start a fresh drip (texts stay); optionally skip the ServiceTitan check for it
+ * Session 6 PR 2 (Hatch opt-outs, lib/sms/hatchOptOuts.ts):
+ *   POST {action:"hatch_scan", start, end} -> scan one window of stored Hatch texts for STOP/START
+ *   POST {action:"hatch_summary"}          -> counts + masked samples (no full numbers)
+ *   POST {action:"hatch_import"}           -> add the STOP numbers to Denny's opt-out list
+ *   POST {action:"hatch_clear_scan"}       -> forget the scan results (the opt-out list stays)
  */
 import { NextResponse } from "next/server";
 import { getCurrentAccess } from "@/lib/currentAccess";
@@ -15,10 +20,13 @@ import { consentSources, leadsMode, leadsSecretConfigured, recentLeads, resetLea
 import { formatPhone, normalizePhone, type SendKind } from "@/lib/sms/rules";
 import { allowList, promoTextsEnabled, sendSms, sendingEnabled, smsLimits } from "@/lib/sms/send";
 import { audit, recentActivity, resumeBot, smsDatabaseConfigured } from "@/lib/sms/store";
+import { clearHatchScan, hatchOptOutSummary, importHatchOptOuts, scanHatchWindow } from "@/lib/sms/hatchOptOuts";
 import { messagingConfig, webhookBaseUrl } from "@/lib/sms/twilio";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// A Hatch scan window runs about 13 read-only searches.
+export const maxDuration = 120;
 
 const NO_STORE = { "Cache-Control": "private, no-store" };
 
@@ -92,6 +100,29 @@ export async function POST(request: Request) {
     } catch (error) {
       console.error("SMS lead test reset failed:", error);
       return NextResponse.json({ ok: false, message: "Could not reset that number." }, { status: 500, headers: NO_STORE });
+    }
+  }
+
+  if (typeof body.action === "string" && body.action.startsWith("hatch_")) {
+    try {
+      if (body.action === "hatch_scan") {
+        const result = await scanHatchWindow(String(body.start || ""), String(body.end || ""));
+        return NextResponse.json({ ok: true, result }, { headers: NO_STORE });
+      }
+      if (body.action === "hatch_summary") return NextResponse.json({ ok: true, summary: await hatchOptOutSummary() }, { headers: NO_STORE });
+      if (body.action === "hatch_import") {
+        const { added } = await importHatchOptOuts(access.email || "owner", new Date());
+        return NextResponse.json({ ok: true, added, summary: await hatchOptOutSummary(), message: `Added ${added} Hatch STOP number${added === 1 ? "" : "s"} to Denny's opt-out list.` }, { headers: NO_STORE });
+      }
+      if (body.action === "hatch_clear_scan") {
+        await clearHatchScan();
+        return NextResponse.json({ ok: true, summary: await hatchOptOutSummary() }, { headers: NO_STORE });
+      }
+      return NextResponse.json({ ok: false, message: "Unknown action." }, { status: 400, headers: NO_STORE });
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      console.error("Hatch opt-out action failed:", why);
+      return NextResponse.json({ ok: false, message: `Hatch step failed: ${why.slice(0, 200)}` }, { status: 500, headers: NO_STORE });
     }
   }
 

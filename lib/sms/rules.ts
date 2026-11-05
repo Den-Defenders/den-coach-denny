@@ -123,7 +123,8 @@ export const OPT_IN_CONFIRMATION =
   "Den Defenders: You're resubscribed to texts about your consultation, quote or appointment. Msg&data rates may apply. Reply HELP for help, STOP to opt out.";
 
 /** Opt-out sources Twilio doesn't know about (Twilio never blocked the number). */
-export const DENNY_ONLY_OPT_OUT_SOURCES = new Set(["keyword_extra", "ai_detected"]);
+// hatch_import: they said STOP to a Hatch number (Session 6 PR 2); Twilio never blocked them on ours.
+export const DENNY_ONLY_OPT_OUT_SOURCES = new Set(["keyword_extra", "ai_detected", "hatch_import"]);
 
 // ---------------------------------------------------------------------------
 // Sending hours and holidays

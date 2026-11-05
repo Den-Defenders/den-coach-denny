@@ -380,7 +380,7 @@ export function optOutConfirmationSent(phone: string, since: Date): Promise<bool
  */
 export async function markOptOutKnownToTwilio(phone: string) {
   const sql = await db();
-  await sql`UPDATE sms_opt_outs SET source = 'keyword' WHERE phone = ${phone} AND source IN ('keyword_extra', 'ai_detected')`;
+  await sql`UPDATE sms_opt_outs SET source = 'keyword' WHERE phone = ${phone} AND source IN ('keyword_extra', 'ai_detected', 'hatch_import')`;
 }
 
 // ---------------------------------------------------------------------------
