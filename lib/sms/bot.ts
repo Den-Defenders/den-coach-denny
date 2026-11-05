@@ -53,6 +53,7 @@ import {
   customerSaidProduct,
   doorTypeKnown,
   zipFromNotes,
+  doorTypeFromCustomer,
   isSlow,
   lookupOpenTimes,
   lookupsToday,
@@ -618,6 +619,9 @@ export async function composeBotReply(
   const formInterest = /interested in: ([^;]+)/i.exec(notes.lead_form || "")?.[1] || "";
   const customerWords = [...thread.filter((m) => m.direction === "inbound").map((m) => m.body), formInterest].join("\n");
   const ourTexts = thread.filter((m) => m.direction === "outbound").map((m) => m.body);
+  // Their door type in their own words ("Front door"), even if the AI didn't save it.
+  const saidDoorType = doorTypeFromCustomer([formInterest, ...thread.filter((m) => m.direction === "inbound").map((m) => m.body)]);
+  const doorTypeIsKnown = () => doorTypeKnown(`${notes.product || ""} ${notes.door_count || ""} ${saidDoorType}`);
   /** Keep only the product / door count the customer said; log what was dropped. */
   const onlyCustomerSaid = async (fresh: Record<string, string>, source: string): Promise<string[]> => {
     const dropped: string[] = [];
@@ -750,7 +754,7 @@ export async function composeBotReply(
     notes[CHOSEN_TIME_KEY] = JSON.stringify(pick);
     await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
     await fx.log("bot_time_chosen", pick.date, { window: pick.window });
-    const needType = !doorTypeKnown(`${notes.product || ""} ${notes.door_count || ""}`) && !askedDoorType(ourTexts);
+    const needType = !doorTypeIsKnown() && !askedDoorType(ourTexts);
     return {
       ok: true,
       picked: timeWords(pick),
@@ -765,7 +769,7 @@ export async function composeBotReply(
     const chosen = chosenTimeFrom(notes);
     if (!open || !chosen) return { ok: false, error: "NO_TIME_PICKED", message: "Ask which of the offered times works, then call choose_time." };
     // Ask the door type first (once). If they skipped the question, the team asks on the call.
-    if (!safetyNet && !doorTypeKnown(`${notes.product || ""} ${notes.door_count || ""}`) && !askedDoorType(ourTexts)) {
+    if (!safetyNet && !doorTypeIsKnown() && !askedDoorType(ourTexts)) {
       await fx.log("bot_door_type_first", "asked", {}, "system");
       return { ok: false, error: "NEED_DOOR_TYPE", message: `Before passing it to the team, ask in one short text exactly: "${DOOR_TYPE_QUESTION}" No price unless they asked. Don't say it's passed to the team yet.` };
     }
@@ -793,6 +797,11 @@ export async function composeBotReply(
     const saidOk = args.backup_option ? matchOffered(others, { option: args.backup_option }) : null;
     const backup = saidOk || others[0] || null;
     const area = checkServiceZip(open.zip);
+    if (!notes.product && saidDoorType) {
+      notes.product = saidDoorType;
+      await fx.saveNotes({ product: saidDoorType });
+      await fx.log("bot_door_type_from_text", saidDoorType, {}, "system");
+    }
     const booking: BookingRequest = {
       chosen: { date: chosen.date, weekday: chosen.weekday, window: chosen.window },
       backup: backup ? { date: backup.date, weekday: backup.weekday, window: backup.window, customerSaidOk: Boolean(saidOk) } : null,
@@ -801,7 +810,7 @@ export async function composeBotReply(
       address: address || null,
       zip: open.zip,
       area: area.city ? `${area.city}, ${area.state}` : null,
-      product: notes.product || null,
+      product: notes.product || saidDoorType || null,
       doorCount: notes.door_count || null,
       slotCheck,
       requestedAt: input.now.toISOString(),
