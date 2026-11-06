@@ -453,8 +453,10 @@ export default function TextingInbox() {
                 {thread.lead.info && (
                   <ul>
                     {([
-                      ["Source", thread.lead.info.source], ["Form", thread.lead.info.form], ["Campaign", thread.lead.info.campaign],
-                      ["Ad", thread.lead.info.ad], ["ZIP", thread.lead.info.zip], ["Email", thread.lead.info.email],
+                      ["Inquiry", thread.lead.info.inquiryType], ["Book under campaign", thread.lead.info.crmCampaign],
+                      ["Source", thread.lead.info.source], ["Platform", thread.lead.info.platform], ["Form", thread.lead.info.form],
+                      ["Campaign", thread.lead.info.campaign], ["Ad set", thread.lead.info.adSet], ["Ad", thread.lead.info.ad],
+                      ["ZIP", thread.lead.info.zip], ["Email", thread.lead.info.email],
                       ["Interested in", thread.lead.info.projectInterest], ["Best time", thread.lead.info.bestTime],
                     ] as [string, string | null | undefined][]).filter(([, v]) => v).map(([k, v]) => <li key={k}><b>{k}:</b> {v}</li>)}
                   </ul>

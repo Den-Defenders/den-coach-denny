@@ -815,6 +815,9 @@ export async function composeBotReply(
       slotCheck,
       requestedAt: input.now.toISOString(),
       lastText,
+      crmCampaign: notes._crm_campaign || null,
+      platform: notes._platform || null,
+      adSet: notes._ad_set || null,
     };
     const summary = ["The customer picked a consultation time by text. Book it in ServiceTitan, then click \"Booked in ServiceTitan\".", ...bookingLines(booking, "", notes).filter((l) => !l.startsWith("Phone:"))].join("\n");
     await fx.handOff("ready_to_book", summary, notes, false, booking);

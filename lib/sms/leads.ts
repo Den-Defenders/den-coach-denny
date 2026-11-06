@@ -64,6 +64,14 @@ export type LeadFields = {
   leadSource: string | null;
   campaignName: string | null;
   adName: string | null;
+  /** Session 6 PR 3 (Melanie's Zap, Nov 4): the ServiceTitan campaign to book under (static "Facebook Lead Form"). */
+  crmCampaignName: string | null;
+  /** Facebook or Instagram. */
+  platform: string | null;
+  adSet: string | null;
+  /** "free consultation" or "questions first", as sent. */
+  inquiryTypeAsSent: string | null;
+  inquiryType: InquiryType;
   formName: string | null;
   submittedAt: string | null;
   submittedAtAsSent: string | null;
@@ -76,18 +84,24 @@ export type LeadFields = {
   other: Record<string, string>;
 };
 
+export type InquiryType = "free_consultation" | "questions_first" | null;
+
 export type ParsedLead = { fields: LeadFields; raw: Record<string, string>; missing: string[]; warnings: string[] };
 
 /** The keys we ask Melanie to use, plus common spellings Zapier/Facebook use. Matched without case, spaces or _. */
-const ALIASES: Record<keyof Omit<LeadFields, "other" | "phone" | "submittedAt" | "smsConsent">, string[]> = {
+const ALIASES: Record<keyof Omit<LeadFields, "other" | "phone" | "submittedAt" | "smsConsent" | "inquiryType">, string[]> = {
   firstName: ["firstname", "first", "fname", "contactfirstname", "givenname"],
   lastName: ["lastname", "last", "lname", "contactlastname", "surname", "familyname"],
   phoneAsSent: ["phone", "phonenumber", "mobile", "mobilephone", "mobilenumber", "cell", "cellphone", "contactphone"],
   zip: ["zip", "zipcode", "postalcode", "postcode", "zippostalcode"],
   email: ["email", "emailaddress", "contactemail"],
-  leadSource: ["leadsource", "source", "platform"],
+  leadSource: ["leadsource", "source"],
   campaignName: ["campaignname", "campaign", "adcampaign", "adcampaignname"],
-  adName: ["adname", "ad", "adsetname", "adset", "adgroup", "adgroupname"],
+  adName: ["adname", "ad"],
+  crmCampaignName: ["crmcampaignname", "crmcampaign", "stcampaign", "stcampaignname", "servicetitancampaign"],
+  platform: ["platform", "socialplatform", "adplatform"],
+  adSet: ["adset", "adsetname", "adgroup", "adgroupname"],
+  inquiryTypeAsSent: ["inquirytype", "inquiry", "leadtype", "requesttype"],
   formName: ["formname", "form", "leadformname"],
   submittedAtAsSent: ["submittedat", "submittime", "submittedtime", "createdtime", "created", "createdat", "timestamp", "datesubmitted"],
   smsConsentAsSent: ["smsconsent", "consent", "smsoptin", "textconsent", "textoptin", "smsagree", "agreetotexts"],
@@ -193,6 +207,11 @@ export function parseLead(raw: Record<string, string>): ParsedLead {
     leadSource: clean(pick(ALIASES.leadSource), 120),
     campaignName: clean(pick(ALIASES.campaignName), 200),
     adName: clean(pick(ALIASES.adName), 200),
+    crmCampaignName: clean(pick(ALIASES.crmCampaignName), 120),
+    platform: clean(pick(ALIASES.platform), 60),
+    adSet: clean(pick(ALIASES.adSet), 200),
+    inquiryTypeAsSent: clean(pick(ALIASES.inquiryTypeAsSent), 120),
+    inquiryType: null,
     formName: clean(pick(ALIASES.formName), 200),
     submittedAtAsSent: clean(pick(ALIASES.submittedAtAsSent), 60),
     submittedAt: null,
@@ -220,6 +239,8 @@ export function parseLead(raw: Record<string, string>): ParsedLead {
   fields.submittedAt = readSubmitTime(fields.submittedAtAsSent);
   if (fields.submittedAtAsSent && !fields.submittedAt) warnings.push(`Submit time "${fields.submittedAtAsSent}" couldn't be read (we'll use the time it arrived).`);
   fields.smsConsent = readConsent(fields.smsConsentAsSent);
+  fields.inquiryType = readInquiryType(fields.inquiryTypeAsSent);
+  if (fields.inquiryTypeAsSent && !fields.inquiryType) warnings.push(`Inquiry type "${fields.inquiryTypeAsSent}" isn't "free consultation" or "questions first", so the AI treats it as a normal lead.`);
   if (fields.smsConsentAsSent && fields.smsConsent === "no" && !NO.has(keyOf(fields.smsConsentAsSent))) {
     warnings.push(`SMS consent value "${fields.smsConsentAsSent}" wasn't a clear yes, so it counts as NO consent.`);
   }
@@ -234,10 +255,12 @@ export function parseLead(raw: Record<string, string>): ParsedLead {
   if (!zipAsSent) missing.push("zip");
   if (!fields.email) missing.push("email");
   if (!fields.leadSource) missing.push("lead_source");
-  if (!fields.campaignName && !fields.adName) missing.push("campaign_name / ad_name");
+  if (!fields.campaignName && !fields.adName && !fields.adSet) missing.push("campaign_name / ad_name");
   if (!fields.formName) missing.push("form_name");
   if (!fields.submittedAtAsSent) missing.push("submitted_at");
-  if (!fields.smsConsentAsSent) missing.push("sms_consent");
+  // Facebook/Instagram leads carry consent by source (Steven 2026-11-03), so a missing
+  // sms_consent field isn't "missing" for them (Session 6 PR 3).
+  if (!fields.smsConsentAsSent && !sourceGivesConsent(fields)) missing.push("sms_consent");
 
   return { fields, raw, missing, warnings };
 }
@@ -343,13 +366,34 @@ export function consentSources(): string[] {
   return raw ? raw.split(/[,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) : DEFAULT_CONSENT_SOURCES;
 }
 
+/** The lead source (or, if Melanie only sends it, the platform) is one that carries SMS consent. */
+function sourceGivesConsent(fields: Pick<LeadFields, "leadSource" | "platform">): boolean {
+  return [fields.leadSource, fields.platform].some((value) => {
+    const source = (value || "").toLowerCase();
+    return Boolean(source) && consentSources().some((s) => source.split(/[^a-z0-9]+/).includes(s) || source === s);
+  });
+}
+
 /** Does this lead give us form consent to text (Steven, 2026-11-03)? */
 export function leadHasConsent(fields: LeadFields): boolean {
   if (fields.smsConsent === "no" && fields.smsConsentAsSent) return false;
   if (fields.smsConsent === "yes") return true;
-  const source = (fields.leadSource || "").toLowerCase();
-  return Boolean(source) && consentSources().some((s) => source.split(/[^a-z0-9]+/).includes(s) || source === s);
+  return sourceGivesConsent(fields);
 }
+
+/** "Free in-home consultation" / "I have questions first" -> one of two values (else null). */
+export function readInquiryType(value: string | null): InquiryType {
+  const v = (value || "").toLowerCase();
+  if (!v.trim()) return null;
+  if (/question|info|learn|not sure|just looking/.test(v)) return "questions_first";
+  if (/consult|appointment|estimate|quote|book|schedul|visit/.test(v)) return "free_consultation";
+  return null;
+}
+
+export const INQUIRY_LABELS: Record<Exclude<InquiryType, null>, string> = {
+  free_consultation: "Free consultation",
+  questions_first: "Questions first",
+};
 
 /** Arizona doesn't change clocks; everything else we serve is Pacific. */
 export function timeZoneForZip(zip: string | null): string {
@@ -366,6 +410,10 @@ export function leadInfo(lead: ParsedLead, leadId: number, receivedAt: Date) {
     source: f.leadSource,
     campaign: f.campaignName,
     ad: f.adName,
+    crmCampaign: f.crmCampaignName,
+    platform: f.platform,
+    adSet: f.adSet,
+    inquiryType: f.inquiryType ? INQUIRY_LABELS[f.inquiryType] : f.inquiryTypeAsSent,
     form: f.formName,
     zip: f.zip,
     email: f.email,
@@ -410,7 +458,7 @@ export async function processLiveLead(lead: ParsedLead, leadId: number, now: Dat
   await ensureContact(phone);
   if (consent) {
     await addConsent(phone, "care", "facebook_lead_form", JSON.stringify({
-      leadId, form: f.formName, campaign: f.campaignName, source: f.leadSource, submittedAt: f.submittedAt,
+      leadId, form: f.formName, campaign: f.campaignName, source: f.leadSource, platform: f.platform, submittedAt: f.submittedAt,
       basis: "Facebook lead form submit; Steven 2026-11-03: these forms carry SMS consent",
     }), now);
   }
@@ -418,13 +466,19 @@ export async function processLiveLead(lead: ParsedLead, leadId: number, now: Dat
   if (!named[0]?.first_name && !named[0]?.last_name && (f.firstName || f.lastName)) await setContactName(phone, f.firstName, f.lastName);
 
   const formWords = [
-    `${f.leadSource || "Lead"} form${f.formName ? ` "${f.formName}"` : ""} on ${shortDate(f.submittedAt || now.toISOString(), timeZone)}`,
+    `${f.leadSource || f.platform || "Lead"} form${f.formName ? ` "${f.formName}"` : ""} on ${shortDate(f.submittedAt || now.toISOString(), timeZone)}`,
     f.projectInterest ? `interested in: ${f.projectInterest}` : "",
     f.bestTime ? `best time to reach: ${f.bestTime}` : "",
   ].filter(Boolean).join("; ");
   const notes: Record<string, string> = { lead_form: formWords.slice(0, 200) };
   if (f.firstName) notes.first_name = f.firstName;
   if (f.zip) notes.form_zip = `${f.zip} (from their form, not checked yet)`;
+  // What they asked for (the AI sees this) + where to book them (code-only "_" notes for the 📅 card).
+  if (f.inquiryType === "questions_first") notes.inquiry_type = "questions first (they want answers before booking a visit)";
+  if (f.inquiryType === "free_consultation") notes.inquiry_type = "free in-home consultation";
+  if (f.crmCampaignName) notes._crm_campaign = f.crmCampaignName;
+  if (f.platform) notes._platform = f.platform;
+  if (f.adSet) notes._ad_set = f.adSet;
   await saveCustomerNotes(phone, notes);
 
   if (isExisting) {
