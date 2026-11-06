@@ -142,6 +142,29 @@ export function matchOffered(times: OfferedTime[], pick: { option?: unknown; dat
   return sameDay.find((t) => w && (t.window.toLowerCase() === w || windowWords(t.window).toLowerCase() === w)) || null;
 }
 
+/**
+ * Which offered time their text picks: "the first one", "2", "option 3", "Friday",
+ * "the Monday one", "Nov 9". Null when it's unclear or matches more than one.
+ * (Simulator 2026-11-05: "The first one works" wasn't saved by the AI.)
+ */
+export function pickFromText(text: string, times: OfferedTime[]): OfferedTime | null {
+  const t = (text || "").toLowerCase();
+  if (!t.trim() || !times.length || t.length > 120) return null;
+  const found = new Set<number>();
+  const ordinals: [RegExp, number][] = [[/\b(first|1st)\b/, 1], [/\b(second|2nd)\b/, 2], [/\b(third|3rd)\b/, 3]];
+  for (const [re, n] of ordinals) if (re.test(t)) found.add(n);
+  if (/\b(last one|the last)\b/.test(t)) found.add(times.length);
+  const digit = /^\s*(?:option|#|number)?\s*([1-3])\s*[.!]?\s*$/.exec(t) || /\b(?:option|#|number)\s*([1-3])\b/.exec(t);
+  if (digit) found.add(Number(digit[1]));
+  for (const time of times) {
+    const day = Number(time.date.slice(8, 10));
+    const month = new Date(`${time.date}T12:00:00Z`).toLocaleString("en-US", { month: "short", timeZone: "UTC" }).toLowerCase();
+    if (new RegExp(`\\b${time.weekday.toLowerCase()}\\b`).test(t) || new RegExp(`\\b${month}\\w*\\.? ${day}(st|nd|rd|th)?\\b`).test(t)) found.add(time.n);
+  }
+  const picks = [...found].map((n) => times.find((x) => x.n === n)).filter((x): x is OfferedTime => Boolean(x));
+  return picks.length === 1 ? picks[0] : null;
+}
+
 /** "2026-11-01:2" -> today's count of lookups for this customer. */
 export function lookupsToday(notes: Record<string, string>, today: string): number {
   const [day, count] = (notes[LOOKUPS_KEY] || "").split(":");
@@ -295,6 +318,8 @@ export type BookingRequest = {
   crmCampaign?: string | null;
   platform?: string | null;
   adSet?: string | null;
+  /** Session 6 PR 4b: they asked for a call to finish the questions, or answered them by text. */
+  followUp?: "call" | "text" | null;
 };
 
 export function bookingFrom(value: unknown): BookingRequest | null {
@@ -323,6 +348,10 @@ const TEAM_NOTE_LABELS: Record<string, string> = {
   preferred_days: "preferred days",
   photos_sent: "photos sent",
   first_name: "first name",
+  priority: "most important to them",
+  other_options: "other options looked at",
+  entry_points: "entry points",
+  access_notes: "parking / access",
 };
 
 export function teamNoteLabel(key: string): string {
@@ -349,6 +378,7 @@ export function bookingLines(b: BookingRequest, phoneLabel: string, notes: Recor
     `Phone: ${phoneLabel}`,
     `Address: ${[b.address || "not given", b.zip && !(b.address || "").includes(b.zip) ? b.zip : ""].filter(Boolean).join(", ")}${b.area ? ` (${b.area})` : ""}`,
     `Project: ${[b.product, b.doorCount].filter(Boolean).join(", ") || "customer didn't say (ask on the call)"}`,
+    b.followUp === "call" ? "Next step: CALL them to go over a few questions, then book it" : b.followUp === "text" ? "Next step: questions answered by text (see Notes). Book it, then text them to confirm" : "",
     b.crmCampaign ? `Book under campaign: ${b.crmCampaign}` : "",
     b.platform || b.adSet ? `Lead from: ${[b.platform, b.adSet ? `ad set "${b.adSet}"` : ""].filter(Boolean).join(", ")}` : "",
     otherNotes ? `Notes: ${otherNotes}`.slice(0, 500) : "",
