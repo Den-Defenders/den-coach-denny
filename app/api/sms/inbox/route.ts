@@ -19,7 +19,7 @@
  *   POST {action:"stop_drip", phone}    -> step 5 "Stop auto texts": no more drip texts or AI follow-ups, for good
  */
 import { NextResponse } from "next/server";
-import { canUseTextingInbox, type DennyAccess } from "@/lib/access";
+import { canAccessTextingInbox, canUseTextingInbox, type DennyAccess } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { bookingFrom, bookingLines, shortTimeWords } from "@/lib/sms/booking";
 import { dripLabel, stopDrip } from "@/lib/sms/drip";
@@ -55,7 +55,7 @@ function json(data: unknown, status = 200) {
 
 async function requireInboxUser() {
   const access = await getCurrentAccess();
-  return access && canUseTextingInbox(access.role) ? access : null;
+  return canAccessTextingInbox(access) ? access : null;
 }
 
 /** Owners and managers may hand a customer to someone else; everyone can take an unowned one. */
