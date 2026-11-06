@@ -70,6 +70,7 @@ import {
 } from "@/lib/sms/booking";
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { maybeSendHoldText } from "@/lib/sms/inbox";
+import { asksAboutCall } from "@/lib/sms/drip";
 import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
 import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
@@ -534,8 +535,37 @@ function todayPacific(now: Date): string {
 /** After hours, a handoff goodbye must say when a person will answer (added by code if the AI didn't). */
 export const AFTER_HOURS_HANDOFF_NOTE = `Our team texts between ${TEAM_HOURS_TEXT.replace(" to ", " and ")}, so expect a reply after 8 AM.`;
 
+// ---------------------------------------------------------------------------
+// Session 6 PR 4: "Is now a good time for a quick call?" -> Wants a call
+// ---------------------------------------------------------------------------
+
+const CALL_NO = /\b(no|nope|nah|not now|not right now|not a good time|busy|can'?t|cannot|text me|text only|by text|prefer text|over text|stop)\b/i;
+const CALL_YES = /\b(yes|yeah|yea|yep|yup|sure|ok|okay|now|call me|go ahead|please do|sounds good|that works|anytime|any time|today|tomorrow|tonight|morning|afternoon|evening|noon|lunch|after work|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(:\d{2})?\s?(am|pm|a\.m\.|p\.m\.)|(after|before|around|at) \d{1,2})\b/i;
+const CALL_TIME = /\b(today|tomorrow|tonight|morning|afternoon|evening|noon|lunch|after work|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(:\d{2})?\s?(am|pm|a\.m\.|p\.m\.)|(after|before|around|at) \d{1,2})\b/i;
+
+/** Their answer to our call question is a yes or a time (not a no, not a question). */
+export function wantsCallReply(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t || t.length > 160 || /\?/.test(t)) return false;
+  if (CALL_NO.test(t) && !/\b(call me|tomorrow|today)\b/i.test(t)) return false;
+  return CALL_YES.test(t);
+}
+
+/** The goodbye once a call is requested (the AI's own, or code's when it forgot). */
+export function callGoodbye(theirText: string, now: Date, timeZone = DEFAULT_TIME_ZONE): string {
+  if (CALL_TIME.test(theirText || "")) return "Thanks! A team member will give you a call then.";
+  return teamIsTexting(now, timeZone)
+    ? "Thanks! A team member will give you a call shortly."
+    : "Thanks! A team member will give you a call tomorrow after 8 AM.";
+}
+
+export const VALUE_QUESTION = "Want me to walk you through what goes into that price?";
+const askedAboutValue = (ourTexts: string[]) => ourTexts.some((t) => /what goes into that price/i.test(t));
+
 export function withAfterHoursNote(reply: string, now: Date, timeZone = DEFAULT_TIME_ZONE): string {
   if (teamIsTexting(now, timeZone) || /\b8(:00)?\s?(am|a\.m\.)/i.test(reply)) return reply;
+  // A call goodbye already says when ("…call you then" / "…tomorrow after 8 AM").
+  if (/\bgive you a call\b/i.test(reply)) return reply;
   const longer = `${reply}\n\n${AFTER_HOURS_HANDOFF_NOTE}`;
   return longer.length <= MAX_BODY_CHARS ? longer : reply;
 }
@@ -544,11 +574,13 @@ export function withAfterHoursNote(reply: string, now: Date, timeZone = DEFAULT_
 // Slack alert for handoffs (optional: SMS_SLACK_WEBHOOK_URL)
 // ---------------------------------------------------------------------------
 
-async function postHandoffToSlack(phone: string, reason: string, summary: string, notes: Record<string, string> = {}) {
+export async function postHandoffToSlack(phone: string, reason: string, summary: string, notes: Record<string, string> = {}) {
   if (!slackAlertsEnabled()) return;
-  const mention = await ownerMention(phone);
+  // "Wants a call" tags the owner, else @here (Steven, 2026-11-05: a yes should reach a CSR ASAP).
+  const mention = (await ownerMention(phone)) || (reason === "wants_call" ? "<!here> " : "");
+  const head = reason === "wants_call" ? ":telephone_receiver: *Texting: Wants a call*" : ":raising_hand: *Texting: Needs CSR*";
   const text = [
-    `${pilotTag()}${mention}:raising_hand: *Texting: Needs CSR* - ${formatPhone(phone)}`,
+    `${pilotTag()}${mention}${head} - ${formatPhone(phone)}`,
     `Reason: ${reason.replace(/_/g, " ")}`,
     summary,
     notesLine(notes),
@@ -755,12 +787,15 @@ export async function composeBotReply(
     await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
     await fx.log("bot_time_chosen", pick.date, { window: pick.window });
     const needType = !doorTypeIsKnown() && !askedDoorType(ourTexts);
+    const priceStep = priceAlreadyGiven(thread) || askedAboutValue(ourTexts)
+      ? ""
+      : `one short text with the price for their door type (COMPANY FACTS) ending with exactly "${VALUE_QUESTION}"; if they say yes, explain the value in 2 or 3 short points tied to what they told you; `;
     return {
       ok: true,
       picked: timeWords(pick),
       message: needType
-        ? `Saved. We don't know which door this is for yet. In one short text ask exactly: "${DOOR_TYPE_QUESTION}" No price unless they asked. After they answer, ask for their full name and the street address of the home, then call request_booking. Don't say it's passed to the team yet, and don't say anything is booked, scheduled or confirmed.`
-        : "Saved. Unless you already have both, ask in one short text for their full name and the street address of the home. If you have both, call request_booking now. Don't say it's passed to the team yet (that's request_booking's job), and don't say anything is booked, scheduled or confirmed.",
+        ? `Saved. We don't know which door this is for yet. In one short text ask exactly: "${DOOR_TYPE_QUESTION}" No price in that text. After they answer: ${priceStep}then ask for their full name and the street address of the home, then call request_booking. Don't say it's passed to the team yet, and don't say anything is booked, scheduled or confirmed.`
+        : `Saved. Next: ${priceStep}unless you already have both, ask in one short text for their full name and the street address of the home; if you have both, call request_booking. Don't say it's passed to the team yet (that's request_booking's job), and don't say anything is booked, scheduled or confirmed.`,
     };
   };
 
@@ -772,6 +807,11 @@ export async function composeBotReply(
     if (!safetyNet && !doorTypeIsKnown() && !askedDoorType(ourTexts)) {
       await fx.log("bot_door_type_first", "asked", {}, "system");
       return { ok: false, error: "NEED_DOOR_TYPE", message: `Before passing it to the team, ask in one short text exactly: "${DOOR_TYPE_QUESTION}" No price unless they asked. Don't say it's passed to the team yet.` };
+    }
+    // Price before handoff, with the value question (Steven, 2026-11-05). Once; skipped if a price was already given.
+    if (!safetyNet && !priceAlreadyGiven(thread) && !askedAboutValue(ourTexts)) {
+      await fx.log("bot_price_first", "asked", {}, "system");
+      return { ok: false, error: "NEED_PRICE_FIRST", message: `Before passing it to the team, in one short text give the price for their door type from COMPANY FACTS and end with exactly: "${VALUE_QUESTION}" Don't say it's passed to the team yet.` };
     }
     const name = cleanArg(args.full_name, 80) || (notes.first_name || "");
     const address = cleanArg(args.street_address, 160);
@@ -913,7 +953,9 @@ export async function composeBotReply(
         const summary = String(args.summary || "").trim() || "No summary given.";
         await fx.handOff(reason, summary, notes, false);
         handedOff = { reason };
-        answer({ ok: true, message: "Flagged for the team. Now write your one short final message (no promised call or text time)." });
+        answer(reason === "wants_call"
+          ? { ok: true, message: `Flagged for a call. Now write one short final message, close to: "${callGoodbye([...thread].reverse().find((m) => m.direction === "inbound")?.body || "", input.now)}" Don't offer appointment times.` }
+          : { ok: true, message: "Flagged for the team. Now write your one short final message (no promised call or text time)." });
       } else if (name === "send_door_photos") {
         const category = isCategory(args.category) ? args.category : null;
         const variant = args.variant === "double" ? "double" : "single";
@@ -985,6 +1027,19 @@ export async function composeBotReply(
   if (claimsBooked(reply)) {
     await fx.log("bot_booking_claim_removed", "said_booked", {}, "system");
     reply = withoutBookingClaim(reply) || SAFE_BOOKING_GOODBYE;
+  }
+
+  // Safety net: they said yes (or gave a time) to our call question, but the AI didn't hand off a call.
+  {
+    const lastTheirs = [...thread].reverse().find((m) => m.direction === "inbound")?.body || "";
+    const ours = thread.slice(0, thread.map((m) => m.direction).lastIndexOf("inbound")).filter((m) => m.direction === "outbound");
+    const lastOurs = ours[ours.length - 1]?.body || "";
+    if (!handedOff && asksAboutCall(lastOurs) && wantsCallReply(lastTheirs)) {
+      await fx.log("bot_call_by_code", "skipped_tool", {}, "system");
+      await fx.handOff("wants_call", `Said yes to a quick call: "${lastTheirs.slice(0, 200)}". Call them${CALL_TIME.test(lastTheirs) ? " at the time they gave" : " ASAP"}.`, notes, true);
+      handedOff = { reason: "wants_call" };
+      reply = callGoodbye(lastTheirs, input.now);
+    }
   }
 
   // Safety net: the AI told them the team will follow up but forgot to hand off.

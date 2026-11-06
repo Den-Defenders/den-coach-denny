@@ -40,13 +40,34 @@ export type DripStep = {
   body: string;
 };
 
+/**
+ * Session 6 PR 4 (Melanie Nov 4, Steven Nov 5): the welcome asks about a quick call.
+ * 8 AM - 5 PM their time: "Is now a good time…"; 5 - 8 PM: "…tomorrow?" (after 8 PM the
+ * welcome waits for 8 AM and goes out as the "now" version). A yes or a time = "Wants a call".
+ */
+export const WELCOME_CALL_NOW =
+  "Hi {first}! This is Den Defenders Security Doors. Thanks for reaching out about your free in-home consultation! Is now a good time for a quick call?\n\nReply STOP to opt out.";
+export const WELCOME_CALL_TOMORROW =
+  "Hi {first}! This is Den Defenders Security Doors. Thanks for reaching out about your free in-home consultation! When's a good time for a quick call tomorrow?\n\nReply STOP to opt out.";
+/** From 5 PM their time the welcome asks about tomorrow instead of now (Steven, Nov 5). */
+export const CALL_NOW_UNTIL_HOUR = 17;
+
+export function welcomeBody(at: Date, timeZone: string): string {
+  return localTime(at, timeZone).hour < CALL_NOW_UNTIL_HOUR ? WELCOME_CALL_NOW : WELCOME_CALL_TOMORROW;
+}
+
+/** One of our texts asked about a call (the welcome, or the Day 30 "…works best for a quick call"). */
+export function asksAboutCall(text: string): boolean {
+  return /good time for a quick call|works best for a quick call/i.test(text || "");
+}
+
 const PROMO_FOOTNOTE = "*May be used with approved financing. Cannot be combined with other offers. Restrictions apply.";
 
 export const DRIP_STEPS: DripStep[] = [
-  { day: 1, at: "now", purpose: "care", body:
-    "Hi {first}! This is Den Defenders Security Doors. Thanks for reaching out! I'm excited to help get your free in-home consultation scheduled and answer any questions you have.\n\nReply STOP to opt out." },
+  // The welcome's wording depends on the time it goes out: see welcomeBody().
+  { day: 1, at: "now", purpose: "care", body: WELCOME_CALL_NOW },
   { day: 1, at: "+10m", purpose: "care", body:
-    "With Den Defenders, your consultation is 100% free and happens right at your home. We'll handle measurements, show colors and product samples, and create your quote on-site.\n\nWould you like me to check our next available times in your area?" },
+    "No problem if now's not a good time to talk. With Den Defenders, your consultation is 100% free and happens right at your home. We'll handle measurements, show colors and product samples, and create your quote on-site.\n\nWould you like me to check our next available times in your area?" },
   { day: 2, at: "10:00", purpose: "care", body:
     "Hi {first}! I know fitting another appointment into your week can be tough, so we keep consultations simple and aim to finish in under 45 minutes.\n\nDo mornings or afternoons work best?" },
   { day: 3, at: "11:15", purpose: "care", body:
@@ -328,7 +349,7 @@ export async function processDrip(phone: string, now: Date = smsNow()): Promise<
 
   const result = await sendSms({
     to: phone,
-    body: renderDrip(step.body, row.firstName),
+    body: renderDrip(row.step === 0 ? welcomeBody(now, row.timeZone) : step.body, row.firstName),
     kind,
     purpose: step.purpose,
     sentBy: DRIP_SENDER,
