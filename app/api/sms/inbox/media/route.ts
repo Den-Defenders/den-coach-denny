@@ -6,7 +6,7 @@
  * side only) and passes the picture through. It only ever fetches the exact
  * Twilio media link saved on that inbound text, never a link from the browser.
  */
-import { canUseTextingInbox } from "@/lib/access";
+import { canAccessTextingInbox } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { inboundMediaUrl, smsDatabaseConfigured } from "@/lib/sms/store";
 
@@ -22,7 +22,7 @@ function plain(message: string, status: number) {
 
 export async function GET(request: Request) {
   const access = await getCurrentAccess();
-  if (!access || !canUseTextingInbox(access.role)) return plain("Forbidden", 403);
+  if (!access || !canAccessTextingInbox(access)) return plain("Forbidden", 403);
   if (!smsDatabaseConfigured()) return plain("Texting database isn't set up.", 500);
 
   const url = new URL(request.url);

@@ -18,7 +18,7 @@ const features = [
 export default async function Home() {
   const access = await getCurrentAccess();
   const role = access?.role ?? "csr";
-  const allowed = navFor(role);
+  const allowed = navFor(role, Boolean(access?.member));
   const visibleFeatures = features.filter((feature) => (allowed as readonly string[]).includes(feature.key));
   const field = isFieldRole(role);
 

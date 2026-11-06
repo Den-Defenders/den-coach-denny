@@ -12,7 +12,7 @@ export async function GET() {
   return NextResponse.json({
     displayName: access.displayName,
     role: access.role,
-    nav: navFor(access.role),
+    nav: navFor(access.role, Boolean(access.member)),
     technicianName: access.member?.stTechnicianName ?? null,
   }, { headers });
 }

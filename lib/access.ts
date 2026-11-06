@@ -179,15 +179,25 @@ export async function resolveAccess(session: SessionData | null): Promise<DennyA
 const STAFF: readonly AccessRole[] = ["owner", "manager", "csr", ...FIELD_ROLES];
 
 /**
- * Who may open the Texting inbox (/texting) and its API. Owners only during
- * internal testing; add "manager" and "csr" here before the pilot so CSRs can
- * work it (the menu tile follows this list automatically).
+ * Who may open the Texting inbox (/texting) and its API (the menu tile follows).
+ * Session 6 PR 7 (pilot go-live): owners, managers and CSRs. Managers and CSRs must
+ * be LISTED on the Team page: someone who logs in without being listed also gets the
+ * "csr" role (DENNY_UNLISTED_ROLE), and must never see customer texts.
  */
-export const TEXTING_INBOX_ROLES: readonly AccessRole[] = ["owner"];
+export const TEXTING_INBOX_ROLES: readonly AccessRole[] = ["owner", "manager", "csr"];
 
-/** Second gate inside the inbox API routes (proxy.ts is the first). */
-export function canUseTextingInbox(role: AccessRole | null | undefined): boolean {
-  return Boolean(role && TEXTING_INBOX_ROLES.includes(role));
+/**
+ * Second gate inside the inbox routes (proxy.ts is the first, by role only).
+ * `listed` = this person is on the Team page (owners by Auth0 don't need to be).
+ */
+export function canUseTextingInbox(role: AccessRole | null | undefined, listed = true): boolean {
+  if (!role || !TEXTING_INBOX_ROLES.includes(role)) return false;
+  return role === "owner" || listed;
+}
+
+/** The gate for a signed-in person (role + whether they're on the Team page). */
+export function canAccessTextingInbox(access: Pick<DennyAccess, "role" | "member"> | null | undefined): boolean {
+  return Boolean(access && canUseTextingInbox(access.role, Boolean(access.member)));
 }
 
 type Rule = { prefix: string; exact?: boolean; roles: readonly AccessRole[] };
@@ -262,9 +272,9 @@ export function landingPathFor(role: AccessRole): string {
 
 export type NavKey = "home" | "chat" | "listen" | "schedule" | "talk" | "owner" | "team" | "texting" | "simulator";
 
-export function navFor(role: AccessRole): NavKey[] {
-  // "texting" = the Texting inbox: shown to whoever TEXTING_INBOX_ROLES allows.
-  const texting: NavKey[] = canUseTextingInbox(role) ? ["texting"] : [];
+export function navFor(role: AccessRole, listed = true): NavKey[] {
+  // "texting" = the Texting inbox: shown to whoever TEXTING_INBOX_ROLES allows (listed on the Team page).
+  const texting: NavKey[] = canUseTextingInbox(role, listed) ? ["texting"] : [];
   switch (role) {
     case "owner":
       // "simulator" = the texting Simulator (pilot). Owners only for now.
