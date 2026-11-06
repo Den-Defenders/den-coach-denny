@@ -54,6 +54,7 @@ import {
   doorTypeKnown,
   zipFromNotes,
   doorTypeFromCustomer,
+  pickFromText,
   isSlow,
   lookupOpenTimes,
   lookupsToday,
@@ -71,6 +72,10 @@ import {
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { maybeSendHoldText } from "@/lib/sms/inbox";
 import { asksAboutCall } from "@/lib/sms/drip";
+import {
+  BOOKING_ADDRESS_KEY, BOOKING_NAME_KEY, FOLLOW_UP_KEY, FOLLOW_UP_QUESTION,
+  askedFollowUp, followUpFromText, looksLikeAnswer, nextQualifier, pendingQualifier,
+} from "@/lib/sms/qualify";
 import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
 import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
@@ -179,7 +184,11 @@ export function scheduleBotReply(phone: string, inboundId: number) {
 // ---------------------------------------------------------------------------
 
 /** The only keys save_customer_notes may write (same as its tool schema). */
-const AI_NOTE_FIELDS = new Set(["first_name", "need", "product", "door_count", "style", "concerns", "timing", "decision_makers", "preferred_days", "other"]);
+const AI_NOTE_FIELDS = new Set([
+  "first_name", "need", "product", "door_count", "style", "concerns", "timing", "decision_makers", "preferred_days", "other",
+  // Session 6 PR 4b: Steven's qualifying questions.
+  "priority", "other_options", "entry_points", "access_notes",
+]);
 
 const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
@@ -243,8 +252,12 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           style: { type: "string", description: "Color or look they want" },
           concerns: { type: "string", description: "Worries or objections they raised (price, HOA, timing...)" },
           timing: { type: "string" },
-          decision_makers: { type: "string", description: "Only if they said someone else is involved" },
+          decision_makers: { type: "string", description: "Who decides: just them, or with someone else (in their words)" },
           preferred_days: { type: "string" },
+          priority: { type: "string", description: "What matters most to them: security, appearance, long-term value..." },
+          other_options: { type: "string", description: "Whether they've looked at other options or are just starting" },
+          entry_points: { type: "string", description: "Which doors/entries they're focused on (front, side, back...)" },
+          access_notes: { type: "string", description: "Parking, gate code or other instructions for our rep" },
           other: { type: "string" },
         },
       },
@@ -309,15 +322,16 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "request_booking",
       description:
-        "Pass the picked time to the team to book (you can't book). Call after choose_time, once you have their full name and street address, or they'd rather not text the address. Then send one short final message.",
+        "Pass the picked time to the team to book (you can't book). Call after choose_time, once you have their full name and street address (or they'd rather not text the address). It may first tell you to ask whether they'd like a quick call or to keep texting; then pass follow_up with their answer. Follow its message exactly.",
       parameters: {
         type: "object",
         properties: {
           full_name: { type: "string", description: "First and last name, as they wrote it" },
           street_address: { type: "string", description: "Street address of the home (with city if given). Empty if they won't share it by text." },
           backup_option: { type: "integer", minimum: 1, maximum: 3, description: "Only if they said another offered time also works" },
+          follow_up: { type: "string", enum: ["call", "text"], description: "Only after they answered: a quick call from a rep, or keep texting" },
         },
-        required: ["full_name"],
+        required: [],
       },
     },
   },
@@ -559,6 +573,15 @@ export function callGoodbye(theirText: string, now: Date, timeZone = DEFAULT_TIM
     : "Thanks! A team member will give you a call tomorrow after 8 AM.";
 }
 
+/** Final text once the picked time goes to the team (Session 6 PR 4b). */
+export function followUpGoodbye(followUp: "call" | "text", firstName: string, time: string, now: Date, timeZone = DEFAULT_TIME_ZONE): string {
+  const thanks = firstName ? `Thanks, ${firstName}!` : "Thanks!";
+  const open = teamIsTexting(now, timeZone);
+  return followUp === "call"
+    ? `${thanks} One of our reps will give you a call ${open ? "shortly" : "tomorrow after 8 AM"} to go over a few questions and finish booking your consultation for ${time}.`
+    : `${thanks} That's everything I need. A team member will text you ${open ? "shortly" : "after 8 AM"} to confirm your consultation for ${time}.`;
+}
+
 export const VALUE_QUESTION = "Want me to walk you through what goes into that price?";
 const askedAboutValue = (ourTexts: string[]) => ourTexts.some((t) => /what goes into that price/i.test(t));
 
@@ -671,6 +694,9 @@ export async function composeBotReply(
     linksSent: linksSent(thread),
     openTimes: offered?.times.map((t) => `${t.n}. ${timeWords(t)}`),
     chosenTime: picked ? timeWords(picked) : undefined,
+    bookingStep: notes[FOLLOW_UP_KEY] === "text"
+      ? (() => { const q = nextQualifier(notes, ourTexts); return q ? `they chose to keep texting; answer anything they asked, save any answer with save_customer_notes, then ask: "${q.ask}"` : "all questions answered; call request_booking with follow_up text"; })()
+      : askedFollowUp(ourTexts) && !notes[FOLLOW_UP_KEY] ? "we asked if they'd like a call from a rep or to keep texting; when they answer, call request_booking with follow_up" : undefined,
   };
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: smsBotSystemPrompt(todayPacific(input.now), known) },
@@ -801,7 +827,17 @@ export async function composeBotReply(
 
   const requestBooking = async (args: Record<string, unknown>, lastText: string | null = null, safetyNet = false): Promise<Record<string, unknown>> => {
     const open = openTimesFrom(notes);
-    const chosen = chosenTimeFrom(notes);
+    let chosen = chosenTimeFrom(notes);
+    if (open && !chosen) {
+      // They picked in words ("the first one", "Friday") but the AI didn't call choose_time.
+      const said = [...thread].reverse().filter((m) => m.direction === "inbound").map((m) => pickFromText(m.body, open.times)).find(Boolean) || null;
+      if (said) {
+        chosen = said;
+        notes[CHOSEN_TIME_KEY] = JSON.stringify(said);
+        await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
+        await fx.log("bot_time_chosen_by_code", said.date, { window: said.window });
+      }
+    }
     if (!open || !chosen) return { ok: false, error: "NO_TIME_PICKED", message: "Ask which of the offered times works, then call choose_time." };
     // Ask the door type first (once). If they skipped the question, the team asks on the call.
     if (!safetyNet && !doorTypeIsKnown() && !askedDoorType(ourTexts)) {
@@ -813,8 +849,38 @@ export async function composeBotReply(
       await fx.log("bot_price_first", "asked", {}, "system");
       return { ok: false, error: "NEED_PRICE_FIRST", message: `Before passing it to the team, in one short text give the price for their door type from COMPANY FACTS and end with exactly: "${VALUE_QUESTION}" Don't say it's passed to the team yet.` };
     }
-    const name = cleanArg(args.full_name, 80) || (notes.first_name || "");
-    const address = cleanArg(args.street_address, 160);
+    const name = cleanArg(args.full_name, 80) || notes[BOOKING_NAME_KEY] || (notes.first_name || "");
+    const address = cleanArg(args.street_address, 160) || notes[BOOKING_ADDRESS_KEY] || "";
+    // Keep name/address while we ask the follow-up questions (Steven, 2026-11-05).
+    const keep: Record<string, string> = {};
+    if (cleanArg(args.full_name, 80) && notes[BOOKING_NAME_KEY] !== name) keep[BOOKING_NAME_KEY] = name;
+    if (address && notes[BOOKING_ADDRESS_KEY] !== address) keep[BOOKING_ADDRESS_KEY] = address;
+    if (Object.keys(keep).length) { Object.assign(notes, keep); await fx.saveNotes(keep); }
+    // The AI's follow_up only counts once we've actually asked call-or-text (it can't skip Steven's question).
+    let followUp: "call" | "text" | null = (args.follow_up === "call" || args.follow_up === "text") && askedFollowUp(ourTexts) ? args.follow_up : null;
+    if (!followUp && (notes[FOLLOW_UP_KEY] === "call" || notes[FOLLOW_UP_KEY] === "text")) followUp = notes[FOLLOW_UP_KEY] as "call" | "text";
+    // The AI forgot to pass their answer: read it from their reply to our question.
+    if (!followUp && (ourTexts[ourTexts.length - 1] || "").includes(FOLLOW_UP_QUESTION.slice(0, 60))) {
+      followUp = followUpFromText([...thread].reverse().find((m) => m.direction === "inbound")?.body || "");
+    }
+    if (!safetyNet) {
+      if (!followUp) {
+        const again = askedFollowUp(ourTexts);
+        await fx.log("bot_follow_up_question", again ? "asked_again" : "asked", {}, "system");
+        return {
+          ok: false,
+          error: "NEED_FOLLOW_UP",
+          message: again
+            ? "Don't pass it to the team yet. They haven't clearly said. Ask briefly once more: would they like a quick call from one of our reps, or to keep texting?"
+            : `Don't pass it to the team yet (name and address are saved). In one short text ask exactly: "${FOLLOW_UP_QUESTION}"`,
+        };
+      }
+      if (notes[FOLLOW_UP_KEY] !== followUp) { notes[FOLLOW_UP_KEY] = followUp; await fx.saveNotes({ [FOLLOW_UP_KEY]: followUp }); }
+      const next = followUp === "text" ? nextQualifier(notes, ourTexts) : null;
+      if (next) {
+        return { ok: false, error: "NEED_ANSWER", message: `Don't pass it to the team yet. If their last text answered a question, save it with save_customer_notes first. Then ask in one short text exactly: "${next.ask}"` };
+      }
+    }
     let slotCheck: SlotCheck = "zip_only";
     let rep = chosen.rep;
     if (address) {
@@ -858,15 +924,52 @@ export async function composeBotReply(
       crmCampaign: notes._crm_campaign || null,
       platform: notes._platform || null,
       adSet: notes._ad_set || null,
+      followUp: safetyNet ? null : followUp,
     };
     const summary = ["The customer picked a consultation time by text. Book it in ServiceTitan, then click \"Booked in ServiceTitan\".", ...bookingLines(booking, "", notes).filter((l) => !l.startsWith("Phone:"))].join("\n");
     await fx.handOff("ready_to_book", summary, notes, false, booking);
     handedOff = { reason: "ready_to_book" };
     return {
       ok: true,
-      message: `Passed to the team. Now send one short final message: thank them and say you've passed ${timeWords(chosen)} to our team and a team member will text them shortly to finish setting it up. Never say booked, scheduled, confirmed, reserved or "see you".`,
+      finalText: followUp ? followUpGoodbye(followUp, notes.first_name || "", timeWords(chosen), input.now) : null,
+      message: followUp
+        ? `Passed to the team. Now send exactly this final message: "${followUpGoodbye(followUp, notes.first_name || "", timeWords(chosen), input.now)}"`
+        : `Passed to the team. Now send one short final message: thank them and say you've passed ${timeWords(chosen)} to our team and a team member will text them shortly to finish setting it up. Never say booked, scheduled, confirmed, reserved or "see you".`,
     };
   };
+
+  // Session 6 PR 4b: after the call-or-text question, code runs the rest (no AI needed):
+  // a "call" passes the request now; "text" saves each answer and asks the next question.
+  {
+    const lastTheirs = [...thread].reverse().find((m) => m.direction === "inbound")?.body || "";
+    const lastOurs = ourTexts[ourTexts.length - 1] || "";
+    if (chosenTimeFrom(notes) || (offered && askedFollowUp(ourTexts))) {
+      let choice: "call" | "text" | null = notes[FOLLOW_UP_KEY] === "call" || notes[FOLLOW_UP_KEY] === "text" ? (notes[FOLLOW_UP_KEY] as "call" | "text") : null;
+      if (!choice && lastOurs.includes(FOLLOW_UP_QUESTION.slice(0, 60))) choice = followUpFromText(lastTheirs);
+      if (choice === "text" && looksLikeAnswer(lastTheirs)) {
+        const pending = pendingQualifier(lastOurs);
+        if (pending && !lastOurs.includes(FOLLOW_UP_QUESTION.slice(0, 60))) {
+          const answer = lastTheirs.trim().slice(0, 240);
+          notes[pending.key] = notes[pending.key] && pending.key === "decision_makers" ? `${notes[pending.key]}; ${answer}` : answer;
+          await fx.saveNotes({ [pending.key]: notes[pending.key] });
+          await fx.log("bot_qualifier_saved", pending.key, {}, "system");
+        }
+      }
+      if (choice && (choice === "call" || looksLikeAnswer(lastTheirs)) && (lastOurs.includes(FOLLOW_UP_QUESTION.slice(0, 60)) || pendingQualifier(lastOurs))) {
+        const made = await requestBooking({ follow_up: choice });
+        if (made.ok) {
+          return { kind: "reply", reply: String(made.finalText), media: [], handedOff, model: "code" };
+        }
+        if (made.error === "NEED_ANSWER") {
+          const next = nextQualifier(notes, ourTexts);
+          if (next) return { kind: "reply", reply: next.ask, media: [], handedOff: null, model: "code" };
+        }
+        if (made.error === "SLOT_GONE") {
+          return { kind: "reply", reply: "Sorry, that time just filled up. Which of the other times works for you?", media: [], handedOff: null, model: "code" };
+        }
+      }
+    }
+  }
 
   for (let round = 0; round < MAX_ROUNDS && !reply; round++) {
     const params = (model: string): CompletionParams => ({

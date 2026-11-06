@@ -126,6 +126,7 @@ SCHEDULING (you can look up real open times; only the team can book)
 - They ask for a Saturday or Sunday: don't ask which weekday first. Say consultations are on weekdays, call find_open_times right away (no days filter) and offer those times in the same text. If they can only do a weekend, hand off with reason ready_to_book so the team can see what's possible. You keep answering after that kind of handoff, so if they then say a weekday works, carry on with times.
 - They pick one: call choose_time (its option number, or its date). If they haven't told you which door it's for, ask next, in one short text with no price: "Which door is this for: a front door, French doors, or a sliding patio door?" Then, unless you already have both, ask in one short text for their full name and the street address of the home (city too if you don't know it). If they'd rather not text the address, that's fine.
 - Before passing a picked time to the team, give the price for their door type once (skip this if a price is already in the thread), ending with exactly: "Want me to walk you through what goes into that price?" If they say yes, explain the value in 2 or 3 short points tied to what they told you, using only COMPANY FACTS and PRODUCTS (custom-built and measured for their entry, what's included, professional installation, the warranty), then ask for their full name and street address. If they say no or skip it, just ask for name and address.
+- Once you have their name and address, call request_booking. It will have you ask whether they'd like a quick call from a rep or to keep texting, then (by text) a few short questions, one at a time, skipping anything they already told you. Ask each exactly as it says and save their answers with save_customer_notes.
 - Then call request_booking. If it says the time filled up, apologize briefly and offer the other times. When it works, send one short final message: thank them and say you've passed their time to our team and a team member will text them shortly to finish setting it up.
 - Never say anything is booked, scheduled, confirmed, reserved, held or "all set", and never "see you Tuesday". Only the team can book it.
 - find_open_times finds nothing or can't check: don't invent times. Hand off with reason ready_to_book, with their product, ZIP and preferred days in the summary, and tell them a team member will text them open times.
@@ -172,6 +173,8 @@ export type KnownAboutCustomer = {
   /** Step 4a: the open times find_open_times returned (as offered), and the one they picked. */
   openTimes?: string[];
   chosenTime?: string;
+  /** Session 6 PR 4b: where we are in the call-or-text booking questions. */
+  bookingStep?: string;
 };
 // Notes keys starting with "_" are for code only (e.g. which photo files were sent) and stay out of the prompt.
 
@@ -188,6 +191,10 @@ const NOTE_LABELS: Record<string, string> = {
   zip: "ZIP check",
   lead_form: "Their lead form (they asked us to reach out)",
   inquiry_type: "What they asked for on the form",
+  priority: "Most important to them",
+  other_options: "Other options they've looked at",
+  entry_points: "Entry points they're focused on",
+  access_notes: "Parking / access instructions",
   form_zip: "ZIP on their form (find_open_times uses it; run check_service_zip before saying we serve it; don't ask for the ZIP again)",
   photos_sent: "Photos already sent",
   other: "Other",
@@ -204,6 +211,7 @@ export function knownAboutCustomerText(known: KnownAboutCustomer): string {
   for (const link of known.linksSent) lines.push(`- Already sent: ${link}`);
   if (known.openTimes?.length) lines.push(`- Open times you offered (option numbers for choose_time): ${known.openTimes.join("; ")}`);
   if (known.chosenTime) lines.push(`- Time they picked: ${known.chosenTime}. Next: their full name and street address, then request_booking.`);
+  if (known.bookingStep) lines.push(`- Finishing the booking: ${known.bookingStep}.`);
   return lines.length ? lines.join("\n") : "- Nothing saved yet. Read the thread.";
 }
 
