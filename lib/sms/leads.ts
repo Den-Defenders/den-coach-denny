@@ -240,6 +240,8 @@ export function parseLead(raw: Record<string, string>): ParsedLead {
   if (fields.submittedAtAsSent && !fields.submittedAt) warnings.push(`Submit time "${fields.submittedAtAsSent}" couldn't be read (we'll use the time it arrived).`);
   fields.smsConsent = readConsent(fields.smsConsentAsSent);
   fields.inquiryType = readInquiryType(fields.inquiryTypeAsSent);
+  // Facebook's platform field comes as "fb" / "ig": show it as a word on the cards.
+  fields.platform = platformName(fields.platform);
   if (fields.inquiryTypeAsSent && !fields.inquiryType) warnings.push(`Inquiry type "${fields.inquiryTypeAsSent}" isn't "free consultation" or "questions first", so the AI treats it as a normal lead.`);
   if (fields.smsConsentAsSent && fields.smsConsent === "no" && !NO.has(keyOf(fields.smsConsentAsSent))) {
     warnings.push(`SMS consent value "${fields.smsConsentAsSent}" wasn't a clear yes, so it counts as NO consent.`);
@@ -379,6 +381,12 @@ export function leadHasConsent(fields: LeadFields): boolean {
   if (fields.smsConsent === "no" && fields.smsConsentAsSent) return false;
   if (fields.smsConsent === "yes") return true;
   return sourceGivesConsent(fields);
+}
+
+const PLATFORM_NAMES: Record<string, string> = { fb: "Facebook", facebook: "Facebook", ig: "Instagram", instagram: "Instagram", msg: "Messenger", an: "Audience Network" };
+export function platformName(value: string | null): string | null {
+  if (!value) return null;
+  return PLATFORM_NAMES[value.trim().toLowerCase()] || value;
 }
 
 /** "Free in-home consultation" / "I have questions first" -> one of two values (else null). */
