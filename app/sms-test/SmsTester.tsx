@@ -26,6 +26,15 @@ type Settings = {
   consentSources: string;
 };
 
+type GoLive = {
+  twilioBalance: { balance: number; currency: string } | null;
+  capOverrides: string[];
+  hatch: { count: number; lastAddedAt: string | null; fresh: boolean } | null;
+  inboxRoles: string[];
+  unlistedLoginsBlocked: boolean;
+  everyone: boolean;
+};
+
 type Message = {
   id: number; phone: string; direction: "inbound" | "outbound"; kind: string | null; purpose: string | null;
   body: string; media: string[] | null; status: string; error_code: string | null; error_message: string | null;
@@ -69,6 +78,7 @@ function Check({ ok, label }: { ok: boolean; label: string }) {
 
 export default function SmsTester() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [goLive, setGoLive] = useState<GoLive | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [optOuts, setOptOuts] = useState<OptOut[]>([]);
   const [auditRows, setAuditRows] = useState<AuditRow[]>([]);
@@ -87,6 +97,7 @@ export default function SmsTester() {
     const response = await fetch("/api/sms/test", { cache: "no-store" });
     const data = await response.json().catch(() => ({}));
     if (data.settings) setSettings(data.settings);
+    if (data.goLive) setGoLive(data.goLive);
     setMessages(data.messages || []);
     setOptOuts(data.optOuts || []);
     setAuditRows(data.audit || []);
@@ -141,6 +152,36 @@ export default function SmsTester() {
 
   return (
     <div className="team-page">
+      {goLive && settings && (
+        <section className="surface team-form">
+          <h2>Go-live check (before real leads get texts)</h2>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 6 }}>
+            <Check
+              ok={Boolean(goLive.twilioBalance && goLive.twilioBalance.balance >= 50)}
+              label={goLive.twilioBalance
+                ? `Twilio balance: $${goLive.twilioBalance.balance.toFixed(2)}${goLive.twilioBalance.balance < 50 ? " (top up: Twilio console → Billing → Add funds; turn on auto-recharge)" : ""}`
+                : "Twilio balance: couldn't read it (check the Twilio console)"}
+            />
+            <Check
+              ok={goLive.capOverrides.length === 0}
+              label={goLive.capOverrides.length
+                ? `Caps: testing values still set in Vercel (${goLive.capOverrides.join(", ")}). Delete them so real leads get ${settings.limits.perContactPerDay ? "25/hour, 60/day per number, 1,500/day total" : "the defaults"}`
+                : `Caps: ${settings.limits.perContactPerHour}/hour and ${settings.limits.perContactPerDay}/day per number, ${settings.limits.systemPerDay}/day total`}
+            />
+            <Check
+              ok={Boolean(goLive.hatch?.fresh)}
+              label={goLive.hatch
+                ? `Hatch STOP list: ${goLive.hatch.count} numbers, last added ${goLive.hatch.lastAddedAt ? new Date(goLive.hatch.lastAddedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "never"} (ask Claude to sync Hatch, then Scan + Add below, within 3 days of go-live)`
+                : "Hatch STOP list: couldn't read it"}
+            />
+            <Check ok={goLive.inboxRoles.includes("csr")} label={`Texting inbox open to: ${goLive.inboxRoles.join(", ")}${goLive.inboxRoles.includes("csr") ? " (CSRs must be on the Team page)" : " (CSRs can't see it yet: merge PR 7)"}`} />
+            <Check ok={settings.slackAlerts} label={`Slack alerts ${settings.slackAlerts ? "ON (add CSRs to #texting-needs-csr)" : "OFF"}`} />
+            <Check ok={settings.leadsMode === "live" && settings.dripEnabled} label={`Lead intake ${settings.leadsMode} · drip ${settings.dripEnabled ? "ON" : "OFF"}`} />
+            <Check ok={goLive.everyone} label={goLive.everyone ? "Allow-list: everyone (*) — real leads get texts" : "Allow-list: pilot numbers only — LAST STEP: set SMS_ALLOWED_TO=* in Vercel + Redeploy"} />
+          </ul>
+        </section>
+      )}
+
       <section className="surface team-form">
         <h2>Setup check</h2>
         {settings ? (

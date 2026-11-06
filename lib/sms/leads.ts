@@ -524,8 +524,10 @@ export async function processLiveLead(lead: ParsedLead, leadId: number, now: Dat
 
 /**
  * Owners' test button (/sms-test): let the next lead for this number start a
- * fresh drip, as if it were new. Texts and notes stay. Optionally skip the
- * ServiceTitan check for this number (test phones are often real customers).
+ * fresh drip, as if it were new. Texts stay; since Session 6 PR 8 the old notes,
+ * handoffs, booking card and lead status are cleared too (old test notes made the
+ * AI reuse an old ZIP and skip questions). Optionally skip the ServiceTitan check
+ * for this number (test phones are often real customers).
  */
 export async function resetLeadForTest(phone: string, options: { skipServiceTitan: boolean }): Promise<boolean> {
   const sql = await smsDb();
@@ -533,9 +535,9 @@ export async function resetLeadForTest(phone: string, options: { skipServiceTita
       drip_started_at = NULL, drip_last_sent_at = NULL, drip_stop_reason = NULL, drip_stopped_at = NULL, drip_stopped_by = NULL,
       lead_at = NULL, lead_info = NULL, lead_count = 0, st_check = NULL, st_checked_at = NULL,
       st_test_bypass = ${options.skipServiceTitan}, drip_restart_ok = true, followups_off = false, followup_lock_until = NULL,
-      handoff_summary = CASE WHEN handoff_reason IN ('new_lead_no_texts', 'lead_resubmitted', 'st_excluded') THEN NULL ELSE handoff_summary END,
-      handoff_at = CASE WHEN handoff_reason IN ('new_lead_no_texts', 'lead_resubmitted', 'st_excluded') THEN NULL ELSE handoff_at END,
-      handoff_reason = CASE WHEN handoff_reason IN ('new_lead_no_texts', 'lead_resubmitted', 'st_excluded') THEN NULL ELSE handoff_reason END,
+      handoff_summary = NULL, handoff_at = NULL, handoff_reason = NULL, handoff_resolved_at = NULL, handoff_resolved_by = NULL,
+      customer_notes = '{}'::jsonb, lead_status = NULL, lead_status_at = NULL,
+      booking_request = NULL, booking_done_at = NULL, booking_done_by = NULL, bot_status = 'on',
       updated_at = now()
     WHERE phone = ${phone} RETURNING id`;
   return rows.length > 0;

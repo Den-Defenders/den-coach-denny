@@ -20,7 +20,10 @@ import { consentSources, leadsMode, leadsSecretConfigured, recentLeads, resetLea
 import { formatPhone, normalizePhone, type SendKind } from "@/lib/sms/rules";
 import { allowList, promoTextsEnabled, sendSms, sendingEnabled, smsLimits } from "@/lib/sms/send";
 import { audit, recentActivity, resumeBot, smsDatabaseConfigured } from "@/lib/sms/store";
-import { clearHatchScan, hatchOptOutSummary, importHatchOptOuts, scanHatchWindow } from "@/lib/sms/hatchOptOuts";
+import { clearHatchScan, hatchOptOutSummary, importHatchOptOuts, scanHatchWindow, HATCH_IMPORT_SOURCE } from "@/lib/sms/hatchOptOuts";
+import { twilioBalance } from "@/lib/sms/twilio";
+import { TEXTING_INBOX_ROLES } from "@/lib/access";
+import { smsDb } from "@/lib/sms/store";
 import { messagingConfig, webhookBaseUrl } from "@/lib/sms/twilio";
 
 export const runtime = "nodejs";
@@ -62,6 +65,32 @@ function settings() {
   };
 }
 
+/** Session 6 PR 8: everything that has to be right before real leads get texts. */
+async function goLive() {
+  const allowed = allowList();
+  let hatch: { count: number; lastAddedAt: string | null; fresh: boolean } | null = null;
+  try {
+    const sql = await smsDb();
+    const rows = await sql`SELECT
+        (SELECT count(*) FROM sms_opt_outs WHERE source = ${HATCH_IMPORT_SOURCE}) AS count,
+        (SELECT max(created_at) FROM sms_audit WHERE action = 'hatch_optout_import') AS last_at`;
+    const lastAddedAt = rows[0]?.last_at ? new Date(rows[0].last_at as string).toISOString() : null;
+    const count = Number(rows[0]?.count) || 0;
+    // Fresh = added within 3 days (Hatch keeps getting STOPs until it's turned off).
+    hatch = { count, lastAddedAt, fresh: count > 0 && Boolean(lastAddedAt) && Date.now() - Date.parse(lastAddedAt as string) < 3 * 86_400_000 };
+  } catch {
+    hatch = null;
+  }
+  return {
+    twilioBalance: await twilioBalance(),
+    capOverrides: ["SMS_MAX_PER_CONTACT_PER_HOUR", "SMS_MAX_PER_CONTACT_PER_DAY", "SMS_DAILY_CAP"].filter((k) => (process.env[k] || "").trim()),
+    hatch,
+    inboxRoles: [...TEXTING_INBOX_ROLES],
+    unlistedLoginsBlocked: (process.env.DENNY_UNLISTED_ROLE || "").trim().toLowerCase() === "none",
+    everyone: allowed.everyone,
+  };
+}
+
 export async function GET() {
   if (!await requireOwner()) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
   if (!smsDatabaseConfigured()) return NextResponse.json({ settings: settings(), messages: [], optOuts: [], audit: [], handoffs: [], leads: [] }, { headers: NO_STORE });
@@ -70,7 +99,7 @@ export async function GET() {
       console.error("SMS test leads failed:", error);
       return [];
     });
-    return NextResponse.json({ settings: settings(), ...(await recentActivity(50)), leads }, { headers: NO_STORE });
+    return NextResponse.json({ settings: settings(), goLive: await goLive(), ...(await recentActivity(50)), leads }, { headers: NO_STORE });
   } catch (error) {
     console.error("SMS test GET failed:", error);
     return NextResponse.json({ error: "Could not load texting activity.", settings: settings() }, { status: 500, headers: NO_STORE });

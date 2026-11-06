@@ -121,3 +121,32 @@ export async function twilioSendMessage(to: string, body: string, mediaUrls: str
     return { ok: false, code: null, message: error instanceof Error ? error.message : "Network error", httpStatus: 0 };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Session 6 PR 8: account balance for the /sms-test "Go-live check" (cached 5 min;
+// the page refreshes every 10 s). Read-only; null when Twilio can't be reached.
+// ---------------------------------------------------------------------------
+let balanceCache: { at: number; value: { balance: number; currency: string } | null } | null = null;
+
+export async function twilioBalance(): Promise<{ balance: number; currency: string } | null> {
+  if (balanceCache && Date.now() - balanceCache.at < 5 * 60_000) return balanceCache.value;
+  const cfg = messagingConfig();
+  if (!cfg) return null;
+  let value: { balance: number; currency: string } | null = null;
+  try {
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${cfg.accountSid}/Balance.json`, {
+      headers: { Authorization: `Basic ${Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString("base64")}` },
+      signal: AbortSignal.timeout(5_000),
+      cache: "no-store",
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { balance?: string; currency?: string };
+      const n = Number(data.balance);
+      if (Number.isFinite(n)) value = { balance: n, currency: data.currency || "USD" };
+    }
+  } catch (error) {
+    console.warn("Twilio balance check failed:", error instanceof Error ? error.message : error);
+  }
+  balanceCache = { at: Date.now(), value };
+  return value;
+}
