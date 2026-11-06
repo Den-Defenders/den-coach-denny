@@ -38,6 +38,8 @@ type LeadFields = {
   email: string | null; leadSource: string | null; campaignName: string | null; adName: string | null; formName: string | null;
   submittedAt: string | null; submittedAtAsSent: string | null; smsConsent: "yes" | "no" | "not_sent"; smsConsentAsSent: string | null;
   consentText: string | null; projectInterest: string | null; bestTime: string | null; other: Record<string, string>;
+  // Session 6 PR 3 (older leads don't have these)
+  crmCampaignName?: string | null; platform?: string | null; adSet?: string | null; inquiryTypeAsSent?: string | null;
 };
 type Lead = { id: number; receivedAt: string; mode: string; result: string; fields: LeadFields; raw: Record<string, string>; missing: string[]; warnings: string[] };
 type AuditRow = { id: number; phone: string | null; action: string; reason: string | null; detail: Record<string, unknown> | null; actor: string | null; created_at: string };
@@ -217,7 +219,7 @@ export default function SmsTester() {
         {leads.length === 0 ? <p className="team-hint">No leads yet. Send a test lead from the Zap.</p> : (
           <div className="owner-table-wrap">
             <table className="team-table">
-              <thead><tr><th>Received</th><th>Name</th><th>Phone</th><th>ZIP</th><th>Email</th><th>Source / campaign / ad / form</th><th>Submitted</th><th>SMS consent</th><th>Interest · best time</th><th>Check</th></tr></thead>
+              <thead><tr><th>Received</th><th>Name</th><th>Phone</th><th>ZIP</th><th>Email</th><th>Source / platform / campaign / ad set / ad / form</th><th>Inquiry · book under</th><th>Submitted</th><th>SMS consent</th><th>Interest · best time</th><th>Check</th></tr></thead>
               <tbody>
                 {leads.map((l) => {
                   const f = l.fields;
@@ -228,7 +230,8 @@ export default function SmsTester() {
                       <td>{f.phone ? phoneLabel(f.phone) : <span style={{ color: "#b3261e" }}>{f.phoneAsSent || "missing"}</span>}</td>
                       <td>{f.zip || "—"}</td>
                       <td>{f.email || "—"}</td>
-                      <td style={{ whiteSpace: "pre-wrap", maxWidth: 260 }}>{[f.leadSource, f.campaignName, f.adName, f.formName].map((v) => v || "—").join("\n")}</td>
+                      <td style={{ whiteSpace: "pre-wrap", maxWidth: 260 }}>{[f.leadSource, f.platform, f.campaignName, f.adSet, f.adName, f.formName].map((v) => v || "—").join("\n")}</td>
+                      <td style={{ whiteSpace: "pre-wrap", maxWidth: 180 }}>{[f.inquiryTypeAsSent || "—", f.crmCampaignName || "—"].join("\n")}</td>
                       <td>{f.submittedAt ? when(f.submittedAt) : f.submittedAtAsSent || "—"}</td>
                       <td style={{ fontWeight: 700, color: f.smsConsent === "yes" ? "var(--teal-dark)" : "#b3261e" }}>
                         {f.smsConsent === "yes" ? "✓ Yes" : f.smsConsent === "no" ? "✗ No" : "Not sent"}

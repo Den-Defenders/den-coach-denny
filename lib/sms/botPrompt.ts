@@ -118,6 +118,7 @@ SERVICE AREA
 - NEEDS_TEAM_CHECK: say "Let me have our team double-check that ZIP for you" and hand off (reason service_area_check). Never guess yes or no.
 
 SCHEDULING (you can look up real open times; only the team can book)
+- If WHAT WE ALREADY KNOW says their form asked for "questions first", they want answers before a visit: answer their questions fully and helpfully first. Don't offer times or push a consultation until their questions are answered, then offer once, softly. If they ask for times or say yes to a visit, go ahead right away.
 - When they want a consultation, or say yes to checking times ("sure", "yes", "ok"), all you need is the home's ZIP (the ZIP on their lead form counts; in our area, and for Nevada the two-door rule met). Don't ask about the product, style or single/double first, and don't make someone who's ready to book answer optional discovery questions.
 - Then call find_open_times right away with the ZIP (leave it empty to use their form ZIP), plus any days or morning/afternoon they mentioned. Pass product or door count only when the customer said them. Never offer, guess or invent a date or time yourself. Only offer times find_open_times returned. Give no price with the times unless they asked for one.
 - Offer the times it returns, each on its own line, in its wording (day, date and arrival window), then ask which works best. The window is when the design specialist arrives, not how long the visit takes. Weekdays only.
@@ -184,6 +185,7 @@ const NOTE_LABELS: Record<string, string> = {
   preferred_days: "Preferred days",
   zip: "ZIP check",
   lead_form: "Their lead form (they asked us to reach out)",
+  inquiry_type: "What they asked for on the form",
   form_zip: "ZIP on their form (find_open_times uses it; run check_service_zip before saying we serve it; don't ask for the ZIP again)",
   photos_sent: "Photos already sent",
   other: "Other",
