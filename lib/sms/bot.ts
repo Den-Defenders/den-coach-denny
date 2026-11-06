@@ -54,6 +54,7 @@ import {
   doorTypeKnown,
   zipFromNotes,
   doorTypeFromCustomer,
+  doorTypeFromShortAnswer,
   pickFromText,
   isSlow,
   lookupOpenTimes,
@@ -675,7 +676,13 @@ export async function composeBotReply(
   const customerWords = [...thread.filter((m) => m.direction === "inbound").map((m) => m.body), formInterest].join("\n");
   const ourTexts = thread.filter((m) => m.direction === "outbound").map((m) => m.body);
   // Their door type in their own words ("Front door"), even if the AI didn't save it.
-  const saidDoorType = doorTypeFromCustomer([formInterest, ...thread.filter((m) => m.direction === "inbound").map((m) => m.body)]);
+  // Their reply right after our door-type question ("Front", "the slider") counts too.
+  const answerToDoorQuestion = (() => {
+    const i = thread.map((m) => m.direction === "outbound" && askedDoorType([m.body])).lastIndexOf(true);
+    const next = i >= 0 ? thread.slice(i + 1).find((m) => m.direction === "inbound") : undefined;
+    return next ? doorTypeFromShortAnswer(next.body) : "";
+  })();
+  const saidDoorType = doorTypeFromCustomer([formInterest, ...thread.filter((m) => m.direction === "inbound").map((m) => m.body)]) || answerToDoorQuestion;
   const doorTypeIsKnown = () => doorTypeKnown(`${notes.product || ""} ${notes.door_count || ""} ${saidDoorType}`);
   /** Keep only the product / door count the customer said; log what was dropped. */
   const onlyCustomerSaid = async (fresh: Record<string, string>, source: string): Promise<string[]> => {
@@ -849,6 +856,12 @@ export async function composeBotReply(
       await fx.log("bot_price_first", "asked", {}, "system");
       return { ok: false, error: "NEED_PRICE_FIRST", message: `Before passing it to the team, in one short text give the price for their door type from COMPANY FACTS and end with exactly: "${VALUE_QUESTION}" Don't say it's passed to the team yet.` };
     }
+    // Their door type in their own words, saved before the questions (so "which entry points" is skipped).
+    if (!notes.product && saidDoorType) {
+      notes.product = saidDoorType;
+      await fx.saveNotes({ product: saidDoorType });
+      await fx.log("bot_door_type_from_text", saidDoorType, {}, "system");
+    }
     const name = cleanArg(args.full_name, 80) || notes[BOOKING_NAME_KEY] || (notes.first_name || "");
     const address = cleanArg(args.street_address, 160) || notes[BOOKING_ADDRESS_KEY] || "";
     // Keep name/address while we ask the follow-up questions (Steven, 2026-11-05).
@@ -903,11 +916,6 @@ export async function composeBotReply(
     const saidOk = args.backup_option ? matchOffered(others, { option: args.backup_option }) : null;
     const backup = saidOk || others[0] || null;
     const area = checkServiceZip(open.zip);
-    if (!notes.product && saidDoorType) {
-      notes.product = saidDoorType;
-      await fx.saveNotes({ product: saidDoorType });
-      await fx.log("bot_door_type_from_text", saidDoorType, {}, "system");
-    }
     const booking: BookingRequest = {
       chosen: { date: chosen.date, weekday: chosen.weekday, window: chosen.window },
       backup: backup ? { date: backup.date, weekday: backup.weekday, window: backup.window, customerSaidOk: Boolean(saidOk) } : null,
@@ -1269,7 +1277,16 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     }
     if (!withinSendingHours("reply", localTime(smsNow(), contact.timeZone))) return skip(phone, "outside_reply_hours", inboundId);
     const capHit = await checkCaps(phone, "reply");
-    if (capHit) return skip(phone, capHit.reason, inboundId);
+    if (capHit) {
+      // Session 6 PR 6: never leave a customer hanging silently. Flag it once for a person
+      // (their texts don't count against the per-number caps); the AI picks up again later.
+      if (!(state.handoffReason === "cap_reached" && !state.handoffResolved)) {
+        const summary = `${capHit.message} The AI stopped answering this customer for now; a person should reply. Their last text is waiting.`;
+        await setHandoff(phone, "cap_reached", summary, smsNow(), { keepAi: true });
+        await postHandoffToSlack(phone, "cap_reached", summary, state.customerNotes);
+      }
+      return skip(phone, capHit.reason, inboundId);
+    }
 
     const thread = await threadForBot(phone, 40);
     const composed = await composeBotReply({ thread, notes: state.customerNotes, now: smsNow() }, liveEffects(phone, inboundId));

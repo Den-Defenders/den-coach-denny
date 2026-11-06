@@ -37,6 +37,7 @@ const HANDOFF_LABELS: Record<string, string> = {
   lead_resubmitted: "Sent another lead form",
   st_excluded: "ServiceTitan: no auto texts",
   st_csr_only: "ServiceTitan tag: a person answers",
+  cap_reached: "Texting limit reached: a person replies",
 };
 
 export function handoffLabel(reason: string | null): string {

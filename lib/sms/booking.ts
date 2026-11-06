@@ -258,6 +258,18 @@ export function doorTypeFromCustomer(customerTexts: string[]): string {
   return "";
 }
 
+/**
+ * A short answer to our door-type question: "Front", "the French ones", "Slider", "Back".
+ * (Simulator 2026-11-05: "Front" wasn't recognized, so Q5 "which entry points" was asked again.)
+ */
+export function doorTypeFromShortAnswer(text: string): string {
+  const t = (text || "").trim().toLowerCase();
+  if (!t || t.length > 40) return "";
+  const m = /^\W*(?:the\s+|our\s+|my\s+|it'?s\s+(?:the\s+|a\s+|for\s+the\s+)?|for\s+the\s+)?(front|entry|french|slider|sliding|patio|back|side|double|single)\b/.exec(t);
+  if (!m) return "";
+  return ({ front: "front door", entry: "front door", french: "French doors", slider: "sliding patio door", sliding: "sliding patio door", patio: "sliding patio door", back: "back door", side: "side door", double: "double doors", single: "front door" } as Record<string, string>)[m[1]] || "";
+}
+
 /** The door-type question the AI asks before request_booking (no price in it). */
 export const DOOR_TYPE_QUESTION = "Which door is this for: a front door, French doors, or a sliding patio door?";
 

@@ -18,7 +18,9 @@
  *   7. "reply" only within 24 hours of their last text
  *   8. sending hours in the customer's time: reply any hour (they texted us), manual 8 AM–7 PM, automated 9 AM–5 PM
  *   9. no automated texts on the holiday list
- *  10. caps: per number 8/hour and 20/day, 2 automated/day, 300/day for everyone (env can lower/raise)
+ *  10. caps: per number 25/hour and 60/day, 2 automated/day, 1,500/day for everyone (env can lower/raise).
+ *      Session 6 PR 6: a person's own texts (kind "manual") skip the per-number caps (only the
+ *      company-wide cap applies): the caps stop bot loops and bugs, not CSRs.
  */
 import {
   MAX_BODY_CHARS,
@@ -88,10 +90,13 @@ function envInt(name: string, fallback: number): number {
 
 export function smsLimits() {
   return {
-    perContactPerHour: envInt("SMS_MAX_PER_CONTACT_PER_HOUR", 8),
-    perContactPerDay: envInt("SMS_MAX_PER_CONTACT_PER_DAY", 20),
+    // Session 6 PR 6 (real leads): a full booking by text (times, door, price, value, call-or-text,
+    // up to 7 questions, goodbye) is about 14 texts in 20 minutes, so 15/hour was too tight.
+    perContactPerHour: envInt("SMS_MAX_PER_CONTACT_PER_HOUR", 25),
+    perContactPerDay: envInt("SMS_MAX_PER_CONTACT_PER_DAY", 60),
     automatedPerContactPerDay: envInt("SMS_MAX_AUTOMATED_PER_CONTACT_PER_DAY", 2),
-    systemPerDay: envInt("SMS_DAILY_CAP", 300),
+    // 40+ leads a day x drip + conversations: ~600-900 texts/day at full volume (~$10-15/day).
+    systemPerDay: envInt("SMS_DAILY_CAP", 1500),
   };
 }
 
@@ -239,6 +244,13 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
  */
 export async function checkCaps(phone: string, kind: SendKind, now: Date = clock()): Promise<{ reason: BlockReason; message: string } | null> {
   const limits = smsLimits();
+  if (kind === "manual") {
+    // A person typing in the inbox: only the company-wide cap.
+    if (await countOutboundAll(new Date(now.getTime() - DAY)) >= limits.systemPerDay) {
+      return { reason: "system_daily_cap", message: `Hit the company-wide limit of ${limits.systemPerDay} texts per 24 hours.` };
+    }
+    return null;
+  }
   if (await countOutboundTo(phone, new Date(now.getTime() - HOUR)) >= limits.perContactPerHour) {
     return { reason: "contact_hourly_cap", message: `Hit the limit of ${limits.perContactPerHour} texts per hour to one number.` };
   }
