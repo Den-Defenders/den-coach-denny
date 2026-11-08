@@ -22,6 +22,8 @@ export const COMPANY_FACTS = {
   doubleDoor: "$7,600 to $10,600",
   slider: "starting at about $4,300",
   windowScreens: "starting at about $600",
+  /** Opening window screen (Steven, 2026-11-08): same price as fixed; may say it meets egress code; don't describe the latch. */
+  safeScape: "Safe S-cape security window screen: hinged, so it opens from the inside, for an emergency escape (it meets fire egress code) or to clean the window glass behind it. Same price as our fixed window screens",
   /** What a door price includes (Mike's example, 2026-10-26). */
   doorInclusions: "the door, hardware, installation and tax",
   /** Why the final price varies. */
@@ -65,7 +67,8 @@ PRICES
 - Double door (French set) or two doors: priced per door, so about ${F.doubleDoor}, same inclusions.
 - VistaLuxe storm door: same as a security door, ${F.perDoor} per door, same inclusions.
 - Sliding security door: ${F.slider}.
-- Security window screens: ${F.windowScreens}.
+- Security window screens: ${F.windowScreens}, fixed or Safe S-cape (the kind that opens).
+- ${F.safeScape}.
 - Exact prices come from the free in-home design consultation after measuring. Never calculate totals, never quote a lower "starting at" number for a door, never invent upgrade prices.
 WARRANTY
 - Security doors, security sliders and security window screens: ${F.securityWarranty}.
