@@ -55,6 +55,7 @@ import {
   zipFromNotes,
   doorTypeFromCustomer,
   doorTypeFromShortAnswer,
+  pickAfterOffer,
   pickFromText,
   isSlow,
   lookupOpenTimes,
@@ -584,6 +585,10 @@ export function followUpGoodbye(followUp: "call" | "text", firstName: string, ti
 }
 
 export const VALUE_QUESTION = "Want me to walk you through what goes into that price?";
+/** Their text asks about price or cost (so giving the price again is fine). */
+export function asksAboutPrice(text: string): boolean {
+  return /\$|\b(price|prices|pricing|priced|cost|costs|how much|quote|expensive|cheap|cheaper|afford|budget)\b/i.test(text || "");
+}
 const askedAboutValue = (ourTexts: string[]) => ourTexts.some((t) => /what goes into that price/i.test(t));
 
 export function withAfterHoursNote(reply: string, now: Date, timeZone = DEFAULT_TIME_ZONE): string {
@@ -693,11 +698,26 @@ export async function composeBotReply(
     return dropped;
   };
   const offered = openTimesFrom(notes);
+  const lastInboundAt = thread.map((m) => m.direction).lastIndexOf("inbound");
+  const theirLastText = thread[lastInboundAt]?.body || "";
+  // They picked an offered time in words ("Wednesday"): code saves it before the AI runs, so the AI
+  // sees "Time they picked" and goes on to name + address (Simulator 2026-11-08: the AI skipped
+  // choose_time, asked the door type again and repeated the price).
+  if (offered && !chosenTimeFrom(notes)) {
+    const ourLastText = thread.slice(0, Math.max(lastInboundAt, 0)).filter((m) => m.direction === "outbound").pop()?.body || "";
+    const pick = pickAfterOffer(ourLastText, theirLastText, offered.times);
+    if (pick) {
+      notes[CHOSEN_TIME_KEY] = JSON.stringify(pick);
+      await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
+      await fx.log("bot_time_chosen", pick.date, { window: pick.window, by: "code" });
+    }
+  }
   const picked = chosenTimeFrom(notes);
   const known: KnownAboutCustomer = {
     notes,
     priceAlreadyGiven: priceAlreadyGiven(thread),
     inclusionsAlreadyGiven: inclusionsAlreadyGiven(thread),
+    doorType: saidDoorType || undefined,
     linksSent: linksSent(thread),
     openTimes: offered?.times.map((t) => `${t.n}. ${timeWords(t)}`),
     chosenTime: picked ? timeWords(picked) : undefined,
@@ -725,6 +745,7 @@ export async function composeBotReply(
   let photoNudged = false;
   let bookingNudged = false;
   let pickNudged = false;
+  let repeatNudged = false;
   let usedModel = botModel();
 
   const saveZip = async (zip: string) => {
@@ -979,6 +1000,14 @@ export async function composeBotReply(
     }
   }
 
+  /** What the reply asks or says again that this thread already covered. */
+  const repeatsKnown = (text: string): Array<"door_type" | "price"> => {
+    const out: Array<"door_type" | "price"> = [];
+    if (doorTypeIsKnown() && askedDoorType([text])) out.push("door_type");
+    if (known.priceAlreadyGiven && (/\$[\d,]+ to \$[\d,]+/.test(text) || text.includes(VALUE_QUESTION)) && !asksAboutPrice(theirLastText)) out.push("price");
+    return out;
+  };
+
   for (let round = 0; round < MAX_ROUNDS && !reply; round++) {
     const params = (model: string): CompletionParams => ({
       model,
@@ -1024,6 +1053,21 @@ export async function composeBotReply(
         messages.push({
           role: "system",
           content: "Check (from the system, not the customer): they picked a time, but you haven't called request_booking. If you have their full name and street address (or they'd rather not text the address), call request_booking now and then write the final message. If you still need them, ask for them without saying it's been passed to the team.",
+        });
+        reply = "";
+        continue;
+      }
+      // Don't ask again what they already told us, or re-quote a price they didn't ask about (Simulator 2026-11-08).
+      const repeats = repeatsKnown(reply);
+      if (!repeatNudged && round < MAX_ROUNDS - 1 && repeats.length) {
+        repeatNudged = true;
+        await fx.log("bot_repeat_retry", repeats.join(","), {}, "system");
+        const next = chosenTimeFrom(notes) && !(notes[BOOKING_NAME_KEY] && notes[BOOKING_ADDRESS_KEY])
+          ? " They already picked a time, so next ask for their full name and the street address of the home (unless you have both)."
+          : "";
+        messages.push({
+          role: "system",
+          content: `Check (from the system, not the customer): ${repeats.includes("door_type") ? `they already told you which door (${saidDoorType || notes.product}), so don't ask which door it's for again. ` : ""}${repeats.includes("price") ? `you already gave the price in this thread and they didn't ask about it again, so don't repeat the price or ask "${VALUE_QUESTION}". ` : ""}Rewrite the reply.${next}`,
         });
         reply = "";
         continue;
@@ -1138,6 +1182,15 @@ export async function composeBotReply(
   if (claimsBooked(reply)) {
     await fx.log("bot_booking_claim_removed", "said_booked", {}, "system");
     reply = withoutBookingClaim(reply) || SAFE_BOOKING_GOODBYE;
+  }
+
+  // Still repeating after the retry while we wait for name + address: code writes the next question.
+  {
+    const chosen = chosenTimeFrom(notes);
+    if (!handedOff && chosen && repeatsKnown(reply).length && !(notes[BOOKING_NAME_KEY] && notes[BOOKING_ADDRESS_KEY])) {
+      await fx.log("bot_repeat_replaced", repeatsKnown(reply).join(","), {}, "system");
+      reply = "Thanks! What's your full name and the street address of the home?";
+    }
   }
 
   // Safety net: they said yes (or gave a time) to our call question, but the AI didn't hand off a call.

@@ -165,6 +165,18 @@ export function pickFromText(text: string, times: OfferedTime[]): OfferedTime | 
   return picks.length === 1 ? picks[0] : null;
 }
 
+/**
+ * Their reply to our open-times text picks one ("Wednesday", "the first one").
+ * Only right after we offered times, and never "Wednesday doesn't work" / "not Monday".
+ * (Simulator 2026-11-08: "Wednesday" wasn't saved by the AI, so it asked the door type
+ * and repeated the price instead of moving on to name and address.)
+ */
+export function pickAfterOffer(ourLastText: string, theirText: string, times: OfferedTime[]): OfferedTime | null {
+  if (!/arriving between/i.test(ourLastText || "")) return null;
+  if (/\b(not|no|none|neither|can'?t|cannot|won'?t|doesn'?t|don'?t|isn'?t|aren'?t|busy|other)\b|n't\b/i.test(theirText || "")) return null;
+  return pickFromText(theirText, times);
+}
+
 /** "2026-11-01:2" -> today's count of lookups for this customer. */
 export function lookupsToday(notes: Record<string, string>, today: string): number {
   const [day, count] = (notes[LOOKUPS_KEY] || "").split(":");
@@ -241,7 +253,7 @@ export function customerSaidDoorCount(value: string, customerWords: string): boo
 
 /** Front door / French doors / slider / windows: enough to tell the team what the visit is for. */
 export function doorTypeKnown(text: string): boolean {
-  return /\b(front|entry|single|double|doubles|french|slider|sliders|sliding|windows?|vistaluxe|storm)\b/i.test(text || "");
+  return /\b(front|entry|single|double|doubles|french|slider|sliders|sliding|swinging|hinged|windows?|vistaluxe|storm)\b/i.test(text || "");
 }
 
 /**
@@ -250,7 +262,8 @@ export function doorTypeKnown(text: string): boolean {
  * "Front door" was answered but the card said "customer didn't say").
  */
 export function doorTypeFromCustomer(customerTexts: string[]): string {
-  const PHRASE = /\b(sliding patio doors?|patio sliders?|sliding (?:glass |screen |security )?doors?|sliders?|french doors?|double (?:front |entry )?doors?|single (?:front |entry )?door|front doors?|entry doors?|side doors?|back doors?|window screens?|windows|vistaluxe|storm doors?)\b/i;
+  // "single swinging door" counts too (Simulator 2026-11-08: it was missed, so the AI asked the door type again).
+  const PHRASE = /\b(sliding patio doors?|patio sliders?|sliding (?:glass |screen |security )?doors?|sliders?|french doors?|double (?:front |entry |swinging |hinged )?doors?|single (?:front |entry |swinging |hinged )?doors?|swinging doors?|hinged doors?|front doors?|entry doors?|side doors?|back doors?|window screens?|windows|vistaluxe|storm doors?)\b/i;
   for (let i = customerTexts.length - 1; i >= 0; i--) {
     const m = PHRASE.exec(customerTexts[i] || "");
     if (m) return m[1].toLowerCase().replace(/\bfrench\b/, "French").replace(/\bvistaluxe\b/, "VistaLuxe");

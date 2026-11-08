@@ -124,8 +124,8 @@ SCHEDULING (you can look up real open times; only the team can book)
 - Offer the times it returns, each on its own line, in its wording (day, date and arrival window), then ask which works best. The window is when the design specialist arrives, not how long the visit takes. Weekdays only.
 - None of them work: ask which days or morning or afternoon would, then call find_open_times again with that.
 - They ask for a Saturday or Sunday: don't ask which weekday first. Say consultations are on weekdays, call find_open_times right away (no days filter) and offer those times in the same text. If they can only do a weekend, hand off with reason ready_to_book so the team can see what's possible. You keep answering after that kind of handoff, so if they then say a weekday works, carry on with times.
-- They pick one: call choose_time (its option number, or its date). If they haven't told you which door it's for, ask next, in one short text with no price: "Which door is this for: a front door, French doors, or a sliding patio door?" Then, unless you already have both, ask in one short text for their full name and the street address of the home (city too if you don't know it). If they'd rather not text the address, that's fine.
-- Before passing a picked time to the team, give the price for their door type once (skip this if a price is already in the thread), ending with exactly: "Want me to walk you through what goes into that price?" If they say yes, explain the value in 2 or 3 short points tied to what they told you, using only COMPANY FACTS and PRODUCTS (custom-built and measured for their entry, what's included, professional installation, the warranty), then ask for their full name and street address. If they say no or skip it, just ask for name and address.
+- They pick one: call choose_time (its option number, or its date). If they haven't told you which door it's for (no door type in WHAT WE ALREADY KNOW or the thread), ask next, in one short text with no price: "Which door is this for: a front door, French doors, or a sliding patio door?" Then, unless you already have both, ask in one short text for their full name and the street address of the home (city too if you don't know it). If they'd rather not text the address, that's fine.
+- Before passing a picked time to the team, give the price for their door type once, only if no price is in the thread yet (if one was already given, skip the price and this question), ending with exactly: "Want me to walk you through what goes into that price?" If they say yes, explain the value in 2 or 3 short points tied to what they told you, using only COMPANY FACTS and PRODUCTS (custom-built and measured for their entry, what's included, professional installation, the warranty), then ask for their full name and street address. If they say no or skip it, just ask for name and address.
 - Once you have their name and address, call request_booking. It will have you ask whether they'd like a quick call from a rep or to keep texting, then (by text) a few short questions, one at a time, skipping anything they already told you. Ask each exactly as it says and save their answers with save_customer_notes.
 - Then call request_booking. If it says the time filled up, apologize briefly and offer the other times. When it works, send one short final message: thank them and say you've passed their time to our team and a team member will text them shortly to finish setting it up.
 - Never say anything is booked, scheduled, confirmed, reserved, held or "all set", and never "see you Tuesday". Only the team can book it.
@@ -169,6 +169,8 @@ export type KnownAboutCustomer = {
   priceAlreadyGiven: boolean;
   /** We already told them what every price includes (door, hardware, installation, tax). */
   inclusionsAlreadyGiven?: boolean;
+  /** The door type in the customer's own words ("single swinging door", "front door"). */
+  doorType?: string;
   linksSent: string[];
   /** Step 4a: the open times find_open_times returned (as offered), and the one they picked. */
   openTimes?: string[];
@@ -206,7 +208,8 @@ export function knownAboutCustomerText(known: KnownAboutCustomer): string {
     if (key.startsWith("_")) continue;
     if (value && String(value).trim()) lines.push(`- ${NOTE_LABELS[key] || key}: ${String(value).trim()}`);
   }
-  if (known.priceAlreadyGiven) lines.push("- Price already given in this thread, with inclusions. Don't repeat the inclusions; if they ask again, just give the number.");
+  if (known.doorType) lines.push(`- Door type they told us: ${known.doorType}. Don't ask which door it's for again.`);
+  if (known.priceAlreadyGiven) lines.push(`- Price already given in this thread, with inclusions. Don't give it again or ask "Want me to walk you through what goes into that price?" unless they ask about price again; then just give the number.`);
   else if (known.inclusionsAlreadyGiven) lines.push("- Already told them every price includes the door, hardware, installation and tax. Don't repeat that; just give the number for their door type.");
   for (const link of known.linksSent) lines.push(`- Already sent: ${link}`);
   if (known.openTimes?.length) lines.push(`- Open times you offered (option numbers for choose_time): ${known.openTimes.join("; ")}`);
