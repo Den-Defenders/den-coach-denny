@@ -180,6 +180,8 @@ export default function TextingInbox() {
   const [nameDraft, setNameDraft] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const [me, setMe] = useState<string | null>(null);
+  /** Session 7: customers waiting on me / the most a CSR may hold (null for owners and managers). */
+  const [myWaiting, setMyWaiting] = useState<{ count: number; max: number } | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const lastCount = useRef(0);
   const searchRef = useRef(search);
@@ -191,6 +193,7 @@ export default function TextingInbox() {
     if (response?.ok) {
       setConversations(json.conversations || []);
       setMe(json.me || null);
+      setMyWaiting(json.myWaiting || null);
       setListError("");
     } else {
       setListError(json.error || "Could not load the inbox.");
@@ -316,6 +319,11 @@ export default function TextingInbox() {
       <section className="surface inbox-list" aria-label="Conversations">
         <div className="inbox-list-head">
           <h2>Texting {needsCount > 0 && <span className="inbox-count">{needsCount} need a person</span>}</h2>
+          {myWaiting && myWaiting.count > 0 && (
+            <div className={`team-hint inbox-my-waiting${myWaiting.count >= myWaiting.max ? " full" : ""}`}>
+              {myWaiting.count} of {myWaiting.max} customers waiting on you{myWaiting.count >= myWaiting.max ? ". Reply to some before taking more." : ""}
+            </div>
+          )}
           <input
             className="inbox-search"
             value={search}

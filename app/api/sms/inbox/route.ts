@@ -11,7 +11,8 @@
  *   POST {action:"resume_bot", phone}   -> turn the AI back on for this number
  *   POST {action:"mark_handled", phone} -> clear "Needs CSR" (AI on/off unchanged)
  *   POST {action:"set_name", phone, name}
- *   POST {action:"claim", phone}        -> "Take it": this customer is mine
+ *   POST {action:"claim", phone}        -> "Take it": this customer is mine (Session 7: a CSR can hold at most
+ *                                          SMS_CSR_MAX_WAITING (10) chats with a customer waiting; owners/managers uncapped)
  *   POST {action:"release", phone}      -> back to the shared queue (own customer, or owner/manager)
  *   POST {action:"assign", phone, to}   -> owners/managers give the customer to a team member (email)
  *   POST {action:"mark_booked", phone}  -> "Booked in ServiceTitan" (step 4a): clears the "📅 Ready to book"
@@ -26,7 +27,16 @@ import { dripLabel, stopDrip } from "@/lib/sms/drip";
 import { followUpLabel, followUpPlanFor, stopFollowUps } from "@/lib/sms/followup";
 import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
-import { TEAM_CLOCK_TEXT, pacificWhen, releasePlan } from "@/lib/sms/ownership";
+import {
+  TEAM_CLOCK_TEXT,
+  capMessage,
+  customerWaitingSince,
+  isCappedRole,
+  maxWaitingPerCsr,
+  pacificWhen,
+  releasePlan,
+  waitingCountFor,
+} from "@/lib/sms/ownership";
 import { formatPhone, normalizePhone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
 import {
@@ -72,6 +82,30 @@ async function inboxTeam(): Promise<TeamMember[]> {
   } catch (error) {
     console.error("SMS inbox team list failed:", error instanceof Error ? error.message : error);
     return [];
+  }
+}
+
+/**
+ * Session 7 PR 2: would taking this chat put a CSR over the waiting-chat cap?
+ * Only a chat with a customer waiting counts; owners and managers are never capped.
+ * Returns the message to show, or null when it's fine.
+ */
+async function capBlock(access: DennyAccess, phone: string): Promise<string | null> {
+  if (!access.email || !isCappedRole(access.role)) return null;
+  const full = await inboxThread(phone);
+  if (!full || !customerWaitingSince({ ...full, optedOut: Boolean(full.optOut) }, full.messages)) return null;
+  const count = await waitingCountFor(access.email);
+  return count >= maxWaitingPerCsr() ? capMessage(count) : null;
+}
+
+/** "3 of 10" for the list header (CSRs only; null for owners/managers or on error). */
+async function myWaiting(access: DennyAccess): Promise<{ count: number; max: number } | null> {
+  if (!access.email || !isCappedRole(access.role)) return null;
+  try {
+    return { count: await waitingCountFor(access.email), max: maxWaitingPerCsr() };
+  } catch (error) {
+    console.error("SMS waiting count failed:", error instanceof Error ? error.message : error);
+    return null;
   }
 }
 
@@ -184,6 +218,7 @@ export async function GET(request: Request) {
       conversations,
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
       me: access.email,
+      myWaiting: await myWaiting(access),
       now: now.toISOString(),
     });
   } catch (error) {
@@ -225,6 +260,11 @@ export async function POST(request: Request) {
         return json({ ok: any, message: any ? "Auto texts stopped for this customer: no more drip texts or AI follow-ups." : "This customer has no auto texts running." });
       }
       case "take_over": {
+        // Pausing the AI on an unowned chat makes it yours, so the cap applies here too.
+        if (!thread.assignedTo) {
+          const blocked = await capBlock(access, phone);
+          if (blocked) return json({ ok: false, message: blocked }, 409);
+        }
         await takeOverConversation(phone, who, now);
         await audit({ phone, action: "bot_paused", reason: "person_took_over", actor: who });
         return json({ ok: true, message: `AI paused for ${formatPhone(phone)}. You're answering this customer.` });
@@ -244,6 +284,13 @@ export async function POST(request: Request) {
         if (!access.email) return json({ ok: false, message: "Your login has no email, so it can't own customers." }, 400);
         if (thread.assignedTo && thread.assignedTo !== access.email && !canAssignOthers(access)) {
           return json({ ok: false, message: `${nameFor(thread.assignedTo, await inboxTeam())} already has this customer. Ask a manager to reassign it.` }, 409);
+        }
+        if (thread.assignedTo !== access.email) {
+          const blocked = await capBlock(access, phone);
+          if (blocked) {
+            await audit({ phone, action: "claim_blocked", reason: "waiting_cap", detail: { max: maxWaitingPerCsr() }, actor: who });
+            return json({ ok: false, message: blocked }, 409);
+          }
         }
         await assignConversation(phone, access.email, now);
         await audit({ phone, action: "assigned", reason: "claimed", detail: { from: thread.assignedTo }, actor: who });
