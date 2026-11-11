@@ -110,6 +110,19 @@ export function botEnabled(): boolean {
   return (process.env.SMS_BOT_ENABLED || "").trim().toLowerCase() === "true";
 }
 
+/**
+ * Spam fix (Steven, 2026-11-11): bulk marketing texts sent to the pilot number
+ * ("...Reply OUT to opt out", "Text STOP to unsubscribe", "Msg & data rates may apply").
+ * The AI doesn't answer these when we've never texted that number. A real customer
+ * we've texted is always answered, even if their text happens to match.
+ */
+const BULK_OPT_OUT_LINE = /\b(stop|out|end|quit|cancel|unsubscribe)\b\W{0,3}\s*to\s+(opt[\s-]*out|unsubscribe|unsub|stop|end|cancel|quit)\b/i;
+const BULK_RATES_LINE = /\b(msg|message)s?\s*(&|and)\s*data\s+rates\s+(may\s+)?apply\b/i;
+export function looksLikeBulkMarketing(text: string): boolean {
+  const t = text || "";
+  return BULK_OPT_OUT_LINE.test(t) || BULK_RATES_LINE.test(t);
+}
+
 /** gpt-4.1-mini follows the long texting rules better than gpt-4o-mini (Steven, 2026-10-25). */
 export const DEFAULT_BOT_MODEL = "gpt-4.1-mini";
 /** Used only if the main model errors (e.g. not enabled on the OpenAI account). */
@@ -1314,6 +1327,11 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
     const allowed = allowList();
     if (!allowed.everyone && !allowed.numbers.includes(phone)) return skip(phone, "not_on_allow_list", inboundId);
     if (await findOptOut(phone)) return skip(phone, "opted_out", inboundId);
+    const thread = await threadForBot(phone, 40);
+    const lastIn = [...thread].reverse().find((m) => m.direction === "inbound");
+    if (!thread.some((m) => m.direction === "outbound") && looksLikeBulkMarketing(lastIn?.body || "")) {
+      return skip(phone, "looks_like_marketing_spam", inboundId);
+    }
     const state = await conversationState(phone);
     if (state.botStatus === "paused") return skip(phone, `handed_off:${state.handoffReason || "team"}`, inboundId);
     const contact = await ensureContact(phone);
@@ -1341,7 +1359,6 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       return skip(phone, capHit.reason, inboundId);
     }
 
-    const thread = await threadForBot(phone, 40);
     const composed = await composeBotReply({ thread, notes: state.customerNotes, now: smsNow() }, liveEffects(phone, inboundId));
     if (composed.kind === "opted_out") return { status: "opted_out" };
     if (composed.kind === "no_reply") {
