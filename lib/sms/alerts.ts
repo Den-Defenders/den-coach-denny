@@ -102,3 +102,18 @@ export async function postReadyToBookAlert(phone: string, booking: BookingReques
   ].join("\n");
   return postSmsSlack(text);
 }
+
+/**
+ * Session 7: the owner didn't reply within 1 team hour, so the chat went back to the
+ * shared queue. @here so whoever is free picks it up (Steven, 2026-11-11: @here + name the owner).
+ */
+export async function postAutoReleaseAlert(phone: string, ownerName: string, customerName: string | null, waitingSince: Date): Promise<void> {
+  if (!slackAlertsEnabled()) return;
+  const who = customerName ? `${customerName} (${formatPhone(phone)})` : formatPhone(phone);
+  const since = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", hour: "numeric", minute: "2-digit" }).format(waitingSince);
+  const text = [
+    `${pilotTag()}<!here> :alarm_clock: *Released:* ${ownerName} didn't reply within 1 hour. ${who} is still waiting (since ${since}). Open for anyone.`,
+    `<${inboxLink(phone)}|Open in the Texting inbox>`,
+  ].join("\n");
+  return postSmsSlack(text);
+}

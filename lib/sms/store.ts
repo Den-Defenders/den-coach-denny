@@ -105,6 +105,9 @@ async function createTables(sql: Sql) {
   // Who owns this customer in the inbox (a team member's login email), set by "Take it" or their first reply.
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS assigned_to TEXT`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ`;
+  // Session 7: the owner didn't reply within 1 team hour, so the chat went back to the shared queue.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS released_from TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ`;
   // Step 4a: the open time the customer picked by text ("📅 Ready to book") and when a CSR booked it in ServiceTitan.
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_request JSONB`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_done_at TIMESTAMPTZ`;
@@ -576,6 +579,9 @@ export type InboxRow = {
   handoffResolvedAt: string | null;
   leadStatus: string | null;
   assignedTo: string | null;
+  /** Session 7: auto-released from this owner (shown while nobody owns the chat). */
+  releasedFrom: string | null;
+  releasedAt: string | null;
   bookingRequest: unknown;
   bookingDoneAt: string | null;
   /** Step 5: when their lead form came in, and the drip's state (null = no drip). */
@@ -617,7 +623,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
   const limit = Math.min(Math.max(options.limit ?? 300, 1), 500);
   const { text, digits } = searchPatterns(options.search);
   const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.lead_status, v.assigned_to, v.booking_request, v.booking_done_at, v.lead_at, v.drip_status,
+      v.lead_status, v.assigned_to, v.released_from, v.released_at, v.booking_request, v.booking_done_at, v.lead_at, v.drip_status,
       c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
       m.status AS last_status, m.created_at AS last_at
@@ -650,6 +656,8 @@ export async function listInboxConversations(options: { search?: string; limit?:
     handoffResolvedAt: toIso(r.handoff_resolved_at),
     leadStatus: (r.lead_status as string) ?? null,
     assignedTo: (r.assigned_to as string) ?? null,
+    releasedFrom: (r.released_from as string) ?? null,
+    releasedAt: toIso(r.released_at),
     bookingRequest: r.booking_request ?? null,
     bookingDoneAt: toIso(r.booking_done_at),
     leadAt: toIso(r.lead_at),
@@ -692,6 +700,8 @@ export type InboxThread = {
   leadStatus: string | null;
   assignedTo: string | null;
   assignedAt: string | null;
+  releasedFrom: string | null;
+  releasedAt: string | null;
   bookingRequest: unknown;
   bookingDoneAt: string | null;
   bookingDoneBy: string | null;
@@ -723,7 +733,7 @@ export type InboxThread = {
 export async function inboxThread(phone: string, limit = 200): Promise<InboxThread | null> {
   const sql = await db();
   const rows = await sql`SELECT v.id, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.booking_request, v.booking_done_at, v.booking_done_by,
+      v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.released_from, v.released_at, v.booking_request, v.booking_done_at, v.booking_done_by,
       v.customer_notes, v.lead_at, v.lead_count, v.lead_info, v.drip_status, v.drip_step, v.drip_next_at, v.drip_started_at,
       v.drip_last_sent_at, v.drip_stop_reason, v.drip_stopped_at, v.drip_stopped_by, v.st_check, v.st_checked_at,
       c.first_name, c.last_name, c.time_zone
@@ -747,6 +757,8 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
     leadStatus: (v.lead_status as string) ?? null,
     assignedTo: (v.assigned_to as string) ?? null,
     assignedAt: toIso(v.assigned_at),
+    releasedFrom: (v.released_from as string) ?? null,
+    releasedAt: toIso(v.released_at),
     bookingRequest: v.booking_request ?? null,
     bookingDoneAt: toIso(v.booking_done_at),
     bookingDoneBy: (v.booking_done_by as string) ?? null,
@@ -811,6 +823,8 @@ export async function takeOverConversation(phone: string, by: string, at: Date) 
       handoff_resolved_at = ${iso(at)}::timestamptz, handoff_resolved_by = ${by.slice(0, 120)},
       assigned_at = CASE WHEN assigned_to IS NULL THEN ${iso(at)}::timestamptz ELSE assigned_at END,
       assigned_to = COALESCE(assigned_to, ${by.slice(0, 120)}),
+      released_from = CASE WHEN assigned_to IS NULL THEN NULL ELSE released_from END,
+      released_at = CASE WHEN assigned_to IS NULL THEN NULL ELSE released_at END,
       updated_at = now()
     WHERE id = ${contact.conversationId}`;
 }
@@ -819,8 +833,97 @@ export async function takeOverConversation(phone: string, by: string, at: Date) 
 export async function assignConversation(phone: string, to: string | null, at: Date): Promise<boolean> {
   const sql = await db();
   const rows = await sql`UPDATE sms_conversations SET assigned_to = ${to ? to.slice(0, 120) : null},
-      assigned_at = ${to ? iso(at) : null}::timestamptz, updated_at = now()
+      assigned_at = ${to ? iso(at) : null}::timestamptz, released_from = NULL, released_at = NULL, updated_at = now()
     WHERE phone = ${phone} RETURNING id`;
+  return rows.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Session 7: ownership rules (lib/sms/ownership.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * A text as the ownership rules see it. "A person sent this" in SQL below = sent_by is a
+ * team member's login, not denny-*, system or drip (keep in sync with isPersonSender).
+ */
+export type WaitMessage = { direction: "inbound" | "outbound"; body: string; sentBy: string | null; status: string; createdAt: string };
+
+export type OwnedConversation = {
+  phone: string;
+  assignedTo: string;
+  assignedAt: string | null;
+  botStatus: BotStatus;
+  handoffAt: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  /** Last text from a person or "Mark handled", whichever is later (null = never). */
+  anchorAt: string | null;
+};
+
+/**
+ * Owned, not opted-out chats where the customer texted after the last person text and
+ * after "Mark handled" (a cheap first pass; ownership.ts decides if they're really waiting).
+ */
+export async function ownedConversationsWithNewTexts(owner?: string): Promise<OwnedConversation[]> {
+  const sql = await db();
+  const rows = await sql`SELECT v.phone, v.assigned_to, v.assigned_at, v.bot_status, v.handoff_at, c.first_name, c.last_name,
+      NULLIF(GREATEST(coalesce(p.at, '-infinity'::timestamptz), coalesce(v.handoff_resolved_at, '-infinity'::timestamptz)), '-infinity'::timestamptz) AS anchor_at
+    FROM sms_conversations v
+    JOIN sms_contacts c ON c.phone = v.phone
+    LEFT JOIN sms_opt_outs o ON o.phone = v.phone
+    LEFT JOIN LATERAL (
+      SELECT max(m.created_at) AS at FROM sms_messages m
+      WHERE m.conversation_id = v.id AND m.direction = 'outbound' AND m.status <> 'send_failed'
+        AND m.sent_by IS NOT NULL AND m.sent_by NOT LIKE 'denny-%' AND m.sent_by NOT IN ('system', 'drip')
+    ) p ON true
+    WHERE v.assigned_to IS NOT NULL AND o.phone IS NULL
+      AND (${owner ?? null}::text IS NULL OR v.assigned_to = ${owner ?? null}::text)
+      AND v.last_inbound_at IS NOT NULL
+      AND v.last_inbound_at > GREATEST(coalesce(p.at, '-infinity'::timestamptz), coalesce(v.handoff_resolved_at, '-infinity'::timestamptz))`;
+  return rows.map((r) => ({
+    phone: String(r.phone),
+    assignedTo: String(r.assigned_to),
+    assignedAt: toIso(r.assigned_at),
+    botStatus: r.bot_status === "paused" ? "paused" : "on",
+    handoffAt: toIso(r.handoff_at),
+    firstName: (r.first_name as string) || null,
+    lastName: (r.last_name as string) || null,
+    anchorAt: toIso(r.anchor_at),
+  }));
+}
+
+/** Texts after `after` (all texts if null), oldest first (at most the newest 200). */
+export async function messagesSince(phone: string, after: string | null): Promise<WaitMessage[]> {
+  const sql = await db();
+  const rows = await sql`SELECT direction, body, sent_by, status, created_at FROM sms_messages
+    WHERE phone = ${phone} AND (${after}::timestamptz IS NULL OR created_at > ${after}::timestamptz)
+    ORDER BY created_at DESC, id DESC LIMIT 200`;
+  return rows.reverse().map((m) => ({
+    direction: m.direction === "outbound" ? "outbound" : "inbound",
+    body: String(m.body || ""),
+    sentBy: (m.sent_by as string) ?? null,
+    status: String(m.status || ""),
+    createdAt: toIso(m.created_at) || "",
+  }));
+}
+
+/**
+ * Put an owned chat back in the shared queue because the owner didn't reply in time.
+ * Only if nothing changed since the timer looked: same owner (same claim time), no
+ * person text and no "Mark handled" since the customer started waiting.
+ */
+export async function autoReleaseConversation(phone: string, owner: string, assignedAt: string | null, waitStart: Date, at: Date): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations v SET assigned_to = NULL, assigned_at = NULL,
+      released_from = ${owner}, released_at = ${iso(at)}::timestamptz, updated_at = now()
+    WHERE v.phone = ${phone} AND v.assigned_to = ${owner}
+      AND date_trunc('milliseconds', v.assigned_at) IS NOT DISTINCT FROM ${assignedAt}::timestamptz
+      AND (v.handoff_resolved_at IS NULL OR v.handoff_resolved_at < ${iso(waitStart)}::timestamptz)
+      AND NOT EXISTS (
+        SELECT 1 FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'outbound' AND m.status <> 'send_failed'
+          AND m.sent_by IS NOT NULL AND m.sent_by NOT LIKE 'denny-%' AND m.sent_by NOT IN ('system', 'drip')
+          AND m.created_at >= ${iso(waitStart)}::timestamptz)
+    RETURNING v.id`;
   return rows.length > 0;
 }
 
