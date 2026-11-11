@@ -509,3 +509,5 @@ a { color: inherit; }
 .inbox-owner { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 14px; color: var(--ink); }
 .inbox-owner select { min-height: 34px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 10px; font: inherit; font-size: 14px; background: #fff; color: var(--ink); }
 .inbox-release-note { margin: 6px 0 0; font-size: 13px; color: #7a5300; }
+.inbox-my-waiting { margin: 2px 0 6px; font-size: 13px; }
+.inbox-my-waiting.full { color: #b42318; font-weight: 600; }

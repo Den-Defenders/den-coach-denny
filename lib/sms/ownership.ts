@@ -175,18 +175,50 @@ export function releaseDeadline(waitStart: Date, assignedAt: string | null): Dat
   return addTeamMinutes(start, AUTO_RELEASE_MINUTES);
 }
 
-/** For the inbox: when this owned chat goes back to the queue if nobody replies (null = not waiting / not owned). */
-export function releasePlan(
-  conv: { assignedTo: string | null; assignedAt: string | null; botStatus: "on" | "paused"; handoffAt: string | null; handoffResolvedAt: string | null; optedOut: boolean },
-  messages: WaitMessage[],
-): { waitingSince: Date; releaseAt: Date } | null {
-  if (!conv.assignedTo || conv.optedOut) return null;
+type WaitState = { botStatus: "on" | "paused"; handoffAt: string | null; handoffResolvedAt: string | null; optedOut: boolean };
+
+/** Is this customer waiting for a person right now (from a thread's texts, oldest first)? Since when? */
+export function customerWaitingSince(conv: WaitState, messages: WaitMessage[]): Date | null {
+  if (conv.optedOut) return null;
   const resolved = conv.handoffResolvedAt ? Date.parse(conv.handoffResolvedAt) : 0;
   const lastPerson = Math.max(0, ...messages.filter((m) => m.direction === "outbound" && m.status !== "send_failed" && isPersonSender(m.sentBy)).map((m) => Date.parse(m.createdAt)));
   const anchor = Math.max(resolved, lastPerson);
-  const since = waitingSince(messages.filter((m) => Date.parse(m.createdAt) > anchor), conv);
+  return waitingSince(messages.filter((m) => Date.parse(m.createdAt) > anchor), conv);
+}
+
+/** For the inbox: when this owned chat goes back to the queue if nobody replies (null = not waiting / not owned). */
+export function releasePlan(
+  conv: WaitState & { assignedTo: string | null; assignedAt: string | null },
+  messages: WaitMessage[],
+): { waitingSince: Date; releaseAt: Date } | null {
+  if (!conv.assignedTo) return null;
+  const since = customerWaitingSince(conv, messages);
   if (!since) return null;
   return { waitingSince: since, releaseAt: releaseDeadline(since, conv.assignedAt) };
+}
+
+// ---------------------------------------------------------------------------
+// PR 2: no hoarding. A CSR can own at most 10 chats with a customer waiting.
+// ---------------------------------------------------------------------------
+
+/** SMS_CSR_MAX_WAITING (default 10): how many waiting customers one CSR may hold. */
+export function maxWaitingPerCsr(): number {
+  const n = Number.parseInt(process.env.SMS_CSR_MAX_WAITING || "", 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 500) : 10;
+}
+
+/** Owners and managers aren't capped. */
+export function isCappedRole(role: string | null | undefined): boolean {
+  return role !== "owner" && role !== "manager";
+}
+
+/** How many owned chats have a customer waiting on this person. */
+export async function waitingCountFor(email: string): Promise<number> {
+  return (await ownedWaitingChats(email)).length;
+}
+
+export function capMessage(count: number): string {
+  return `You have ${count} customer${count === 1 ? "" : "s"} waiting on you. Reply to some first.`;
 }
 
 /** "Thu 8:30 AM" in Pacific time, for Slack and the inbox. */
