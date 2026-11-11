@@ -13,6 +13,8 @@ type Conversation = {
   handoffReason: string | null;
   assignedTo: string | null;
   assignedName: string | null;
+  /** Session 7: auto-released from this owner (no reply in 1 team hour). */
+  releasedName: string | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -61,6 +63,10 @@ type Thread = {
   leadStatus: string | null;
   assignedTo: string | null;
   assignedName: string | null;
+  releasedName: string | null;
+  releasedAt: string | null;
+  /** "If nobody replies, this chat goes back to the shared queue at …" (owned chats with a customer waiting). */
+  releaseNote: string | null;
   customerNotes: Record<string, string>;
   booking: Booking | null;
   /** Step 5: their lead form and the drip. */
@@ -342,6 +348,7 @@ export default function TextingInbox() {
                   <span className="inbox-badges">
                     {c.flag.needsCsr && <span className={`inbox-badge ${c.flag.pinned ? "green" : "red"}`}>{c.flag.pinned ? c.flag.reason : `Needs CSR · ${c.flag.reason}`}</span>}
                     {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
+                    {!c.assignedTo && c.releasedName && <span className="inbox-badge amber">⏰ Released from {c.releasedName} (no reply in 1 hr)</span>}
                     {c.optedOut ? <span className="inbox-badge gray">Opted out</span>
                       : c.botStatus === "paused" ? <span className="inbox-badge amber">AI paused</span>
                         : <span className="inbox-badge teal">AI on</span>}
@@ -397,6 +404,9 @@ export default function TextingInbox() {
               {thread.assignedTo && (thread.assignedTo === data.me || data.canAssign) && (
                 <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("release")}>Release</button>
               )}
+              {!thread.assignedTo && thread.releasedName && (
+                <span className="inbox-badge amber">⏰ Released from {thread.releasedName} (no reply in 1 hr){thread.releasedAt ? ` · ${longWhen(thread.releasedAt)}` : ""}</span>
+              )}
               {data.canAssign && data.team.length > 0 && (
                 <select aria-label="Assign to" value="" disabled={busy} onChange={(e) => { if (e.target.value) act("assign", { to: e.target.value }); }}>
                   <option value="">Assign to…</option>
@@ -404,6 +414,7 @@ export default function TextingInbox() {
                 </select>
               )}
             </div>
+            {thread.releaseNote && <div className="team-hint inbox-release-note">⏰ {thread.releaseNote}</div>}
 
             <div className="inbox-status">
               {flag.needsCsr && <span className={`inbox-badge ${flag.pinned ? "green" : "red"}`}>{flag.pinned ? flag.reason : `Needs CSR · ${flag.reason}`}</span>}

@@ -26,6 +26,7 @@ import { dripLabel, stopDrip } from "@/lib/sms/drip";
 import { followUpLabel, followUpPlanFor, stopFollowUps } from "@/lib/sms/followup";
 import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
+import { TEAM_CLOCK_TEXT, pacificWhen, releasePlan } from "@/lib/sms/ownership";
 import { formatPhone, normalizePhone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
 import {
@@ -117,6 +118,8 @@ export async function GET(request: Request) {
       }, now);
       const team = await inboxTeam();
       const followUp = thread.lead.at ? await followUpPlanFor(phone) : null;
+      // Session 7: an owned chat with a customer waiting goes back to the queue after 1 team hour.
+      const plan = releasePlan({ ...thread, optedOut: Boolean(thread.optOut) }, thread.messages);
       return json({
         thread: {
           ...thread,
@@ -131,6 +134,10 @@ export async function GET(request: Request) {
               }
             : null,
           assignedName: nameFor(thread.assignedTo, team),
+          releasedName: !thread.assignedTo && thread.releasedFrom ? nameFor(thread.releasedFrom, team) : null,
+          releaseNote: plan
+            ? `Customer waiting since ${pacificWhen(plan.waitingSince)}. If nobody replies, this chat goes back to the shared queue ${plan.releaseAt.getTime() <= now.getTime() ? "within 5 minutes" : `at ${pacificWhen(plan.releaseAt)}`} (1 hour of team time, ${TEAM_CLOCK_TEXT}).`
+            : null,
           phoneLabel: formatPhone(phone),
           lead: thread.lead.at || thread.lead.drip.status
             ? {
@@ -168,6 +175,7 @@ export async function GET(request: Request) {
         // Shown under the "📅 Ready to book" badge so the time is visible without opening it.
         bookingTime: booking && !row.bookingDoneAt ? shortTimeWords(booking.chosen) : null,
         assignedName: nameFor(row.assignedTo, team),
+        releasedName: !row.assignedTo && row.releasedFrom ? nameFor(row.releasedFrom, team) : null,
         phoneLabel: formatPhone(row.phone),
         flag: inboxFlag({ ...row, bookingRequest: booking }, now),
       };
