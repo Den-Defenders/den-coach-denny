@@ -7,7 +7,9 @@
  *   💬 Inbox          — every chat starts here; the usual filters (Needs CSR, Mine…) work here.
  *   📅 Booked         — "Booked in ServiceTitan" files it here automatically. No drip, no AI follow-ups.
  *   🚫 Not interested — said no but didn't text STOP. Lead status not_interested (AI follow-ups stop), no drip.
- *   🔁 Revisit        — a CSR picks a date; on that date it shows up in their follow-ups. No drip, no AI follow-ups.
+ *   ⏰ Follow up later — (folder "revisit") a CSR picks a date. There's no separate tab (Steven, 2026-11-13):
+ *                        it sits in the Follow-ups tab under "Later" and moves up to "Due" on that date.
+ *                        Filing it makes the chat yours if nobody owned it. No drip, no AI follow-ups.
  *   🗑️ Spam           — hidden. AI off, no Slack alerts, no hold texts, no Needs CSR, nothing automatic.
  *                        Stays in Spam even if the number texts again.
  *   🧪 Test           — hidden from the inbox, but everything still works (AI, Slack, drip) for testing.
@@ -18,8 +20,9 @@
  *   - inbox chats they own where we texted last and the customer has been quiet for at
  *     least 1 work day (8 hours of team time, Mon–Sat 8 AM–4 PM Pacific), and the AI's own
  *     follow-ups won't handle it (AI paused, "Stop auto texts", or not a form lead);
- *   - their Revisit chats once the date arrives.
- * Never opted out or with an open booking. Managers and owners see everyone's.
+ *   - their "Follow up later" chats once the date arrives; before that they're listed under "Later".
+ * Never opted out or with an open booking. A CSR only sees the customers they own;
+ * managers and owners see everyone's (and can reassign).
  */
 import { stopDrip } from "@/lib/sms/drip";
 import { teamMinutesBetween } from "@/lib/sms/ownership";
@@ -37,7 +40,7 @@ export const FOLDER_LABELS: Record<ChatFolder, string> = {
   active: "💬 Inbox",
   booked: "📅 Booked",
   not_interested: "🚫 Not interested",
-  revisit: "🔁 Revisit",
+  revisit: "⏰ Follow up later",
   spam: "🗑️ Spam",
   test: "🧪 Test",
 };
@@ -83,8 +86,9 @@ export function revisitDate(preset: string, now: Date): Date | null {
 export type FollowUpItem = {
   phone: string;
   owner: string | null;
-  reason: "quiet" | "revisit_due";
-  /** For quiet chats: our last text; for revisit: the revisit date. Oldest first. */
+  /** quiet + revisit_due = due now (the tab count); scheduled = a "Follow up later" date still ahead. */
+  reason: "quiet" | "revisit_due" | "scheduled";
+  /** For quiet chats: our last text; for follow-up dates: the date. Due ones oldest first, then Later by date. */
   since: string;
   quietDays: number;
   label: string;
@@ -99,9 +103,14 @@ export async function followUpList(owner: string | null, now: Date): Promise<Fol
   const items: FollowUpItem[] = [];
   for (const c of await followUpCandidates(owner ?? undefined)) {
     if (c.folder === "revisit") {
-      if (!c.revisitAt || Date.parse(c.revisitAt) > now.getTime()) continue;
+      if (!c.revisitAt) continue;
+      const quietDays = c.lastOutAt ? days(Date.parse(c.lastOutAt), now.getTime()) : 0;
+      if (Date.parse(c.revisitAt) > now.getTime()) {
+        items.push({ phone: c.phone, owner: c.owner, reason: "scheduled", since: c.revisitAt, quietDays, label: `⏰ Follow up ${dayText(c.revisitAt)}` });
+        continue;
+      }
       const late = days(Date.parse(c.revisitAt), now.getTime());
-      items.push({ phone: c.phone, owner: c.owner, reason: "revisit_due", since: c.revisitAt, quietDays: c.lastOutAt ? days(Date.parse(c.lastOutAt), now.getTime()) : 0, label: late ? `🔁 Revisit was due ${late} day${late === 1 ? "" : "s"} ago` : "🔁 Revisit due today" });
+      items.push({ phone: c.phone, owner: c.owner, reason: "revisit_due", since: c.revisitAt, quietDays, label: late ? `⏰ Follow-up was due ${late} day${late === 1 ? "" : "s"} ago` : "⏰ Follow-up due today" });
       continue;
     }
     if (!c.lastOutAt) continue;
@@ -110,5 +119,10 @@ export async function followUpList(owner: string | null, now: Date): Promise<Fol
     const quiet = days(lastOut.getTime(), now.getTime());
     items.push({ phone: c.phone, owner: c.owner, reason: "quiet", since: c.lastOutAt, quietDays: quiet, label: `💤 Quiet ${quiet < 1 ? "1 work day" : `${quiet} day${quiet === 1 ? "" : "s"}`}` });
   }
-  return items.sort((a, b) => Date.parse(a.since) - Date.parse(b.since));
+  // Due first (oldest first), then the "Later" dates (soonest first).
+  return items.sort((a, b) => Number(a.reason === "scheduled") - Number(b.reason === "scheduled") || Date.parse(a.since) - Date.parse(b.since));
+}
+
+function dayText(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(new Date(iso));
 }

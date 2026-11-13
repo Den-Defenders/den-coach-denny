@@ -248,6 +248,7 @@ export async function GET(request: Request) {
         phoneLabel: formatPhone(row.phone),
         folderLabel: row.folder === "active" ? null : FOLDER_LABELS[row.folder],
         followUp: followUpByPhone.get(row.phone)?.label ?? null,
+        followUpReason: followUpByPhone.get(row.phone)?.reason ?? null,
         flag: inboxFlag({ ...row, bookingRequest: booking }, now),
       };
     });
@@ -260,7 +261,7 @@ export async function GET(request: Request) {
     return json({
       conversations,
       view,
-      counts: { ...counts, followups: followUps.length },
+      counts: { ...counts, followups: followUps.filter((f) => f.reason !== "scheduled").length },
       seesEveryone,
       team: seesEveryone ? team.map((m) => ({ email: m.email, name: m.displayName })) : [],
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
@@ -381,15 +382,24 @@ export async function POST(request: Request) {
         let revisitAt: Date | null = null;
         if (to === "revisit") {
           revisitAt = revisitDate(String(body.revisit || ""), now);
-          if (!revisitAt) return json({ ok: false, message: "Pick when to revisit (a date from today on)." }, 400);
+          if (!revisitAt) return json({ ok: false, message: "Pick when to follow up (a date from today on)." }, 400);
         }
         if (to === thread.folder && to !== "revisit") return json({ ok: true, message: `Already in ${FOLDER_LABELS[to]}.` });
+        // "Follow up later" makes an unowned chat yours, so it lands on YOUR follow-up list (Steven, 2026-11-13).
+        let claimed = false;
+        if (to === "revisit" && !thread.assignedTo && access.email) {
+          const blocked = await capBlock(access, phone);
+          if (blocked) return json({ ok: false, message: blocked }, 409);
+          await assignConversation(phone, access.email, now);
+          await audit({ phone, action: "assigned", reason: "follow_up_later", detail: { from: null }, actor: who });
+          claimed = true;
+        }
         await moveChat(phone, to, who, now, { revisitAt, from: thread.folder });
         const messages: Record<ChatFolder, string> = {
           active: "Back in the inbox.",
           booked: "Moved to 📅 Booked. No more automatic texts. It comes back to the inbox if the customer texts.",
           not_interested: "Moved to 🚫 Not interested. No more automatic texts. It comes back to the inbox if the customer texts.",
-          revisit: `Moved to 🔁 Revisit. It shows up in follow-ups on ${revisitAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(revisitAt) : "that date"}, or sooner if the customer texts.`,
+          revisit: `Follow up ${revisitAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(revisitAt) : "on that date"}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups and moves up to Due that day (back to the inbox sooner if the customer texts).${claimed ? " This customer is yours now." : ""}`,
           spam: "Moved to 🗑️ Spam. The AI, alerts and automatic texts are off for this number, even if it texts again.",
           test: "Moved to 🧪 Test. Hidden from the inbox; the AI and alerts still work.",
         };

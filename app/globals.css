@@ -519,3 +519,17 @@ a { color: inherit; }
 .inbox-move { max-width: 170px; }
 .inbox-revisit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; font-size: 14px; }
 .inbox-revisit input[type="date"] { padding: 4px 6px; }
+
+/* Session 7 PR 4: follow-up sections + manager scoreboard */
+.inbox-section { list-style: none; margin: 8px 4px 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #5b6b7a; }
+.scoreboard { display: flex; flex-direction: column; gap: 10px; }
+.scoreboard-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.scoreboard-head h3 { margin: 0; font-size: 20px; }
+.scoreboard-head .inbox-filters { margin: 0; }
+.scoreboard-scroll { overflow-x: auto; }
+.scoreboard-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.scoreboard-table th { text-align: left; font-size: 12px; color: #5b6b7a; font-weight: 700; padding: 6px 8px; border-bottom: 1px solid #dfe5ea; white-space: nowrap; cursor: help; }
+.scoreboard-table td { padding: 8px; border-bottom: 1px solid #eef1f4; white-space: nowrap; }
+.scoreboard-table td.warn { color: #b42318; font-weight: 700; }
+.scoreboard-role { margin-left: 6px; font-size: 11px; color: #5b6b7a; text-transform: capitalize; }
+.scoreboard-note { font-size: 12px; }
