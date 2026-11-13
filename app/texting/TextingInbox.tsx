@@ -1,5 +1,6 @@
 "use client";
 
+import Scoreboard from "./Scoreboard";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type Flag = { needsCsr: boolean; pinned: boolean; reason: string | null; waiting: boolean };
@@ -19,8 +20,10 @@ type Conversation = {
   folderLabel: string | null;
   folder: Folder;
   revisitAt: string | null;
-  /** "💤 Quiet 3 days" / "🔁 Revisit due today" when it's on the follow-up list. */
+  /** "💤 Quiet 3 days" / "⏰ Follow-up due today" / "⏰ Follow up Mon, Nov 30" when it's on the follow-up list. */
   followUp: string | null;
+  /** quiet / revisit_due = due now; scheduled = a later follow-up date. */
+  followUpReason: "quiet" | "revisit_due" | "scheduled" | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -109,13 +112,13 @@ type Filter = "all" | "needs" | "mine" | "unassigned" | "ai" | "paused" | "optou
 
 /** Session 7 PR 3: chat folders ("active" = the inbox) and the follow-up list. */
 type Folder = "active" | "booked" | "not_interested" | "revisit" | "spam" | "test";
-type View = Folder | "followups";
+type View = Folder | "followups" | "scoreboard";
 
 const MOVE_OPTIONS: [Folder, string][] = [
   ["active", "💬 Inbox"],
   ["booked", "📅 Booked"],
   ["not_interested", "🚫 Not interested"],
-  ["revisit", "🔁 Revisit later…"],
+  ["revisit", "⏰ Follow up later…"],
   ["spam", "🗑️ Spam"],
   ["test", "🧪 Test"],
 ];
@@ -125,7 +128,8 @@ const EMPTY_TEXT: Record<View, string> = {
   followups: "Nobody to follow up with right now. 👍",
   booked: "No booked chats yet.",
   not_interested: "No chats filed as not interested.",
-  revisit: "No chats to revisit.",
+  revisit: "No follow-up dates.",
+  scoreboard: "",
   spam: "No spam. 🎉",
   test: "No test chats.",
 };
@@ -244,7 +248,7 @@ export default function TextingInbox() {
     const params = new URLSearchParams();
     const q = searchRef.current.trim();
     if (q) params.set("q", q);
-    if (viewRef.current !== "active") params.set("folder", viewRef.current);
+    if (viewRef.current !== "active" && viewRef.current !== "scoreboard") params.set("folder", viewRef.current);
     if (viewRef.current === "followups" && ownerRef.current) params.set("owner", ownerRef.current);
     return params.toString();
   }, []);
@@ -401,12 +405,14 @@ export default function TextingInbox() {
   const viewTabs: [View, string][] = [
     ["active", "💬 Inbox"],
     ["followups", `📋 ${seesEveryone ? "Follow-ups" : "My follow-ups"}${counts.followups ? ` (${counts.followups})` : ""}`],
-    ["revisit", `🔁 Revisit${counts.revisit ? ` (${counts.revisit})` : ""}`],
     ["booked", "📅 Booked"],
     ["not_interested", "🚫 Not interested"],
     ["spam", `🗑️ Spam${counts.spam ? ` (${counts.spam})` : ""}`],
     ["test", `🧪 Test${counts.test ? ` (${counts.test})` : ""}`],
+    ...(seesEveryone ? [["scoreboard", "📊 Scoreboard"] as [View, string]] : []),
   ];
+  const showScoreboard = view === "scoreboard" && seesEveryone;
+  const firstLater = view === "followups" ? visible.findIndex((c) => c.followUpReason === "scheduled") : -1;
   const needsCount = conversations.filter((c) => c.flag.needsCsr).length;
   const myNeeds = conversations.filter((c) => c.flag.needsCsr && me && c.assignedTo === me).length;
   const thread = data?.thread;
@@ -418,7 +424,7 @@ export default function TextingInbox() {
   const tooLong = draft.trim().length > MAX_CHARS;
 
   return (
-    <div className={`inbox${selected ? " has-thread" : ""}`}>
+    <div className={`inbox${selected || showScoreboard ? " has-thread" : ""}`}>
       <section className="surface inbox-list" aria-label="Conversations">
         <div className="inbox-list-head">
           <h2>Texting {needsCount > 0 && <span className="inbox-count">{needsCount} need a person</span>}</h2>
@@ -445,7 +451,7 @@ export default function TextingInbox() {
               {listTeam.map((m) => <option key={m.email} value={m.email}>{m.name}</option>)}
             </select>
           )}
-          {view === "followups" && <div className="team-hint inbox-folder-hint">Customers you own who went quiet for 1+ work day after your last text, plus Revisit dates that came up. Oldest first.</div>}
+          {view === "followups" && <div className="team-hint inbox-folder-hint">{seesEveryone ? "Customers each person owns" : "Customers you own"} who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later.</div>}
           {view === "active" && <div className="inbox-filters" role="tablist" aria-label="Filter">
             {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["mine", `Mine${myNeeds ? ` (${myNeeds})` : ""}`], ["unassigned", "Unassigned"], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>
@@ -453,16 +459,19 @@ export default function TextingInbox() {
           </div>}
         </div>
         {listError && <div className="notice">{listError}</div>}
-        <ul className="inbox-items">
+        {showScoreboard && <p className="team-hint inbox-folder-hint">The scoreboard is on the right. Pick another tab to get back to the texts.</p>}
+        {!showScoreboard && <ul className="inbox-items">
           {!loaded && <li className="team-hint inbox-empty">Loading…</li>}
           {loaded && visible.length === 0 && (
             <li className="team-hint inbox-empty">{search ? "No conversations match that search." : view === "active" && filter === "needs" ? "Nobody is waiting for a person. 👍" : EMPTY_TEXT[view]}</li>
           )}
-          {visible.map((c) => {
+          {view === "followups" && visible.length > 0 && firstLater !== 0 && <li className="inbox-section">Due now</li>}
+          {visible.map((c, index) => {
             const preview = c.lastBody || (c.lastMediaCount ? "📎 Photo" : "");
             const prefix = c.lastDirection === "outbound" ? `${senderLabel(c.lastSentBy)}: ` : "";
             return (
               <li key={c.phone}>
+                {index === firstLater && <div className="inbox-section">Later</div>}
                 <button className={`inbox-item${c.phone === selected ? " active" : ""}${c.flag.pinned ? " book" : c.flag.needsCsr ? " needs" : ""}`} onClick={() => open(c.phone)}>
                   <span className="inbox-item-top">
                     <strong>{displayName(c)}</strong>
@@ -473,7 +482,7 @@ export default function TextingInbox() {
                     {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
                     {!c.assignedTo && c.releasedName && <span className="inbox-badge amber">⏰ Released from {c.releasedName} (no reply in 1 hr)</span>}
                     {c.followUp && <span className="inbox-badge amber">{c.followUp}</span>}
-                    {c.folderLabel && <span className="inbox-badge gray">{c.folder === "revisit" && c.revisitAt ? `🔁 Revisit ${dayLabel(c.revisitAt)}` : c.folderLabel}</span>}
+                    {c.folderLabel && !c.followUp && <span className="inbox-badge gray">{c.folder === "revisit" && c.revisitAt ? `⏰ Follow up ${dayLabel(c.revisitAt)}` : c.folderLabel}</span>}
                     {c.optedOut ? <span className="inbox-badge gray">Opted out</span>
                       : c.botStatus === "paused" ? <span className="inbox-badge amber">AI paused</span>
                         : <span className="inbox-badge teal">AI on</span>}
@@ -484,9 +493,14 @@ export default function TextingInbox() {
               </li>
             );
           })}
-        </ul>
+        </ul>}
       </section>
 
+      {showScoreboard ? (
+        <section className="surface inbox-thread" aria-label="Scoreboard">
+          <Scoreboard onBack={() => setView("active")} onFollowUps={(email) => { setFollowOwner(email); setView("followups"); }} />
+        </section>
+      ) : (
       <section className="surface inbox-thread" aria-label="Conversation">
         {!selected && <p className="team-hint inbox-empty">Pick a conversation on the left. Anyone marked <b>Needs CSR</b> is waiting for a person.</p>}
         {selected && !thread && <p className="team-hint inbox-empty">{threadError || "Loading…"}</p>}
@@ -526,7 +540,7 @@ export default function TextingInbox() {
             </header>
             {revisitOpen && (
               <div className="inbox-revisit">
-                <span>🔁 Revisit:</span>
+                <span>⏰ Follow up:</span>
                 <button className="btn btn-outline btn-small" disabled={busy} onClick={() => saveRevisit("2w")}>In 2 weeks</button>
                 <button className="btn btn-outline btn-small" disabled={busy} onClick={() => saveRevisit("1m")}>In 1 month</button>
                 <button className="btn btn-outline btn-small" disabled={busy} onClick={() => saveRevisit("3m")}>In 3 months</button>
@@ -564,7 +578,7 @@ export default function TextingInbox() {
               {thread.leadStatus && <span className="inbox-badge gray">{thread.leadStatus.replace(/_/g, " ")}</span>}
               {thread.folder !== "active" && (
                 <span className="inbox-badge gray">
-                  {thread.folder === "revisit" && thread.revisitAt ? `🔁 Revisit on ${dayLabel(thread.revisitAt)}` : `In ${thread.folderLabel}`}
+                  {thread.folder === "revisit" && thread.revisitAt ? `⏰ Follow up on ${dayLabel(thread.revisitAt)}` : `In ${thread.folderLabel}`}
                   {thread.folderByName ? ` · filed by ${thread.folderByName}` : ""}{thread.folderAt ? ` · ${longWhen(thread.folderAt)}` : ""}
                 </span>
               )}
@@ -685,6 +699,7 @@ export default function TextingInbox() {
           </>
         )}
       </section>
+      )}
     </div>
   );
 }
