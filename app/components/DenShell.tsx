@@ -52,6 +52,21 @@ export default function DenShell({ title, subtitle, children, theme = "home" }: 
       .catch(() => undefined);
   }, []);
 
+  // Session 7: "Texting (3)" when this person has follow-ups due. Checked on load and every 2 minutes.
+  const [followUpsDue, setFollowUpsDue] = useState(0);
+  const hasTexting = Boolean(me?.nav?.includes("texting"));
+  useEffect(() => {
+    if (!hasTexting) return;
+    const check = () =>
+      fetch("/api/sms/inbox/count", { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : { followUpsDue: 0 }))
+        .then((data: { followUpsDue?: number }) => setFollowUpsDue(Number(data.followUpsDue) || 0))
+        .catch(() => undefined);
+    check();
+    const timer = setInterval(check, 120_000);
+    return () => clearInterval(timer);
+  }, [hasTexting]);
+
   // Until /api/me answers, show only the tile for the page we are on. The
   // server (proxy.ts) enforces access either way; this only tidies the menu.
   const visibleNav = me?.nav
@@ -83,7 +98,7 @@ export default function DenShell({ title, subtitle, children, theme = "home" }: 
             return (
               <Link key={item.href} href={item.href} className={`nav-tile nav-${item.theme}${active ? " active" : ""}`} aria-current={active ? "page" : undefined}>
                 <span className="nav-icon"><NavIcon name={item.icon} /></span>
-                <span>{item.label}</span>
+                <span>{item.key === "texting" && followUpsDue > 0 ? `${item.label} (${followUpsDue})` : item.label}</span>
               </Link>
             );
           })}

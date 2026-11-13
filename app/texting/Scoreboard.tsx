@@ -15,6 +15,7 @@ type Row = {
   followUpsDue: number;
   replies: number;
   avgReplyMinutes: number | null;
+  typicalReplyMinutes: number | null;
   slowReplies: number;
   textsSent: number;
   autoReleased: number;
@@ -83,7 +84,8 @@ export default function Scoreboard({ onFollowUps, onBack }: { onFollowUps: (emai
                 <th title="Owned chats where a customer is waiting for a person right now">Waiting now</th>
                 <th title="Their quiet customers and follow-up dates that came up">Follow-ups due</th>
                 <th title="Times a waiting customer got an answer from them">Replies</th>
-                <th title="Average wait before they answered, counting only team hours (Mon–Sat 8 AM–4 PM)">Avg reply time</th>
+                <th title="What most customers waited (the middle reply), counting only team hours (Mon–Sat 8 AM–4 PM)">Typical reply</th>
+                <th title="Average wait before they answered, team hours only. One very slow reply pulls this up.">Avg reply</th>
                 <th title="Replies that took more than 1 hour of team time">Over 1 hr</th>
                 <th>Texts sent</th>
                 <th title="Chats taken back by the 1-hour rule">Auto-released</th>
@@ -101,6 +103,7 @@ export default function Scoreboard({ onFollowUps, onBack }: { onFollowUps: (emai
                   <td className={r.waitingNow > 0 ? "warn" : ""}>{r.waitingNow}</td>
                   <td>{r.followUpsDue > 0 ? <button className="inbox-link" onClick={() => onFollowUps(r.email)}>{r.followUpsDue}</button> : 0}</td>
                   <td>{r.replies}</td>
+                  <td className={r.typicalReplyMinutes !== null && r.typicalReplyMinutes > 60 ? "warn" : ""}>{minutesText(r.typicalReplyMinutes)}</td>
                   <td className={r.avgReplyMinutes !== null && r.avgReplyMinutes > 60 ? "warn" : ""}>{minutesText(r.avgReplyMinutes)}</td>
                   <td className={r.slowReplies > 0 ? "warn" : ""}>{r.slowReplies}</td>
                   <td>{r.textsSent}</td>
@@ -112,10 +115,11 @@ export default function Scoreboard({ onFollowUps, onBack }: { onFollowUps: (emai
           </table>
         </div>
       )}
-      <p className="team-hint scoreboard-note">
-        Reply time = how long a customer waited for a person, counting only team hours (Mon–Sat 8 AM–4 PM Pacific). Owns now, Waiting now and
-        Follow-ups due are right now; the rest are for the period. Tap a follow-up number to see that person&apos;s list.
-      </p>
+      <div className="team-hint scoreboard-note">
+        <p><b>Reply time</b> = how long a customer waited for a person before this person answered, counting only team hours (Mon–Sat 8 AM–4 PM Pacific). A 7 PM text answered at 8:05 the next morning counts as 5 minutes.</p>
+        <p>It only counts when the customer was really waiting on a person: not while the AI was answering them, not texts like &quot;ok&quot; or &quot;thanks&quot;, not after someone clicked Mark handled, and never chats in 🗑️ Spam or 🧪 Test. A text you start yourself (a follow-up) isn&apos;t a reply.</p>
+        <p><b>Typical</b> is the middle reply (what most customers got); <b>Avg</b> gets pulled up by one very slow reply. Owns now, Waiting now and Follow-ups due are right now; the rest are for the period. Tap a follow-up number to see that person&apos;s list.</p>
+      </div>
     </div>
   );
 }
