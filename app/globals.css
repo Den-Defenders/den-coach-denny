@@ -511,3 +511,11 @@ a { color: inherit; }
 .inbox-release-note { margin: 6px 0 0; font-size: 13px; color: #7a5300; }
 .inbox-my-waiting { margin: 2px 0 6px; font-size: 13px; }
 .inbox-my-waiting.full { color: #b42318; font-weight: 600; }
+
+/* Session 7 PR 3: chat folders + follow-ups */
+.inbox-folders { margin-bottom: 4px; }
+.inbox-owner-filter { margin: 4px 0; max-width: 100%; }
+.inbox-folder-hint { margin: 2px 0 6px; font-size: 12px; }
+.inbox-move { max-width: 170px; }
+.inbox-revisit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; font-size: 14px; }
+.inbox-revisit input[type="date"] { padding: 4px 6px; }

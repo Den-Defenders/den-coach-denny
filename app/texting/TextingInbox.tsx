@@ -15,6 +15,12 @@ type Conversation = {
   assignedName: string | null;
   /** Session 7: auto-released from this owner (no reply in 1 team hour). */
   releasedName: string | null;
+  /** Session 7 PR 3: the folder when it isn't the inbox (search results and folder views). */
+  folderLabel: string | null;
+  folder: Folder;
+  revisitAt: string | null;
+  /** "💤 Quiet 3 days" / "🔁 Revisit due today" when it's on the follow-up list. */
+  followUp: string | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -67,6 +73,11 @@ type Thread = {
   releasedAt: string | null;
   /** "If nobody replies, this chat goes back to the shared queue at …" (owned chats with a customer waiting). */
   releaseNote: string | null;
+  folder: Folder;
+  folderLabel: string;
+  folderAt: string | null;
+  folderByName: string | null;
+  revisitAt: string | null;
   customerNotes: Record<string, string>;
   booking: Booking | null;
   /** Step 5: their lead form and the drip. */
@@ -95,6 +106,38 @@ type ThreadResponse = {
 };
 
 type Filter = "all" | "needs" | "mine" | "unassigned" | "ai" | "paused" | "optout";
+
+/** Session 7 PR 3: chat folders ("active" = the inbox) and the follow-up list. */
+type Folder = "active" | "booked" | "not_interested" | "revisit" | "spam" | "test";
+type View = Folder | "followups";
+
+const MOVE_OPTIONS: [Folder, string][] = [
+  ["active", "💬 Inbox"],
+  ["booked", "📅 Booked"],
+  ["not_interested", "🚫 Not interested"],
+  ["revisit", "🔁 Revisit later…"],
+  ["spam", "🗑️ Spam"],
+  ["test", "🧪 Test"],
+];
+
+const EMPTY_TEXT: Record<View, string> = {
+  active: "No conversations yet.",
+  followups: "Nobody to follow up with right now. 👍",
+  booked: "No booked chats yet.",
+  not_interested: "No chats filed as not interested.",
+  revisit: "No chats to revisit.",
+  spam: "No spam. 🎉",
+  test: "No test chats.",
+};
+
+function dayLabel(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(new Date(iso));
+}
+
+function isoDay(offsetDays: number): string {
+  const d = new Date(Date.now() + offsetDays * 24 * 3600_000);
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(d);
+}
 
 const MAX_CHARS = 640;
 
@@ -170,6 +213,15 @@ export default function TextingInbox() {
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [view, setView] = useState<View>("active");
+  const [followOwner, setFollowOwner] = useState("");
+  const [counts, setCounts] = useState<Partial<Record<View, number>>>({});
+  const [listTeam, setListTeam] = useState<{ email: string; name: string }[]>([]);
+  /** Owners and managers see everyone's follow-ups. */
+  const [seesEveryone, setSeesEveryone] = useState(false);
+  /** "Revisit later…" picked in Move to: show the date choices. */
+  const [revisitOpen, setRevisitOpen] = useState(false);
+  const [revisitDay, setRevisitDay] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [data, setData] = useState<ThreadResponse | null>(null);
   const [threadError, setThreadError] = useState("");
@@ -185,13 +237,29 @@ export default function TextingInbox() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const lastCount = useRef(0);
   const searchRef = useRef(search);
+  const viewRef = useRef<View>(view);
+  const ownerRef = useRef(followOwner);
+
+  const listQuery = useCallback(() => {
+    const params = new URLSearchParams();
+    const q = searchRef.current.trim();
+    if (q) params.set("q", q);
+    if (viewRef.current !== "active") params.set("folder", viewRef.current);
+    if (viewRef.current === "followups" && ownerRef.current) params.set("owner", ownerRef.current);
+    return params.toString();
+  }, []);
 
   const loadList = useCallback(async () => {
-    const q = searchRef.current.trim();
-    const response = await fetch(`/api/sms/inbox${q ? `?q=${encodeURIComponent(q)}` : ""}`, { cache: "no-store" }).catch(() => null);
+    const asked = listQuery();
+    const response = await fetch(`/api/sms/inbox${asked ? `?${asked}` : ""}`, { cache: "no-store" }).catch(() => null);
     const json = response ? await response.json().catch(() => ({})) : {};
+    // A slow answer for a tab or search we already left: ignore it.
+    if (asked !== listQuery()) return;
     if (response?.ok) {
       setConversations(json.conversations || []);
+      setCounts(json.counts || {});
+      setListTeam(json.team || []);
+      setSeesEveryone(Boolean(json.seesEveryone));
       setMe(json.me || null);
       setMyWaiting(json.myWaiting || null);
       setListError("");
@@ -200,7 +268,7 @@ export default function TextingInbox() {
     }
     setNow(Date.now());
     setLoaded(true);
-  }, []);
+  }, [listQuery]);
 
   const loadThread = useCallback(async (phone: string) => {
     const response = await fetch(`/api/sms/inbox?phone=${encodeURIComponent(phone)}`, { cache: "no-store" }).catch(() => null);
@@ -231,6 +299,14 @@ export default function TextingInbox() {
     return () => clearTimeout(timer);
   }, [search, loadList]);
 
+  // Folder tabs and the follow-up owner filter reload the list right away.
+  useEffect(() => {
+    viewRef.current = view;
+    ownerRef.current = followOwner;
+    const timer = setTimeout(loadList, 0);
+    return () => clearTimeout(timer);
+  }, [view, followOwner, loadList]);
+
   // The open conversation refreshes every 5 seconds so new texts show up.
   useEffect(() => {
     if (!selected) return;
@@ -255,6 +331,7 @@ export default function TextingInbox() {
       setDraft("");
       setNotice("");
       setEditingName(false);
+      setRevisitOpen(false);
       lastCount.current = 0;
     }
     setSelected(phone);
@@ -303,7 +380,33 @@ export default function TextingInbox() {
     setEditingName(false);
   }
 
-  const visible = conversations.filter((c) => matchesFilter(c, filter, me));
+  async function moveTo(folder: string) {
+    if (!folder) return;
+    if (folder === "revisit") {
+      setRevisitDay(isoDay(14));
+      setRevisitOpen(true);
+      return;
+    }
+    setRevisitOpen(false);
+    await act("move", { folder });
+  }
+
+  async function saveRevisit(revisit: string) {
+    const result = await act("move", { folder: "revisit", revisit });
+    if (result?.ok) setRevisitOpen(false);
+  }
+
+  // The usual filters work in the inbox; folder views show everything in the folder.
+  const visible = view === "active" ? conversations.filter((c) => matchesFilter(c, filter, me)) : conversations;
+  const viewTabs: [View, string][] = [
+    ["active", "💬 Inbox"],
+    ["followups", `📋 ${seesEveryone ? "Follow-ups" : "My follow-ups"}${counts.followups ? ` (${counts.followups})` : ""}`],
+    ["revisit", `🔁 Revisit${counts.revisit ? ` (${counts.revisit})` : ""}`],
+    ["booked", "📅 Booked"],
+    ["not_interested", "🚫 Not interested"],
+    ["spam", `🗑️ Spam${counts.spam ? ` (${counts.spam})` : ""}`],
+    ["test", `🧪 Test${counts.test ? ` (${counts.test})` : ""}`],
+  ];
   const needsCount = conversations.filter((c) => c.flag.needsCsr).length;
   const myNeeds = conversations.filter((c) => c.flag.needsCsr && me && c.assignedTo === me).length;
   const thread = data?.thread;
@@ -331,17 +434,29 @@ export default function TextingInbox() {
             placeholder="Search name, number or text"
             aria-label="Search conversations"
           />
-          <div className="inbox-filters" role="tablist" aria-label="Filter">
+          <div className="inbox-filters inbox-folders" role="tablist" aria-label="Folder">
+            {viewTabs.map(([key, label]) => (
+              <button key={key} role="tab" aria-selected={view === key} className={`inbox-filter${view === key ? " active" : ""}`} onClick={() => setView(key)}>{label}</button>
+            ))}
+          </div>
+          {view === "followups" && seesEveryone && listTeam.length > 0 && (
+            <select className="inbox-owner-filter" aria-label="Whose follow-ups" value={followOwner} onChange={(e) => setFollowOwner(e.target.value)}>
+              <option value="">Everyone&apos;s follow-ups</option>
+              {listTeam.map((m) => <option key={m.email} value={m.email}>{m.name}</option>)}
+            </select>
+          )}
+          {view === "followups" && <div className="team-hint inbox-folder-hint">Customers you own who went quiet for 1+ work day after your last text, plus Revisit dates that came up. Oldest first.</div>}
+          {view === "active" && <div className="inbox-filters" role="tablist" aria-label="Filter">
             {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["mine", `Mine${myNeeds ? ` (${myNeeds})` : ""}`], ["unassigned", "Unassigned"], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>
             ))}
-          </div>
+          </div>}
         </div>
         {listError && <div className="notice">{listError}</div>}
         <ul className="inbox-items">
           {!loaded && <li className="team-hint inbox-empty">Loading…</li>}
           {loaded && visible.length === 0 && (
-            <li className="team-hint inbox-empty">{search ? "No conversations match that search." : filter === "needs" ? "Nobody is waiting for a person. 👍" : "No conversations yet."}</li>
+            <li className="team-hint inbox-empty">{search ? "No conversations match that search." : view === "active" && filter === "needs" ? "Nobody is waiting for a person. 👍" : EMPTY_TEXT[view]}</li>
           )}
           {visible.map((c) => {
             const preview = c.lastBody || (c.lastMediaCount ? "📎 Photo" : "");
@@ -357,6 +472,8 @@ export default function TextingInbox() {
                     {c.flag.needsCsr && <span className={`inbox-badge ${c.flag.pinned ? "green" : "red"}`}>{c.flag.pinned ? c.flag.reason : `Needs CSR · ${c.flag.reason}`}</span>}
                     {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
                     {!c.assignedTo && c.releasedName && <span className="inbox-badge amber">⏰ Released from {c.releasedName} (no reply in 1 hr)</span>}
+                    {c.followUp && <span className="inbox-badge amber">{c.followUp}</span>}
+                    {c.folderLabel && <span className="inbox-badge gray">{c.folder === "revisit" && c.revisitAt ? `🔁 Revisit ${dayLabel(c.revisitAt)}` : c.folderLabel}</span>}
                     {c.optedOut ? <span className="inbox-badge gray">Opted out</span>
                       : c.botStatus === "paused" ? <span className="inbox-badge amber">AI paused</span>
                         : <span className="inbox-badge teal">AI on</span>}
@@ -401,8 +518,23 @@ export default function TextingInbox() {
                 {(flag.needsCsr || flag.waiting) && <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("mark_handled")}>Mark handled</button>}
                 {!thread.optOut && thread.botStatus === "on" && <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("take_over")}>Pause AI (I&apos;ll answer)</button>}
                 {!thread.optOut && thread.botStatus === "paused" && <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("resume_bot")}>Turn AI back on</button>}
+                <select aria-label="Move to folder" className="inbox-move" value="" disabled={busy} onChange={(e) => moveTo(e.target.value)}>
+                  <option value="">Move to…</option>
+                  {MOVE_OPTIONS.filter(([f]) => f !== thread.folder || f === "revisit").map(([f, label]) => <option key={f} value={f}>{label}</option>)}
+                </select>
               </div>
             </header>
+            {revisitOpen && (
+              <div className="inbox-revisit">
+                <span>🔁 Revisit:</span>
+                <button className="btn btn-outline btn-small" disabled={busy} onClick={() => saveRevisit("2w")}>In 2 weeks</button>
+                <button className="btn btn-outline btn-small" disabled={busy} onClick={() => saveRevisit("1m")}>In 1 month</button>
+                <button className="btn btn-outline btn-small" disabled={busy} onClick={() => saveRevisit("3m")}>In 3 months</button>
+                <input type="date" aria-label="Revisit on" value={revisitDay} min={isoDay(0)} onChange={(e) => setRevisitDay(e.target.value)} />
+                <button className="btn btn-teal btn-small" disabled={busy || !revisitDay} onClick={() => saveRevisit(revisitDay)}>Save date</button>
+                <button className="inbox-link" onClick={() => setRevisitOpen(false)}>Cancel</button>
+              </div>
+            )}
 
             <div className="inbox-owner">
               <span>👤 Owner: <b>{!thread.assignedTo ? "Nobody yet (shared queue)" : thread.assignedTo === data.me ? "You" : thread.assignedName}</b></span>
@@ -430,6 +562,12 @@ export default function TextingInbox() {
                 : thread.botStatus === "paused" ? <span className="inbox-badge amber">AI paused: a person answers this customer</span>
                   : <span className="inbox-badge teal">AI is answering this customer</span>}
               {thread.leadStatus && <span className="inbox-badge gray">{thread.leadStatus.replace(/_/g, " ")}</span>}
+              {thread.folder !== "active" && (
+                <span className="inbox-badge gray">
+                  {thread.folder === "revisit" && thread.revisitAt ? `🔁 Revisit on ${dayLabel(thread.revisitAt)}` : `In ${thread.folderLabel}`}
+                  {thread.folderByName ? ` · filed by ${thread.folderByName}` : ""}{thread.folderAt ? ` · ${longWhen(thread.folderAt)}` : ""}
+                </span>
+              )}
             </div>
 
             {thread.booking && (
