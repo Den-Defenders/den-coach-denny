@@ -108,6 +108,11 @@ async function createTables(sql: Sql) {
   // Session 7: the owner didn't reply within 1 team hour, so the chat went back to the shared queue.
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS released_from TEXT`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ`;
+  // Session 7 PR 3: chat folders (null = active inbox), lib/sms/folders.ts.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS folder TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS folder_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS folder_by TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS revisit_at TIMESTAMPTZ`;
   // Step 4a: the open time the customer picked by text ("📅 Ready to book") and when a CSR booked it in ServiceTitan.
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_request JSONB`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS booking_done_at TIMESTAMPTZ`;
@@ -582,6 +587,10 @@ export type InboxRow = {
   /** Session 7: auto-released from this owner (shown while nobody owns the chat). */
   releasedFrom: string | null;
   releasedAt: string | null;
+  /** Session 7 PR 3: "active" (the inbox), booked, not_interested, revisit, spam or test. */
+  folder: ChatFolder;
+  revisitAt: string | null;
+  folderBy: string | null;
   bookingRequest: unknown;
   bookingDoneAt: string | null;
   /** Step 5: when their lead form came in, and the drip's state (null = no drip). */
@@ -618,12 +627,15 @@ function searchPatterns(search: string | undefined): { text: string | null; digi
  * always come first so they never fall off the list. Conversations with no
  * texts at all are left out. Optional search: name, phone digits or message text.
  */
-export async function listInboxConversations(options: { search?: string; limit?: number } = {}): Promise<InboxRow[]> {
+export async function listInboxConversations(options: { search?: string; limit?: number; folders?: ChatFolder[]; phones?: string[] } = {}): Promise<InboxRow[]> {
   const sql = await db();
   const limit = Math.min(Math.max(options.limit ?? 300, 1), 500);
   const { text, digits } = searchPatterns(options.search);
+  const folders = (options.folders?.length ? options.folders : ["active"]).join(",");
+  const phones = options.phones?.length ? options.phones.join(",") : null;
   const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
       v.lead_status, v.assigned_to, v.released_from, v.released_at, v.booking_request, v.booking_done_at, v.lead_at, v.drip_status,
+      v.folder, v.revisit_at, v.folder_by,
       c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
       m.status AS last_status, m.created_at AS last_at
@@ -636,6 +648,8 @@ export async function listInboxConversations(options: { search?: string; limit?:
       ORDER BY created_at DESC, id DESC LIMIT 1
     ) m ON true
     WHERE (m.created_at IS NOT NULL OR v.lead_at IS NOT NULL)
+      AND coalesce(v.folder, 'active') = ANY(string_to_array(${folders}::text, ','))
+      AND (${phones}::text IS NULL OR v.phone = ANY(string_to_array(${phones}::text, ',')))
       AND (${text}::text IS NULL
         OR v.phone LIKE ${digits}::text
         OR (coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) ILIKE ${text}::text
@@ -658,6 +672,9 @@ export async function listInboxConversations(options: { search?: string; limit?:
     assignedTo: (r.assigned_to as string) ?? null,
     releasedFrom: (r.released_from as string) ?? null,
     releasedAt: toIso(r.released_at),
+    folder: folderFrom(r.folder),
+    revisitAt: toIso(r.revisit_at),
+    folderBy: (r.folder_by as string) ?? null,
     bookingRequest: r.booking_request ?? null,
     bookingDoneAt: toIso(r.booking_done_at),
     leadAt: toIso(r.lead_at),
@@ -702,6 +719,10 @@ export type InboxThread = {
   assignedAt: string | null;
   releasedFrom: string | null;
   releasedAt: string | null;
+  folder: ChatFolder;
+  folderAt: string | null;
+  folderBy: string | null;
+  revisitAt: string | null;
   bookingRequest: unknown;
   bookingDoneAt: string | null;
   bookingDoneBy: string | null;
@@ -733,7 +754,7 @@ export type InboxThread = {
 export async function inboxThread(phone: string, limit = 200): Promise<InboxThread | null> {
   const sql = await db();
   const rows = await sql`SELECT v.id, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
-      v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.released_from, v.released_at, v.booking_request, v.booking_done_at, v.booking_done_by,
+      v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.released_from, v.released_at, v.folder, v.folder_at, v.folder_by, v.revisit_at, v.booking_request, v.booking_done_at, v.booking_done_by,
       v.customer_notes, v.lead_at, v.lead_count, v.lead_info, v.drip_status, v.drip_step, v.drip_next_at, v.drip_started_at,
       v.drip_last_sent_at, v.drip_stop_reason, v.drip_stopped_at, v.drip_stopped_by, v.st_check, v.st_checked_at,
       c.first_name, c.last_name, c.time_zone
@@ -759,6 +780,10 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
     assignedAt: toIso(v.assigned_at),
     releasedFrom: (v.released_from as string) ?? null,
     releasedAt: toIso(v.released_at),
+    folder: folderFrom(v.folder),
+    folderAt: toIso(v.folder_at),
+    folderBy: (v.folder_by as string) ?? null,
+    revisitAt: toIso(v.revisit_at),
     bookingRequest: v.booking_request ?? null,
     bookingDoneAt: toIso(v.booking_done_at),
     bookingDoneBy: (v.booking_done_by as string) ?? null,
@@ -876,7 +901,7 @@ export async function ownedConversationsWithNewTexts(owner?: string): Promise<Ow
       WHERE m.conversation_id = v.id AND m.direction = 'outbound' AND m.status <> 'send_failed'
         AND m.sent_by IS NOT NULL AND m.sent_by NOT LIKE 'denny-%' AND m.sent_by NOT IN ('system', 'drip')
     ) p ON true
-    WHERE v.assigned_to IS NOT NULL AND o.phone IS NULL
+    WHERE v.assigned_to IS NOT NULL AND o.phone IS NULL AND coalesce(v.folder, '') <> 'spam'
       AND (${owner ?? null}::text IS NULL OR v.assigned_to = ${owner ?? null}::text)
       AND v.last_inbound_at IS NOT NULL
       AND v.last_inbound_at > GREATEST(coalesce(p.at, '-infinity'::timestamptz), coalesce(v.handoff_resolved_at, '-infinity'::timestamptz))`;
@@ -1003,4 +1028,127 @@ export async function recentActivity(limit = 50) {
     audit: auditRows.map((a) => ({ ...a, created_at: toIso(a.created_at) })),
     handoffs: handoffs.map((h) => ({ ...h, handoff_at: toIso(h.handoff_at) })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Session 7 PR 3: chat folders + "My follow-ups" (lib/sms/folders.ts)
+// ---------------------------------------------------------------------------
+
+export const CHAT_FOLDERS = ["active", "booked", "not_interested", "revisit", "spam", "test"] as const;
+export type ChatFolder = (typeof CHAT_FOLDERS)[number];
+
+export function folderFrom(value: unknown): ChatFolder {
+  return (CHAT_FOLDERS as readonly string[]).includes(String(value)) ? (value as ChatFolder) : "active";
+}
+
+/** File a chat (active = back in the inbox). Revisit needs a date; other folders clear it. */
+export async function setFolder(phone: string, folder: ChatFolder, by: string, at: Date, revisitAt: Date | null = null): Promise<void> {
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET folder = ${folder === "active" ? null : folder},
+      folder_at = ${iso(at)}::timestamptz, folder_by = ${by.slice(0, 120)},
+      revisit_at = ${folder === "revisit" && revisitAt ? iso(revisitAt) : null}::timestamptz, updated_at = now()
+    WHERE id = ${contact.conversationId}`;
+}
+
+/** Spam: the AI stops, nobody is flagged, nothing automatic goes out. */
+export async function quietForSpam(phone: string, by: string, at: Date): Promise<void> {
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET bot_status = 'paused', followups_off = true,
+      handoff_resolved_at = CASE WHEN handoff_reason IS NOT NULL AND handoff_resolved_at IS NULL THEN ${iso(at)}::timestamptz ELSE handoff_resolved_at END,
+      handoff_resolved_by = CASE WHEN handoff_reason IS NOT NULL AND handoff_resolved_at IS NULL THEN ${by.slice(0, 120)} ELSE handoff_resolved_by END,
+      updated_at = now()
+    WHERE phone = ${phone}`;
+}
+
+/** No AI follow-ups (same as "Stop auto texts"). Returns false if they were already off. */
+export async function followUpsOff(phone: string): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations SET followups_off = true, updated_at = now() WHERE phone = ${phone} AND followups_off = false RETURNING id`;
+  return rows.length > 0;
+}
+
+export async function conversationFolder(phone: string): Promise<ChatFolder> {
+  const sql = await db();
+  const rows = await sql`SELECT folder FROM sms_conversations WHERE phone = ${phone}`;
+  return folderFrom(rows[0]?.folder);
+}
+
+/**
+ * A new text from the customer: Booked, Not interested and Revisit chats come back to
+ * the inbox (Spam and Test stay where they are). Returns the folder it left, or null.
+ */
+export async function returnToInboxOnText(phone: string, at: Date): Promise<ChatFolder | null> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations v SET folder = NULL, revisit_at = NULL, folder_at = ${iso(at)}::timestamptz,
+      folder_by = 'customer', updated_at = now()
+    FROM (SELECT id, folder AS was FROM sms_conversations WHERE phone = ${phone} FOR UPDATE) old
+    WHERE v.id = old.id AND v.folder IN ('booked', 'not_interested', 'revisit')
+    RETURNING old.was`;
+  return rows.length ? folderFrom(rows[0].was) : null;
+}
+
+/** How many chats are in each folder (for the folder tabs). */
+export async function folderCounts(): Promise<Record<ChatFolder, number>> {
+  const sql = await db();
+  const rows = await sql`SELECT coalesce(folder, 'active') AS folder, count(*)::int AS n FROM sms_conversations GROUP BY 1`;
+  const out = Object.fromEntries(CHAT_FOLDERS.map((f) => [f, 0])) as Record<ChatFolder, number>;
+  for (const r of rows) out[folderFrom(r.folder)] += Number(r.n) || 0;
+  return out;
+}
+
+export type FollowUpCandidate = {
+  phone: string;
+  folder: ChatFolder;
+  owner: string | null;
+  revisitAt: string | null;
+  lastOutAt: string | null;
+  lastInAt: string | null;
+};
+
+/**
+ * Chats that may belong on someone's follow-up list (folders.ts makes the final call):
+ *   - inbox chats with an owner where we texted last and the AI's own follow-ups won't
+ *     handle them (AI paused, "Stop auto texts", or not a form lead)
+ *   - Revisit chats (owner = assigned_to, else whoever filed it)
+ * Never opted out, never with an open booking.
+ */
+export async function followUpCandidates(owner?: string): Promise<FollowUpCandidate[]> {
+  const sql = await db();
+  const rows = await sql`SELECT v.phone, coalesce(v.folder, 'active') AS folder, v.revisit_at,
+      CASE WHEN v.folder = 'revisit' THEN coalesce(v.assigned_to, v.folder_by) ELSE v.assigned_to END AS owner,
+      x.last_out, x.last_in
+    FROM sms_conversations v
+    LEFT JOIN sms_opt_outs o ON o.phone = v.phone
+    LEFT JOIN LATERAL (
+      SELECT
+        max(m.created_at) FILTER (WHERE m.direction = 'outbound' AND m.status <> 'send_failed'
+          AND coalesce(m.sent_by, '') NOT IN (${HOLD_SENDER}, ${CHECKING_SENDER}, 'system')) AS last_out,
+        max(m.created_at) FILTER (WHERE m.direction = 'inbound') AS last_in
+      FROM sms_messages m WHERE m.conversation_id = v.id
+    ) x ON true
+    WHERE o.phone IS NULL
+      AND NOT (v.booking_request IS NOT NULL AND v.booking_done_at IS NULL)
+      AND (
+        (v.folder = 'revisit' AND v.revisit_at IS NOT NULL)
+        OR (v.folder IS NULL AND v.assigned_to IS NOT NULL AND x.last_out IS NOT NULL
+          AND (x.last_in IS NULL OR x.last_out > x.last_in)
+          AND NOT (v.bot_status = 'on' AND v.followups_off = false AND v.lead_at IS NOT NULL))
+      )
+      AND (${owner ?? null}::text IS NULL
+        OR (CASE WHEN v.folder = 'revisit' THEN coalesce(v.assigned_to, v.folder_by) ELSE v.assigned_to END) = ${owner ?? null}::text)`;
+  return rows.map((r) => ({
+    phone: String(r.phone),
+    folder: folderFrom(r.folder),
+    owner: (r.owner as string) ?? null,
+    revisitAt: toIso(r.revisit_at),
+    lastOutAt: toIso(r.last_out),
+    lastInAt: toIso(r.last_in),
+  }));
+}
+
+/** Inbox rows for these phones (any folder), for the follow-up list. */
+export async function inboxRowsFor(phones: string[]): Promise<InboxRow[]> {
+  if (!phones.length) return [];
+  return listInboxConversations({ phones, folders: [...CHAT_FOLDERS], limit: 500 });
 }

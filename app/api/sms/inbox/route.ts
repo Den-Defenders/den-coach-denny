@@ -3,6 +3,9 @@
  * in lib/access.ts (checked by proxy.ts and again below).
  *
  *   GET  ?q=<search>          -> conversation list, "Needs CSR" first
+ *        &folder=<f>          -> Session 7 PR 3: active (default) | followups | booked | not_interested | revisit | spam | test
+ *                                (a search looks in every folder except Spam and Test, unless you're in one of those)
+ *        &owner=<email>       -> followups only: owners/managers can pick one person (default: everyone's)
  *   GET  ?phone=<number>      -> one conversation (texts, AI notes, handoff, reply blockers)
  *   POST {action:"send", phone, body}   -> a person's reply through the ONE send helper
  *                                          (kind "manual": 8 AM–7 PM their time, opt-outs,
@@ -18,6 +21,7 @@
  *   POST {action:"mark_booked", phone}  -> "Booked in ServiceTitan" (step 4a): clears the "📅 Ready to book"
  *                                          flag; an unowned customer becomes the booker's
  *   POST {action:"stop_drip", phone}    -> step 5 "Stop auto texts": no more drip texts or AI follow-ups, for good
+ *   POST {action:"move", phone, folder, revisit?} -> Session 7 PR 3: file the chat (revisit = 2w | 1m | 3m | YYYY-MM-DD)
  */
 import { NextResponse } from "next/server";
 import { canAccessTextingInbox, canUseTextingInbox, type DennyAccess } from "@/lib/access";
@@ -27,6 +31,7 @@ import { dripLabel, stopDrip } from "@/lib/sms/drip";
 import { followUpLabel, followUpPlanFor, stopFollowUps } from "@/lib/sms/followup";
 import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
+import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
 import {
   TEAM_CLOCK_TEXT,
   capMessage,
@@ -45,7 +50,12 @@ import {
   assignConversation,
   audit,
   inboxThread,
+  CHAT_FOLDERS,
+  folderCounts,
+  folderFrom,
+  inboxRowsFor,
   listInboxConversations,
+  type ChatFolder,
   markBookingDone,
   markHandoffHandled,
   resumeBot,
@@ -114,6 +124,12 @@ function nameFor(email: string | null, team: TeamMember[]): string | null {
   return team.find((m) => m.email === email)?.displayName || email.split("@")[0];
 }
 
+type ListView = ChatFolder | "followups";
+
+function listView(value: string | null): ListView {
+  return value === "followups" ? "followups" : folderFrom(value);
+}
+
 /** Inbound photos are Twilio links that need our Twilio login, so the page loads them through /api/sms/inbox/media. */
 function viewableMedia(messageId: number, direction: "inbound" | "outbound", media: string[]): string[] {
   if (direction === "outbound") return media;
@@ -173,6 +189,8 @@ export async function GET(request: Request) {
             ? `Customer waiting since ${pacificWhen(plan.waitingSince)}. If nobody replies, this chat goes back to the shared queue ${plan.releaseAt.getTime() <= now.getTime() ? "within 5 minutes" : `at ${pacificWhen(plan.releaseAt)}`} (1 hour of team time, ${TEAM_CLOCK_TEXT}).`
             : null,
           phoneLabel: formatPhone(phone),
+          folderLabel: FOLDER_LABELS[thread.folder],
+          folderByName: thread.folderBy === "customer" ? "the customer's text" : nameFor(thread.folderBy, team),
           lead: thread.lead.at || thread.lead.drip.status
             ? {
                 at: thread.lead.at,
@@ -199,9 +217,26 @@ export async function GET(request: Request) {
       });
     }
 
-    const rows = await listInboxConversations({ search: url.searchParams.get("q") || undefined });
+    // Session 7 PR 3: folders + "My follow-ups".
+    const view = listView(url.searchParams.get("folder"));
+    const search = url.searchParams.get("q")?.trim() || undefined;
+    const seesEveryone = canAssignOthers(access);
+    // CSRs see their own follow-ups; owners and managers see everyone's (or one person's).
+    const followUpOwner = seesEveryone ? (normalizeEmail(url.searchParams.get("owner") || "") || null) : access.email || "-";
+    const followUps = await followUpList(followUpOwner, now);
+    const followUpByPhone = new Map<string, FollowUpItem>(followUps.map((f) => [f.phone, f]));
+    let rows;
+    if (view === "followups" && !search) {
+      rows = await inboxRowsFor(followUps.map((f) => f.phone));
+    } else {
+      const hidden: ChatFolder[] = ["spam", "test"];
+      const folders: ChatFolder[] = view === "spam" || view === "test"
+        ? [view]
+        : search ? CHAT_FOLDERS.filter((f) => !hidden.includes(f)) : [view === "followups" ? "active" : view];
+      rows = await listInboxConversations({ search, folders });
+    }
     const team = await inboxTeam();
-    const conversations = sortInbox(rows.map((row) => {
+    const mapped = rows.map((row) => {
       const booking = bookingFrom(row.bookingRequest);
       return {
         ...row,
@@ -211,11 +246,23 @@ export async function GET(request: Request) {
         assignedName: nameFor(row.assignedTo, team),
         releasedName: !row.assignedTo && row.releasedFrom ? nameFor(row.releasedFrom, team) : null,
         phoneLabel: formatPhone(row.phone),
+        folderLabel: row.folder === "active" ? null : FOLDER_LABELS[row.folder],
+        followUp: followUpByPhone.get(row.phone)?.label ?? null,
         flag: inboxFlag({ ...row, bookingRequest: booking }, now),
       };
-    }));
+    });
+    // Follow-ups: oldest first. Everything else: the usual inbox order.
+    const order = new Map(followUps.map((f, i) => [f.phone, i]));
+    const conversations = view === "followups" && !search
+      ? mapped.sort((a, b) => (order.get(a.phone) ?? 0) - (order.get(b.phone) ?? 0))
+      : sortInbox(mapped);
+    const counts = await folderCounts();
     return json({
       conversations,
+      view,
+      counts: { ...counts, followups: followUps.length },
+      seesEveryone,
+      team: seesEveryone ? team.map((m) => ({ email: m.email, name: m.displayName })) : [],
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
       me: access.email,
       myWaiting: await myWaiting(access),
@@ -322,8 +369,31 @@ export async function POST(request: Request) {
         await markHandoffHandled(phone, who, now);
         // Whoever booked it follows up, unless someone already owns this customer.
         if (!thread.assignedTo && access.email) await assignConversation(phone, access.email, now);
+        // Session 7 PR 3: file it in Booked (it comes back to the inbox if the customer texts).
+        if (thread.folder === "active") await moveChat(phone, "booked", who, now, { from: thread.folder });
         await audit({ phone, action: "booking_marked_booked", reason: "inbox", detail: { owner: thread.assignedTo || access.email }, actor: who });
         return json({ ok: true, message: `Marked booked in ServiceTitan.${!thread.assignedTo && access.email ? " This customer is yours now." : ""} The AI stays paused; text the customer if you want to confirm.` });
+      }
+      case "move": {
+        const folder = String(body.folder || "");
+        if (!(CHAT_FOLDERS as readonly string[]).includes(folder)) return json({ ok: false, message: "Pick a folder." }, 400);
+        const to = folder as ChatFolder;
+        let revisitAt: Date | null = null;
+        if (to === "revisit") {
+          revisitAt = revisitDate(String(body.revisit || ""), now);
+          if (!revisitAt) return json({ ok: false, message: "Pick when to revisit (a date from today on)." }, 400);
+        }
+        if (to === thread.folder && to !== "revisit") return json({ ok: true, message: `Already in ${FOLDER_LABELS[to]}.` });
+        await moveChat(phone, to, who, now, { revisitAt, from: thread.folder });
+        const messages: Record<ChatFolder, string> = {
+          active: "Back in the inbox.",
+          booked: "Moved to 📅 Booked. No more automatic texts. It comes back to the inbox if the customer texts.",
+          not_interested: "Moved to 🚫 Not interested. No more automatic texts. It comes back to the inbox if the customer texts.",
+          revisit: `Moved to 🔁 Revisit. It shows up in follow-ups on ${revisitAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(revisitAt) : "that date"}, or sooner if the customer texts.`,
+          spam: "Moved to 🗑️ Spam. The AI, alerts and automatic texts are off for this number, even if it texts again.",
+          test: "Moved to 🧪 Test. Hidden from the inbox; the AI and alerts still work.",
+        };
+        return json({ ok: true, message: messages[to] });
       }
       case "set_name": {
         const name = String(body.name || "").replace(/\s+/g, " ").trim().slice(0, 120);

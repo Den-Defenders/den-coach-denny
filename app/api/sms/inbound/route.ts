@@ -23,6 +23,8 @@ import {
   audit,
   clearOptOut,
   conversationState,
+  conversationFolder,
+  returnToInboxOnText,
   ensureContact,
   findOptOut,
   markOptOutKnownToTwilio,
@@ -123,12 +125,20 @@ export async function POST(request: Request) {
     } else {
       const added = await addConsent(from, "conversational", "inbound_text", body.slice(0, 200), now);
       if (added) await audit({ phone: from, action: "consent_added", reason: "inbound_text", detail: { sid }, actor: "customer" });
-      // Step 5: a lead who replies is done with the sheet drip; the AI takes over.
-      if (saved) await stopDrip(from, "they replied (AI took over)", "customer", now);
-      // AI reply, after Twilio has its empty TwiML. All send rules still apply inside.
-      if (messageId) scheduleBotReply(from, messageId);
-      // Step 3: a person took this number over, so the AI won't answer: hold text + team alert.
-      if (messageId) await handlePausedInbound(from, messageId, body, media.length);
+      if (await conversationFolder(from) === "spam") {
+        // Session 7 PR 3: filed as spam. Keep the text, but no AI, no hold text, no Slack.
+        await audit({ phone: from, action: "inbound_spam_folder", detail: { sid }, actor: "customer" });
+      } else {
+        // Booked / Not interested / Revisit chats come back to the inbox when the customer texts.
+        const left = await returnToInboxOnText(from, now);
+        if (left) await audit({ phone: from, action: "folder_moved", reason: "customer_texted", detail: { from: left, to: "active" }, actor: "customer" });
+        // Step 5: a lead who replies is done with the sheet drip; the AI takes over.
+        if (saved) await stopDrip(from, "they replied (AI took over)", "customer", now);
+        // AI reply, after Twilio has its empty TwiML. All send rules still apply inside.
+        if (messageId) scheduleBotReply(from, messageId);
+        // Step 3: a person took this number over, so the AI won't answer: hold text + team alert.
+        if (messageId) await handlePausedInbound(from, messageId, body, media.length);
+      }
     }
   } catch (error) {
     console.error("SMS inbound failed:", error instanceof Error ? error.message : error);
