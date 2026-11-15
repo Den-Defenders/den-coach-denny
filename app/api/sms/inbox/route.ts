@@ -39,6 +39,7 @@ import {
   isCappedRole,
   maxWaitingPerCsr,
   pacificWhen,
+  releasableFolder,
   releasePlan,
   waitingCountFor,
 } from "@/lib/sms/ownership";
@@ -103,7 +104,8 @@ async function inboxTeam(): Promise<TeamMember[]> {
 async function capBlock(access: DennyAccess, phone: string): Promise<string | null> {
   if (!access.email || !isCappedRole(access.role)) return null;
   const full = await inboxThread(phone);
-  if (!full || !customerWaitingSince({ ...full, optedOut: Boolean(full.optOut) }, full.messages)) return null;
+  // Booked / Not interested / Follow up later / Spam chats never count toward the cap.
+  if (!full || !releasableFolder(full.folder) || !customerWaitingSince({ ...full, optedOut: Boolean(full.optOut) }, full.messages)) return null;
   const count = await waitingCountFor(access.email);
   return count >= maxWaitingPerCsr() ? capMessage(count) : null;
 }
@@ -397,7 +399,7 @@ export async function POST(request: Request) {
         await moveChat(phone, to, who, now, { revisitAt, from: thread.folder });
         const messages: Record<ChatFolder, string> = {
           active: "Back in the inbox.",
-          booked: "Moved to 📅 Booked. No more automatic texts. It comes back to the inbox if the customer texts.",
+          booked: "Moved to 📅 Booked. No more automatic texts, and it's never auto-released. If the customer texts, the owner is tagged in Slack (with the AI on, the AI answers too).",
           not_interested: "Moved to 🚫 Not interested. No more automatic texts. It comes back to the inbox if the customer texts.",
           revisit: `Follow up ${revisitAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(revisitAt) : "on that date"}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups and moves up to Due that day (back to the inbox sooner if the customer texts).${claimed ? " This customer is yours now." : ""}`,
           spam: "Moved to 🗑️ Spam. The AI, alerts and automatic texts are off for this number, even if it texts again.",

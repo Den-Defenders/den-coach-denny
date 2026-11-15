@@ -26,8 +26,7 @@
  * the typical number shows what most customers experienced.
  */
 import { followUpList } from "@/lib/sms/folders";
-import { isPersonSender, ownedWaitingChats, teamMinutesBetween } from "@/lib/sms/ownership";
-import { classifyKeyword } from "@/lib/sms/rules";
+import { isPersonSender, needsAnswer, ownedWaitingChats, teamMinutesBetween } from "@/lib/sms/ownership";
 import { CHECKING_SENDER, HOLD_SENDER, smsDb } from "@/lib/sms/store";
 
 export type ScoreRow = {
@@ -46,30 +45,29 @@ export type ScoreRow = {
   booked: number;
 };
 
-export type Scoreboard = { since: string; rows: ScoreRow[] };
+/** The numbers you can tap for a list (Steven, 2026-11-15). Typical/Avg reply open the Replies list. */
+export const SCORE_METRICS = ["owns", "waiting", "followups", "replies", "slow", "texts", "released", "booked"] as const;
+export type ScoreMetric = (typeof SCORE_METRICS)[number];
+
+/** One line of a tapped number's list: which customer, when, and a short note. */
+export type ScoreDetail = { phone: string; at: string; note: string };
+
+export type Scoreboard = { since: string; rows: ScoreRow[]; details: ScoreDetail[] };
 
 type Msg = { phone: string; direction: string; body: string; sentBy: string | null; status: string; at: number };
 /** Audit events that change who's in charge: bot_handoff, bot_paused, bot_resumed, handoff_handled. */
 export type ChargeEvent = { phone: string; action: string; at: number };
 
-/** Texts that don't ask for an answer. */
-const NO_ANSWER_NEEDED = /^(ok(ay)?|k|kk|thanks?( you)?|thank u|thx|ty|cool|great|perfect|sounds good|got it|will do|awesome|nice|yes thanks|ok thanks?|ok thank you|👍|🙏|❤️|😊|🙂)[\s.!]*$/i;
-
-export function needsAnswer(body: string): boolean {
-  const text = body.trim();
-  if (!text) return true; // a photo with no words still needs a look
-  if (classifyKeyword(text, { optedOut: false }).keyword !== null) return false;
-  return !NO_ANSWER_NEEDED.test(text);
-}
-
 /** Reply episodes in the window: who answered and how many team minutes the customer waited. */
-export function replyEpisodes(messages: Msg[], since: number, events: ChargeEvent[] = []): { by: string; minutes: number }[] {
+export type ReplyEpisode = { by: string; minutes: number; phone: string; at: number; waitStart: number };
+
+export function replyEpisodes(messages: Msg[], since: number, events: ChargeEvent[] = []): ReplyEpisode[] {
   // One timeline per phone: texts and charge events, oldest first (an event at the same moment goes first).
   type Item = { kind: "msg"; m: Msg } | { kind: "event"; e: ChargeEvent };
   const byPhone = new Map<string, Item[]>();
   for (const m of messages) (byPhone.get(m.phone) ?? byPhone.set(m.phone, []).get(m.phone)!).push({ kind: "msg", m });
   for (const e of events) byPhone.get(e.phone)?.push({ kind: "event", e });
-  const out: { by: string; minutes: number }[] = [];
+  const out: ReplyEpisode[] = [];
   for (const items of byPhone.values()) {
     items.sort((a, b) => (a.kind === "msg" ? a.m.at : a.e.at) - (b.kind === "msg" ? b.m.at : b.e.at) || (a.kind === "event" ? -1 : 1));
     let waitStart: number | null = null;
@@ -94,7 +92,7 @@ export function replyEpisodes(messages: Msg[], since: number, events: ChargeEven
       }
       if (m.status === "send_failed" || m.sentBy === HOLD_SENDER || m.sentBy === CHECKING_SENDER) continue;
       if (isPersonSender(m.sentBy)) {
-        if (waitStart !== null && m.at >= since) out.push({ by: m.sentBy as string, minutes: teamMinutesBetween(new Date(waitStart), new Date(m.at)) });
+        if (waitStart !== null && m.at >= since) out.push({ by: m.sentBy as string, minutes: teamMinutesBetween(new Date(waitStart), new Date(m.at)), phone: m.phone, at: m.at, waitStart });
         waitStart = null;
         aiInCharge = false; // a person's text pauses the AI
         continue;
@@ -127,22 +125,49 @@ function bump(map: Map<string, ScoreRow>, email: string): ScoreRow {
   return row;
 }
 
-/** The scoreboard since `since` (start of the period). `people` = everyone with inbox access, so zero rows show too. */
-export async function buildScoreboard(since: Date, now: Date, people: string[]): Promise<Scoreboard> {
+function minutesNote(m: number): string {
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h} hr ${m % 60} min` : `${h} hr`;
+}
+
+/**
+ * The scoreboard since `since` (start of the period). `people` = everyone with inbox access,
+ * so zero rows show too. `detail` = one person + one number: its list comes back in `details`.
+ */
+export async function buildScoreboard(since: Date, now: Date, people: string[], detail?: { person: string; metric: ScoreMetric }): Promise<Scoreboard> {
   const sql = await smsDb();
   const rows = new Map<string, ScoreRow>();
   for (const p of people) bump(rows, p);
+  const who = detail?.person.toLowerCase() || null;
+  const details: ScoreDetail[] = [];
+  const add = (metric: ScoreMetric, email: string | null | undefined, item: () => ScoreDetail) => {
+    if (detail && who && detail.metric === metric && (email || "").toLowerCase() === who) details.push(item());
+  };
+  const when = (ms: number) => new Date(ms).toISOString();
 
-  const owned = await sql`SELECT assigned_to, count(*)::int AS n FROM sms_conversations
-    WHERE assigned_to IS NOT NULL AND folder IS NULL GROUP BY assigned_to`;
-  for (const r of owned) bump(rows, String(r.assigned_to)).ownsNow = Number(r.n) || 0;
+  const owned = await sql`SELECT phone, assigned_to, assigned_at FROM sms_conversations
+    WHERE assigned_to IS NOT NULL AND folder IS NULL`;
+  for (const r of owned) {
+    bump(rows, String(r.assigned_to)).ownsNow++;
+    const at = r.assigned_at ? new Date(r.assigned_at as string).getTime() : now.getTime();
+    add("owns", String(r.assigned_to), () => ({ phone: String(r.phone), at: when(at), note: "Owned since" }));
+  }
 
   // 🗑️ Spam and 🧪 Test chats never count.
   const hiddenRows = await sql`SELECT phone FROM sms_conversations WHERE folder IN ('spam', 'test')`;
   const hidden = new Set(hiddenRows.map((r) => String(r.phone)));
 
-  for (const w of await ownedWaitingChats()) if (!hidden.has(w.conversation.phone)) bump(rows, w.conversation.assignedTo).waitingNow++;
-  for (const f of await followUpList(null, now)) if (f.owner && f.reason !== "scheduled") bump(rows, f.owner).followUpsDue++;
+  for (const w of await ownedWaitingChats()) {
+    if (hidden.has(w.conversation.phone)) continue;
+    bump(rows, w.conversation.assignedTo).waitingNow++;
+    add("waiting", w.conversation.assignedTo, () => ({ phone: w.conversation.phone, at: w.waitStart.toISOString(), note: `Waiting since; goes back to the queue ${w.deadline.getTime() <= now.getTime() ? "within 5 min" : "at " + new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", hour: "numeric", minute: "2-digit" }).format(w.deadline)}` }));
+  }
+  for (const f of await followUpList(null, now)) {
+    if (!f.owner || f.reason === "scheduled") continue;
+    bump(rows, f.owner).followUpsDue++;
+    add("followups", f.owner, () => ({ phone: f.phone, at: f.since, note: f.label }));
+  }
 
   // Texts from 3 days before the period too, so a wait that started earlier is measured fully.
   const lookback = new Date(since.getTime() - 3 * 24 * 3600_000).toISOString();
@@ -157,9 +182,17 @@ export async function buildScoreboard(since: Date, now: Date, people: string[]):
     at: new Date(m.created_at as string).getTime(),
   }));
   const sinceMs = since.getTime();
+  const textsByPhone = new Map<string, { n: number; last: number }>();
   for (const m of list) {
-    if (m.direction === "outbound" && m.at >= sinceMs && m.status !== "send_failed" && isPersonSender(m.sentBy)) bump(rows, m.sentBy as string).textsSent++;
+    if (m.direction === "outbound" && m.at >= sinceMs && m.status !== "send_failed" && isPersonSender(m.sentBy)) {
+      bump(rows, m.sentBy as string).textsSent++;
+      if (who && (m.sentBy as string).toLowerCase() === who) {
+        const t = textsByPhone.get(m.phone) || { n: 0, last: 0 };
+        textsByPhone.set(m.phone, { n: t.n + 1, last: Math.max(t.last, m.at) });
+      }
+    }
   }
+  for (const [phone, t] of textsByPhone) add("texts", who, () => ({ phone, at: when(t.last), note: `${t.n} text${t.n === 1 ? "" : "s"} (last one at this time)` }));
   const eventRows = await sql`SELECT phone, action, created_at FROM sms_audit
     WHERE created_at > ${lookback}::timestamptz AND action IN ('bot_handoff', 'bot_paused', 'bot_resumed', 'handoff_handled')`;
   const events: ChargeEvent[] = eventRows
@@ -171,6 +204,8 @@ export async function buildScoreboard(since: Date, now: Date, people: string[]):
     row.replies++;
     if (e.minutes > 60) row.slowReplies++;
     (waits.get(row.email) ?? waits.set(row.email, []).get(row.email)!).push(e.minutes);
+    add("replies", e.by, () => ({ phone: e.phone, at: when(e.at), note: `Waited ${minutesNote(e.minutes)} of team time` }));
+    if (e.minutes > 60) add("slow", e.by, () => ({ phone: e.phone, at: when(e.at), note: `Waited ${minutesNote(e.minutes)} of team time` }));
   }
   for (const row of rows.values()) {
     const list = waits.get(row.email) || [];
@@ -178,17 +213,27 @@ export async function buildScoreboard(since: Date, now: Date, people: string[]):
     row.typicalReplyMinutes = median(list);
   }
 
-  const audits = await sql`SELECT phone, action, actor, detail->>'from' AS released_from FROM sms_audit
+  const audits = await sql`SELECT phone, action, actor, created_at, detail->>'from' AS released_from FROM sms_audit
     WHERE created_at >= ${since.toISOString()}::timestamptz AND action IN ('auto_released', 'booking_marked_booked')`;
   for (const a of audits) {
     if (a.phone && hidden.has(String(a.phone))) continue;
-    if (a.action === "auto_released" && a.released_from) bump(rows, String(a.released_from)).autoReleased++;
-    if (a.action === "booking_marked_booked" && a.actor && a.actor !== "staff") bump(rows, String(a.actor)).booked++;
+    const at = new Date(a.created_at as string).getTime();
+    if (a.action === "auto_released" && a.released_from) {
+      bump(rows, String(a.released_from)).autoReleased++;
+      add("released", String(a.released_from), () => ({ phone: String(a.phone), at: when(at), note: "Released: no reply within 1 hour of team time" }));
+    }
+    if (a.action === "booking_marked_booked" && a.actor && a.actor !== "staff") {
+      bump(rows, String(a.actor)).booked++;
+      add("booked", String(a.actor), () => ({ phone: String(a.phone), at: when(at), note: "Booked in ServiceTitan" }));
+    }
   }
 
   // Busiest first: waiting now, then follow-ups due, then replies.
   const sorted = [...rows.values()].sort((a, b) => b.waitingNow - a.waitingNow || b.followUpsDue - a.followUpsDue || b.replies - a.replies || a.email.localeCompare(b.email));
-  return { since: since.toISOString(), rows: sorted };
+  // Lists: newest first, except Waiting and Follow-ups (oldest first: who waited longest).
+  const oldestFirst = detail?.metric === "waiting" || detail?.metric === "followups";
+  details.sort((a, b) => (oldestFirst ? 1 : -1) * (Date.parse(a.at) - Date.parse(b.at)));
+  return { since: since.toISOString(), rows: sorted, details };
 }
 
 /** Start of the period: "today" = midnight Pacific; otherwise the last N days. */

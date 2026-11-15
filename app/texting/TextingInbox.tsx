@@ -498,7 +498,7 @@ export default function TextingInbox() {
 
       {showScoreboard ? (
         <section className="surface inbox-thread" aria-label="Scoreboard">
-          <Scoreboard onBack={() => setView("active")} onFollowUps={(email) => { setFollowOwner(email); setView("followups"); }} />
+          <Scoreboard onBack={() => setView("active")} onFollowUps={(email) => { setFollowOwner(email); setView("followups"); }} onOpenChat={(phone) => { setView("active"); open(phone); }} />
         </section>
       ) : (
       <section className="surface inbox-thread" aria-label="Conversation">

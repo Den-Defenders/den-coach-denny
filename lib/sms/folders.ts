@@ -13,7 +13,9 @@
  *   🗑️ Spam           — hidden. AI off, no Slack alerts, no hold texts, no Needs CSR, nothing automatic.
  *                        Stays in Spam even if the number texts again.
  *   🧪 Test           — hidden from the inbox, but everything still works (AI, Slack, drip) for testing.
- * A new text from the customer brings Booked / Not interested / Revisit chats back to the inbox.
+ * A new text from the customer brings Not interested / Follow up later chats back to the inbox.
+ * 📅 Booked stays in Booked (Steven, 2026-11-15): AI on → the AI answers and the owner is tagged
+ * in Slack; AI paused → the usual "customer is waiting" alert. Booked chats are never auto-released.
  * STOP/START/HELP always work in every folder.
  *
  * "My follow-ups": a CSR's own customers they need to chase themselves, oldest first:

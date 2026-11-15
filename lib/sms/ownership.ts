@@ -127,6 +127,16 @@ export function teamMinutesBetween(start: Date, end: Date): number {
 // Is the customer waiting for a person, and since when?
 // ---------------------------------------------------------------------------
 
+/** Texts that don't ask for an answer. */
+const NO_ANSWER_NEEDED = /^(ok(ay)?|k|kk|thanks?( you)?|thank u|thx|ty|cool|great|perfect|sounds good|got it|will do|awesome|nice|yes thanks|ok thanks?|ok thank you|👍|🙏|❤️|😊|🙂)[\s.!]*$/i;
+
+export function needsAnswer(body: string): boolean {
+  const text = body.trim();
+  if (!text) return true; // a photo with no words still needs a look
+  if (classifyKeyword(text, { optedOut: false }).keyword !== null) return false;
+  return !NO_ANSWER_NEEDED.test(text);
+}
+
 /** A text from a person (a team member's login), not the AI, drip or an automatic text. */
 export function isPersonSender(sentBy: string | null): boolean {
   if (!sentBy) return false;
@@ -149,7 +159,8 @@ export function waitingSince(
   for (const m of messages) {
     const at = Date.parse(m.createdAt);
     if (m.direction === "inbound") {
-      if (classifyKeyword(m.body, { optedOut: false }).keyword !== null) continue; // STOP/START/HELP: Twilio answers
+      // STOP/START/HELP (Twilio answers) and "ok" / "thanks" / 👍 don't need a person (Steven, 2026-11-15).
+      if (!needsAnswer(m.body)) continue;
       if (since === null) since = at;
       continue;
     }
@@ -175,12 +186,18 @@ export function releaseDeadline(waitStart: Date, assignedAt: string | null): Dat
   return addTeamMinutes(start, AUTO_RELEASE_MINUTES);
 }
 
-type WaitState = { botStatus: "on" | "paused"; handoffAt: string | null; handoffResolvedAt: string | null; optedOut: boolean };
+type WaitState = { botStatus: "on" | "paused"; handoffAt: string | null; handoffResolvedAt: string | null; optedOut: boolean; folder?: string | null; bookingDoneAt?: string | null };
+
+/** Only Inbox (and 🧪 Test) chats are released or count toward the cap; Booked, Not interested, Follow up later and Spam never (Steven, 2026-11-15). */
+export function releasableFolder(folder: string | null | undefined): boolean {
+  return !folder || folder === "active" || folder === "test";
+}
 
 /** Is this customer waiting for a person right now (from a thread's texts, oldest first)? Since when? */
 export function customerWaitingSince(conv: WaitState, messages: WaitMessage[]): Date | null {
   if (conv.optedOut) return null;
-  const resolved = conv.handoffResolvedAt ? Date.parse(conv.handoffResolvedAt) : 0;
+  // "Mark handled" and "Booked in ServiceTitan" both mean a person dealt with what came before.
+  const resolved = Math.max(conv.handoffResolvedAt ? Date.parse(conv.handoffResolvedAt) : 0, conv.bookingDoneAt ? Date.parse(conv.bookingDoneAt) : 0);
   const lastPerson = Math.max(0, ...messages.filter((m) => m.direction === "outbound" && m.status !== "send_failed" && isPersonSender(m.sentBy)).map((m) => Date.parse(m.createdAt)));
   const anchor = Math.max(resolved, lastPerson);
   return waitingSince(messages.filter((m) => Date.parse(m.createdAt) > anchor), conv);
@@ -191,7 +208,7 @@ export function releasePlan(
   conv: WaitState & { assignedTo: string | null; assignedAt: string | null },
   messages: WaitMessage[],
 ): { waitingSince: Date; releaseAt: Date } | null {
-  if (!conv.assignedTo) return null;
+  if (!conv.assignedTo || !releasableFolder(conv.folder)) return null;
   const since = customerWaitingSince(conv, messages);
   if (!since) return null;
   return { waitingSince: since, releaseAt: releaseDeadline(since, conv.assignedAt) };

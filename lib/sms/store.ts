@@ -892,7 +892,8 @@ export type OwnedConversation = {
 export async function ownedConversationsWithNewTexts(owner?: string): Promise<OwnedConversation[]> {
   const sql = await db();
   const rows = await sql`SELECT v.phone, v.assigned_to, v.assigned_at, v.bot_status, v.handoff_at, c.first_name, c.last_name,
-      NULLIF(GREATEST(coalesce(p.at, '-infinity'::timestamptz), coalesce(v.handoff_resolved_at, '-infinity'::timestamptz)), '-infinity'::timestamptz) AS anchor_at
+      NULLIF(GREATEST(coalesce(p.at, '-infinity'::timestamptz), coalesce(v.handoff_resolved_at, '-infinity'::timestamptz),
+        coalesce(v.booking_done_at, '-infinity'::timestamptz)), '-infinity'::timestamptz) AS anchor_at
     FROM sms_conversations v
     JOIN sms_contacts c ON c.phone = v.phone
     LEFT JOIN sms_opt_outs o ON o.phone = v.phone
@@ -901,10 +902,11 @@ export async function ownedConversationsWithNewTexts(owner?: string): Promise<Ow
       WHERE m.conversation_id = v.id AND m.direction = 'outbound' AND m.status <> 'send_failed'
         AND m.sent_by IS NOT NULL AND m.sent_by NOT LIKE 'denny-%' AND m.sent_by NOT IN ('system', 'drip')
     ) p ON true
-    WHERE v.assigned_to IS NOT NULL AND o.phone IS NULL AND coalesce(v.folder, '') <> 'spam'
+    WHERE v.assigned_to IS NOT NULL AND o.phone IS NULL AND coalesce(v.folder, 'active') IN ('active', 'test')
       AND (${owner ?? null}::text IS NULL OR v.assigned_to = ${owner ?? null}::text)
       AND v.last_inbound_at IS NOT NULL
-      AND v.last_inbound_at > GREATEST(coalesce(p.at, '-infinity'::timestamptz), coalesce(v.handoff_resolved_at, '-infinity'::timestamptz))`;
+      AND v.last_inbound_at > GREATEST(coalesce(p.at, '-infinity'::timestamptz), coalesce(v.handoff_resolved_at, '-infinity'::timestamptz),
+        coalesce(v.booking_done_at, '-infinity'::timestamptz))`;
   return rows.map((r) => ({
     phone: String(r.phone),
     assignedTo: String(r.assigned_to),
@@ -941,7 +943,8 @@ export async function autoReleaseConversation(phone: string, owner: string, assi
   const sql = await db();
   const rows = await sql`UPDATE sms_conversations v SET assigned_to = NULL, assigned_at = NULL,
       released_from = ${owner}, released_at = ${iso(at)}::timestamptz, updated_at = now()
-    WHERE v.phone = ${phone} AND v.assigned_to = ${owner}
+    WHERE v.phone = ${phone} AND v.assigned_to = ${owner} AND coalesce(v.folder, 'active') IN ('active', 'test')
+      AND (v.booking_done_at IS NULL OR v.booking_done_at < ${iso(waitStart)}::timestamptz)
       AND date_trunc('milliseconds', v.assigned_at) IS NOT DISTINCT FROM ${assignedAt}::timestamptz
       AND (v.handoff_resolved_at IS NULL OR v.handoff_resolved_at < ${iso(waitStart)}::timestamptz)
       AND NOT EXISTS (
@@ -1075,15 +1078,17 @@ export async function conversationFolder(phone: string): Promise<ChatFolder> {
 }
 
 /**
- * A new text from the customer: Booked, Not interested and Revisit chats come back to
- * the inbox (Spam and Test stay where they are). Returns the folder it left, or null.
+ * A new text from the customer: Not interested and Follow up later chats come back to
+ * the inbox. Booked, Spam and Test stay where they are (Steven, 2026-11-15: a booked
+ * customer's text tags the owner but the chat stays in Booked and is never released).
+ * Returns the folder it left, or null.
  */
 export async function returnToInboxOnText(phone: string, at: Date): Promise<ChatFolder | null> {
   const sql = await db();
   const rows = await sql`UPDATE sms_conversations v SET folder = NULL, revisit_at = NULL, folder_at = ${iso(at)}::timestamptz,
       folder_by = 'customer', updated_at = now()
     FROM (SELECT id, folder AS was FROM sms_conversations WHERE phone = ${phone} FOR UPDATE) old
-    WHERE v.id = old.id AND v.folder IN ('booked', 'not_interested', 'revisit')
+    WHERE v.id = old.id AND v.folder IN ('not_interested', 'revisit')
     RETURNING old.was`;
   return rows.length ? folderFrom(rows[0].was) : null;
 }
@@ -1151,4 +1156,17 @@ export async function followUpCandidates(owner?: string): Promise<FollowUpCandid
 export async function inboxRowsFor(phones: string[]): Promise<InboxRow[]> {
   if (!phones.length) return [];
   return listInboxConversations({ phones, folders: [...CHAT_FOLDERS], limit: 500 });
+}
+
+/** "First Last" for each phone that has a name (scoreboard lists). */
+export async function contactNames(phones: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!phones.length) return out;
+  const sql = await db();
+  const rows = await sql`SELECT phone, first_name, last_name FROM sms_contacts WHERE phone = ANY(string_to_array(${phones.join(",")}::text, ','))`;
+  for (const r of rows) {
+    const name = [r.first_name, r.last_name].filter(Boolean).join(" ").trim();
+    if (name) out.set(String(r.phone), name);
+  }
+  return out;
 }

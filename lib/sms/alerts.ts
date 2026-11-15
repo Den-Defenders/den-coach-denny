@@ -104,6 +104,23 @@ export async function postReadyToBookAlert(phone: string, booking: BookingReques
 }
 
 /**
+ * Session 7 (Steven, 2026-11-15): a customer in 📅 Booked texted while the AI is on.
+ * The AI answers, the owner is tagged so they know, and the chat stays in Booked
+ * (never auto-released). With the AI paused, the usual "customer is waiting" alert goes instead.
+ */
+export async function postBookedCustomerTextedAlert(phone: string, body: string, photos: number): Promise<void> {
+  const preview = body.replace(/\s+/g, " ").trim().slice(0, 200);
+  const mention = await ownerMention(phone);
+  const text = [
+    `${pilotTag()}${mention}:calendar: *Texting: a booked customer texted* - ${formatPhone(phone)}`,
+    preview ? `"${preview}"${photos ? ` (+${photos} photo${photos === 1 ? "" : "s"})` : ""}` : photos ? `(${photos} photo${photos === 1 ? "" : "s"})` : "",
+    "The AI is answering. The chat stays in Booked, so take a look if they need a person.",
+    `<${inboxLink(phone)}|Open in the Texting inbox>`,
+  ].filter(Boolean).join("\n");
+  return postSmsSlack(text);
+}
+
+/**
  * Session 7: the owner didn't reply within 1 team hour, so the chat went back to the
  * shared queue. @here so whoever is free picks it up (Steven, 2026-11-11: @here + name the owner).
  */
