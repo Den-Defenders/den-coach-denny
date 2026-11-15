@@ -286,6 +286,41 @@ export function doorTypeFromShortAnswer(text: string): string {
 /** The door-type question the AI asks before request_booking (no price in it). */
 export const DOOR_TYPE_QUESTION = "Which door is this for: a front door, French doors, or a sliding patio door?";
 
+/**
+ * Wording fix 2026-11-15 (Ben Tabingo: "Front door and back door" was priced as two swinging
+ * doors): a back door can be a swinging door or a slider, so ask before pricing it.
+ */
+export const BACK_DOOR_QUESTION = "Is the back door a regular swinging door, or a sliding patio door?";
+export function backDoorUnclear(customerWords: string): boolean {
+  const t = customerWords || "";
+  return /\bback\s*(door|one)\b/i.test(t) && !/\b(slid\w*|slider|patio|french|swing\w*|hinged|regular|screen door|storm)\b/i.test(t);
+}
+export function askedBackDoor(ourTexts: string[]): boolean {
+  return ourTexts.some((t) => t.includes(BACK_DOOR_QUESTION.slice(0, 40)));
+}
+
+/** Our text asked for their full name and street address. */
+export function askedNameAddress(text: string): boolean {
+  return /\bfull name\b/i.test(text || "") && /\baddress\b/i.test(text || "");
+}
+
+/**
+ * Their reply to our name + address question: "Ben Tabingo\n8640 Vizela Way\nElk Grove CA 95757".
+ * Returns what we could read (either part may be empty), or null when there's no street number.
+ */
+export function nameAddressFromText(text: string): { name: string; address: string } | null {
+  const t = (text || "").replace(/\s*\n+\s*/g, ", ").replace(/\s+/g, " ").trim();
+  const m = /(^|[\s,])(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .'#-]{2,}.*)$/.exec(t);
+  if (!m || t.length > 200) return null;
+  const address = m[2].replace(/[,.\s]+$/, "").slice(0, 160);
+  // A real street: 2+ digit house number, or a street word ("12 Oak Ln"). Not "2 doors".
+  if (!/^\d{2,6}\s/.test(address) && !/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|way|blvd|cir|circle|pl|place|pkwy|ter|terrace|loop|trl|trail|hwy)\b/i.test(address)) return null;
+  if (/^\d+\s+(doors?|windows?|screens?|sliders?|of|or|and|pm|am|days?|weeks?)\b/i.test(address)) return null;
+  const before = t.slice(0, m.index + m[1].length).replace(/[,\s]+$/, "").replace(/^(it'?s|this is|i'?m|name is|my name is)\s+/i, "").trim();
+  const name = /^[A-Za-z][A-Za-z .'-]{1,60}$/.test(before) && before.split(/\s+/).length <= 5 ? before : "";
+  return { name, address };
+}
+
 /** We already asked them which door type (so a skipped answer doesn't block the booking). */
 export function askedDoorType(ourTexts: string[]): boolean {
   return ourTexts.some((t) => /\?/.test(t) && /french doors?/i.test(t) && /slid(ing|er)/i.test(t));
@@ -403,7 +438,7 @@ export function bookingLines(b: BookingRequest, phoneLabel: string, notes: Recor
     `Phone: ${phoneLabel}`,
     `Address: ${[b.address || "not given", b.zip && !(b.address || "").includes(b.zip) ? b.zip : ""].filter(Boolean).join(", ")}${b.area ? ` (${b.area})` : ""}`,
     `Project: ${[b.product, b.doorCount].filter(Boolean).join(", ") || "customer didn't say (ask on the call)"}`,
-    b.followUp === "call" ? "Next step: CALL them to go over a few questions, then book it" : b.followUp === "text" ? "Next step: questions answered by text (see Notes). Book it, then text them to confirm" : "",
+    b.followUp === "call" ? "Next step: CALL them to go over a few questions, then book it" : b.followUp === "text" ? "Next step: questions answered by text (see Notes). Book it in ServiceTitan (ServiceTitan sends their confirmation text)" : "",
     b.crmCampaign ? `Book under campaign: ${b.crmCampaign}` : "",
     b.platform || b.adSet ? `Lead from: ${[b.platform, b.adSet ? `ad set "${b.adSet}"` : ""].filter(Boolean).join(", ")}` : "",
     otherNotes ? `Notes: ${otherNotes}`.slice(0, 500) : "",
@@ -434,4 +469,5 @@ export function withoutBookingClaim(reply: string): string {
 }
 
 /** Used when nothing is left after removing a booking claim. */
-export const SAFE_BOOKING_GOODBYE = "Thanks! I've passed your time to our team. A team member will text you shortly to finish setting it up.";
+// Wording fix 2026-11-15: no promise that a person will text (ServiceTitan sends the confirmation, Steven 2026-11-06).
+export const SAFE_BOOKING_GOODBYE = "Thanks! I've passed your time to our team. You'll get a confirmation text once it's on the calendar, and we'll reach out if we need anything else.";

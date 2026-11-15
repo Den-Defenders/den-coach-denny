@@ -35,8 +35,13 @@ import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from
 import { inboxLink, ownerMention, pilotTag, postReadyToBookAlert, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
 import {
   CHECKING_TEXT,
+  BACK_DOOR_QUESTION,
   CHOSEN_TIME_KEY,
   LOOKUPS_KEY,
+  askedBackDoor,
+  askedNameAddress,
+  backDoorUnclear,
+  nameAddressFromText,
   MAX_LOOKUPS_PER_DAY,
   MAX_TIMES_OFFERED,
   OPEN_TIMES_KEY,
@@ -76,7 +81,7 @@ import { maybeSendHoldText } from "@/lib/sms/inbox";
 import { asksAboutCall } from "@/lib/sms/drip";
 import {
   BOOKING_ADDRESS_KEY, BOOKING_NAME_KEY, FOLLOW_UP_KEY, FOLLOW_UP_QUESTION,
-  askedFollowUp, followUpFromText, looksLikeAnswer, nextQualifier, pendingQualifier,
+  askedFollowUp, followUpFromText, isFollowUpQuestion, looksLikeAnswer, nextQualifier, pendingQualifier, qualifierAck,
 } from "@/lib/sms/qualify";
 import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
 import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
@@ -594,7 +599,7 @@ export function followUpGoodbye(followUp: "call" | "text", firstName: string, ti
   const open = teamIsTexting(now, timeZone);
   return followUp === "call"
     ? `${thanks} One of our reps will give you a call ${open ? "shortly" : "tomorrow after 8 AM"} to go over a few questions and finish booking your consultation for ${time}.`
-    : `${thanks} That's everything I need. A team member will text you ${open ? "shortly" : "after 8 AM"} to confirm your consultation for ${time}.`;
+    : `${thanks} That's everything I need. I've passed ${time} to our team, and you'll get a confirmation text once it's on the calendar${open ? "" : " (our team starts at 8 AM)"}.`;
 }
 
 export const VALUE_QUESTION = "Want me to walk you through what goes into that price?";
@@ -716,13 +721,35 @@ export async function composeBotReply(
   // They picked an offered time in words ("Wednesday"): code saves it before the AI runs, so the AI
   // sees "Time they picked" and goes on to name + address (Simulator 2026-11-08: the AI skipped
   // choose_time, asked the door type again and repeated the price).
+  const ourTextBeforeTheirs = thread.slice(0, Math.max(lastInboundAt, 0)).filter((m) => m.direction === "outbound").pop()?.body || "";
+  let justPicked = false;
   if (offered && !chosenTimeFrom(notes)) {
-    const ourLastText = thread.slice(0, Math.max(lastInboundAt, 0)).filter((m) => m.direction === "outbound").pop()?.body || "";
-    const pick = pickAfterOffer(ourLastText, theirLastText, offered.times);
+    const pick = pickAfterOffer(ourTextBeforeTheirs, theirLastText, offered.times);
     if (pick) {
       notes[CHOSEN_TIME_KEY] = JSON.stringify(pick);
       await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
       await fx.log("bot_time_chosen", pick.date, { window: pick.window, by: "code" });
+      justPicked = true;
+    }
+  }
+  // Wording fix 2026-11-15 (Ben Tabingo): their name + address, saved the moment they send it, so
+  // nothing later (door type, price, a retry) makes us ask again.
+  if (!(notes[BOOKING_NAME_KEY] && notes[BOOKING_ADDRESS_KEY])) {
+    for (let i = thread.length - 1; i > 0; i--) {
+      if (thread[i].direction !== "inbound") continue;
+      const prev = thread.slice(0, i).filter((m) => m.direction === "outbound").pop()?.body || "";
+      if (!askedNameAddress(prev)) continue;
+      const got = nameAddressFromText(thread[i].body);
+      if (!got) continue;
+      const save: Record<string, string> = {};
+      if (got.name && !notes[BOOKING_NAME_KEY]) save[BOOKING_NAME_KEY] = got.name;
+      if (got.address && !notes[BOOKING_ADDRESS_KEY]) save[BOOKING_ADDRESS_KEY] = got.address;
+      if (Object.keys(save).length) {
+        Object.assign(notes, save);
+        await fx.saveNotes(save);
+        await fx.log("bot_name_address_saved", Object.keys(save).join(","), {}, "system");
+      }
+      break;
     }
   }
   const picked = chosenTimeFrom(notes);
@@ -734,6 +761,8 @@ export async function composeBotReply(
     linksSent: linksSent(thread),
     openTimes: offered?.times.map((t) => `${t.n}. ${timeWords(t)}`),
     chosenTime: picked ? timeWords(picked) : undefined,
+    bookingName: notes[BOOKING_NAME_KEY] || undefined,
+    bookingAddress: notes[BOOKING_ADDRESS_KEY] || undefined,
     bookingStep: notes[FOLLOW_UP_KEY] === "text"
       ? (() => { const q = nextQualifier(notes, ourTexts); return q ? `they chose to keep texting; answer anything they asked, save any answer with save_customer_notes, then ask: "${q.ask}"` : "all questions answered; call request_booking with follow_up text"; })()
       : askedFollowUp(ourTexts) && !notes[FOLLOW_UP_KEY] ? "we asked if they'd like a call from a rep or to keep texting; when they answer, call request_booking with follow_up" : undefined,
@@ -854,6 +883,10 @@ export async function composeBotReply(
     await fx.saveNotes({ [CHOSEN_TIME_KEY]: notes[CHOSEN_TIME_KEY] });
     await fx.log("bot_time_chosen", pick.date, { window: pick.window });
     const needType = !doorTypeIsKnown() && !askedDoorType(ourTexts);
+    const backDoorStep = !needType && backDoorUnclear(customerWords) && !askedBackDoor(ourTexts)
+      ? `first ask in one short text exactly: "${BACK_DOOR_QUESTION}" (no price in it); after they answer, `
+      : "";
+    const haveContact = Boolean(notes[BOOKING_NAME_KEY] && notes[BOOKING_ADDRESS_KEY]);
     const priceStep = priceAlreadyGiven(thread) || askedAboutValue(ourTexts)
       ? ""
       : `one short text with the price for their door type (COMPANY FACTS) ending with exactly "${VALUE_QUESTION}"; if they say yes, explain the value in 2 or 3 short points tied to what they told you; `;
@@ -862,7 +895,7 @@ export async function composeBotReply(
       picked: timeWords(pick),
       message: needType
         ? `Saved. We don't know which door this is for yet. In one short text ask exactly: "${DOOR_TYPE_QUESTION}" No price in that text. After they answer: ${priceStep}then ask for their full name and the street address of the home, then call request_booking. Don't say it's passed to the team yet, and don't say anything is booked, scheduled or confirmed.`
-        : `Saved. Next: ${priceStep}unless you already have both, ask in one short text for their full name and the street address of the home; if you have both, call request_booking. Don't say it's passed to the team yet (that's request_booking's job), and don't say anything is booked, scheduled or confirmed.`,
+        : `Saved. Next: ${backDoorStep}${priceStep}${haveContact ? "you already have their name and address, so call request_booking (never ask for them again)" : "unless you already have both, ask in one short text for their full name and the street address of the home; if you have both, call request_booking"}. Don't say it's passed to the team yet (that's request_booking's job), and don't say anything is booked, scheduled or confirmed.`,
     };
   };
 
@@ -880,15 +913,31 @@ export async function composeBotReply(
       }
     }
     if (!open || !chosen) return { ok: false, error: "NO_TIME_PICKED", message: "Ask which of the offered times works, then call choose_time." };
+    // Save their name + address FIRST (wording fix 2026-11-15: Ben's were lost when the door-type
+    // and price steps below sent the AI back, so it asked him for them again).
+    {
+      const first: Record<string, string> = {};
+      const givenName = cleanArg(args.full_name, 80);
+      const givenAddress = cleanArg(args.street_address, 160);
+      if (givenName && notes[BOOKING_NAME_KEY] !== givenName) first[BOOKING_NAME_KEY] = givenName;
+      if (givenAddress && notes[BOOKING_ADDRESS_KEY] !== givenAddress) first[BOOKING_ADDRESS_KEY] = givenAddress;
+      if (Object.keys(first).length) { Object.assign(notes, first); await fx.saveNotes(first); }
+    }
+    const saved = notes[BOOKING_NAME_KEY] && notes[BOOKING_ADDRESS_KEY] ? " Their name and address are saved: never ask for them again." : "";
     // Ask the door type first (once). If they skipped the question, the team asks on the call.
     if (!safetyNet && !doorTypeIsKnown() && !askedDoorType(ourTexts)) {
       await fx.log("bot_door_type_first", "asked", {}, "system");
-      return { ok: false, error: "NEED_DOOR_TYPE", message: `Before passing it to the team, ask in one short text exactly: "${DOOR_TYPE_QUESTION}" No price unless they asked. Don't say it's passed to the team yet.` };
+      return { ok: false, error: "NEED_DOOR_TYPE", message: `Before passing it to the team, ask in one short text exactly: "${DOOR_TYPE_QUESTION}" No price unless they asked. Don't say it's passed to the team yet.${saved}` };
+    }
+    // "Back door" can be a swinging door or a slider (wording fix 2026-11-15). Once.
+    if (!safetyNet && backDoorUnclear(customerWords) && !askedBackDoor(ourTexts)) {
+      await fx.log("bot_back_door_first", "asked", {}, "system");
+      return { ok: false, error: "NEED_BACK_DOOR_TYPE", message: `Before giving a price or passing it to the team, ask in one short text exactly: "${BACK_DOOR_QUESTION}" Don't say it's passed to the team yet.${saved}` };
     }
     // Price before handoff, with the value question (Steven, 2026-11-05). Once; skipped if a price was already given.
     if (!safetyNet && !priceAlreadyGiven(thread) && !askedAboutValue(ourTexts)) {
       await fx.log("bot_price_first", "asked", {}, "system");
-      return { ok: false, error: "NEED_PRICE_FIRST", message: `Before passing it to the team, in one short text give the price for their door type from COMPANY FACTS and end with exactly: "${VALUE_QUESTION}" Don't say it's passed to the team yet.` };
+      return { ok: false, error: "NEED_PRICE_FIRST", message: `Before passing it to the team, in one short text give the price for their door type from COMPANY FACTS (two or more doors: per door and the total) and end with exactly: "${VALUE_QUESTION}" Don't say it's passed to the team yet.${saved}` };
     }
     // Their door type in their own words, saved before the questions (so "which entry points" is skipped).
     if (!notes.product && saidDoorType) {
@@ -907,7 +956,7 @@ export async function composeBotReply(
     let followUp: "call" | "text" | null = (args.follow_up === "call" || args.follow_up === "text") && askedFollowUp(ourTexts) ? args.follow_up : null;
     if (!followUp && (notes[FOLLOW_UP_KEY] === "call" || notes[FOLLOW_UP_KEY] === "text")) followUp = notes[FOLLOW_UP_KEY] as "call" | "text";
     // The AI forgot to pass their answer: read it from their reply to our question.
-    if (!followUp && (ourTexts[ourTexts.length - 1] || "").includes(FOLLOW_UP_QUESTION.slice(0, 60))) {
+    if (!followUp && isFollowUpQuestion(ourTexts[ourTexts.length - 1] || "")) {
       followUp = followUpFromText([...thread].reverse().find((m) => m.direction === "inbound")?.body || "");
     }
     if (!safetyNet) {
@@ -976,9 +1025,34 @@ export async function composeBotReply(
       finalText: followUp ? followUpGoodbye(followUp, notes.first_name || "", timeWords(chosen), input.now) : null,
       message: followUp
         ? `Passed to the team. Now send exactly this final message: "${followUpGoodbye(followUp, notes.first_name || "", timeWords(chosen), input.now)}"`
-        : `Passed to the team. Now send one short final message: thank them and say you've passed ${timeWords(chosen)} to our team and a team member will text them shortly to finish setting it up. Never say booked, scheduled, confirmed, reserved or "see you".`,
+        : `Passed to the team. Now send one short final message: thank them and say you've passed ${timeWords(chosen)} to our team and they'll get a confirmation text once it's on the calendar. Don't promise a team member will text them. Never say booked, scheduled, confirmed, reserved or "see you".`,
     };
   };
+
+  // Wording fix 2026-11-15 (Ben Tabingo): the order is time -> door type -> price -> name/address.
+  // Code asks the door questions itself so the AI can't skip ahead to name + address.
+  if (!handedOff && looksLikeAnswer(theirLastText)) {
+    const picked = chosenTimeFrom(notes);
+    if (justPicked && picked && !doorTypeIsKnown() && !askedDoorType(ourTexts)) {
+      await fx.log("bot_door_type_by_code", "after_pick", {}, "system");
+      return { kind: "reply", reply: `Noted: ${timeWords(picked)}.\n\n${DOOR_TYPE_QUESTION}`, media: [], handedOff: null, model: "code" };
+    }
+    if (picked && askedDoorType([ourTextBeforeTheirs])) {
+      // Keep their own words for the card ("Front door and back door"), not just the first door named.
+      if ((doorTypeKnown(theirLastText) || /\bback\b/i.test(theirLastText)) && (!notes.product || notes.product.length < theirLastText.trim().length)) {
+        notes.product = theirLastText.trim().slice(0, 80);
+        await fx.saveNotes({ product: notes.product });
+      }
+      if (backDoorUnclear(customerWords) && !askedBackDoor(ourTexts)) {
+        await fx.log("bot_back_door_by_code", "after_door_answer", {}, "system");
+        return { kind: "reply", reply: BACK_DOOR_QUESTION, media: [], handedOff: null, model: "code" };
+      }
+    }
+    if (askedBackDoor([ourTextBeforeTheirs]) && !/back door:/i.test(notes.product || "")) {
+      notes.product = `${notes.product || saidDoorType || "door"}; back door: ${theirLastText.trim().slice(0, 60)}`.slice(0, 140);
+      await fx.saveNotes({ product: notes.product });
+    }
+  }
 
   // Session 6 PR 4b: after the call-or-text question, code runs the rest (no AI needed):
   // a "call" passes the request now; "text" saves each answer and asks the next question.
@@ -987,24 +1061,26 @@ export async function composeBotReply(
     const lastOurs = ourTexts[ourTexts.length - 1] || "";
     if (chosenTimeFrom(notes) || (offered && askedFollowUp(ourTexts))) {
       let choice: "call" | "text" | null = notes[FOLLOW_UP_KEY] === "call" || notes[FOLLOW_UP_KEY] === "text" ? (notes[FOLLOW_UP_KEY] as "call" | "text") : null;
-      if (!choice && lastOurs.includes(FOLLOW_UP_QUESTION.slice(0, 60))) choice = followUpFromText(lastTheirs);
+      if (!choice && isFollowUpQuestion(lastOurs)) choice = followUpFromText(lastTheirs);
       if (choice === "text" && looksLikeAnswer(lastTheirs)) {
         const pending = pendingQualifier(lastOurs);
-        if (pending && !lastOurs.includes(FOLLOW_UP_QUESTION.slice(0, 60))) {
+        if (pending && !isFollowUpQuestion(lastOurs)) {
           const answer = lastTheirs.trim().slice(0, 240);
           notes[pending.key] = notes[pending.key] && pending.key === "decision_makers" ? `${notes[pending.key]}; ${answer}` : answer;
           await fx.saveNotes({ [pending.key]: notes[pending.key] });
           await fx.log("bot_qualifier_saved", pending.key, {}, "system");
         }
       }
-      if (choice && (choice === "call" || looksLikeAnswer(lastTheirs)) && (lastOurs.includes(FOLLOW_UP_QUESTION.slice(0, 60)) || pendingQualifier(lastOurs))) {
+      if (choice && (choice === "call" || looksLikeAnswer(lastTheirs)) && (isFollowUpQuestion(lastOurs) || pendingQualifier(lastOurs))) {
         const made = await requestBooking({ follow_up: choice });
         if (made.ok) {
           return { kind: "reply", reply: String(made.finalText), media: [], handedOff, model: "code" };
         }
         if (made.error === "NEED_ANSWER") {
           const next = nextQualifier(notes, ourTexts);
-          if (next) return { kind: "reply", reply: next.ask, media: [], handedOff: null, model: "code" };
+          // React to an answer that deserves it ("getting quotes from different companies") before the next question.
+          const ack = pendingQualifier(lastOurs) ? qualifierAck(lastTheirs, ourTexts) : "";
+          if (next) return { kind: "reply", reply: ack ? `${ack}\n\n${next.ask}` : next.ask, media: [], handedOff: null, model: "code" };
         }
         if (made.error === "SLOT_GONE") {
           return { kind: "reply", reply: "Sorry, that time just filled up. Which of the other times works for you?", media: [], handedOff: null, model: "code" };
@@ -1014,8 +1090,9 @@ export async function composeBotReply(
   }
 
   /** What the reply asks or says again that this thread already covered. */
-  const repeatsKnown = (text: string): Array<"door_type" | "price"> => {
-    const out: Array<"door_type" | "price"> = [];
+  const repeatsKnown = (text: string): Array<"door_type" | "price" | "name_address"> => {
+    const out: Array<"door_type" | "price" | "name_address"> = [];
+    if (notes[BOOKING_NAME_KEY] && notes[BOOKING_ADDRESS_KEY] && /\b(full name|street address|name and address)\b/i.test(text)) out.push("name_address");
     if (doorTypeIsKnown() && askedDoorType([text])) out.push("door_type");
     if (known.priceAlreadyGiven && (/\$[\d,]+ to \$[\d,]+/.test(text) || text.includes(VALUE_QUESTION)) && !asksAboutPrice(theirLastText)) out.push("price");
     return out;
@@ -1080,7 +1157,7 @@ export async function composeBotReply(
           : "";
         messages.push({
           role: "system",
-          content: `Check (from the system, not the customer): ${repeats.includes("door_type") ? `they already told you which door (${saidDoorType || notes.product}), so don't ask which door it's for again. ` : ""}${repeats.includes("price") ? `you already gave the price in this thread and they didn't ask about it again, so don't repeat the price or ask "${VALUE_QUESTION}". ` : ""}Rewrite the reply.${next}`,
+          content: `Check (from the system, not the customer): ${repeats.includes("door_type") ? `they already told you which door (${saidDoorType || notes.product}), so don't ask which door it's for again. ` : ""}${repeats.includes("price") ? `you already gave the price in this thread and they didn't ask about it again, so don't repeat the price or ask "${VALUE_QUESTION}". ` : ""}${repeats.includes("name_address") ? `you already have their name (${notes[BOOKING_NAME_KEY]}) and address (${notes[BOOKING_ADDRESS_KEY]}); never ask for them again, call request_booking now. ` : ""}Rewrite the reply.${next}`,
         });
         reply = "";
         continue;
@@ -1091,7 +1168,7 @@ export async function composeBotReply(
         await fx.log("bot_booking_claim_retry", "said_booked", {}, "system");
         messages.push({
           role: "system",
-          content: "Check (from the system, not the customer): your reply says something is booked, scheduled, confirmed or set. You can't book; only the team can. Rewrite it without saying that (for example: you've passed their time to the team and a team member will text them to finish setting it up).",
+          content: "Check (from the system, not the customer): your reply says something is booked, scheduled, confirmed or set. You can't book; only the team can. Rewrite it without saying that (for example: you've passed their time to the team and they'll get a confirmation text once it's on the calendar).",
         });
         reply = "";
         continue;
@@ -1195,6 +1272,17 @@ export async function composeBotReply(
   if (claimsBooked(reply)) {
     await fx.log("bot_booking_claim_removed", "said_booked", {}, "system");
     reply = withoutBookingClaim(reply) || SAFE_BOOKING_GOODBYE;
+  }
+
+  // Still asking for a name + address we already have: code takes the next step itself.
+  if (!handedOff && chosenTimeFrom(notes) && repeatsKnown(reply).includes("name_address")) {
+    await fx.log("bot_repeat_replaced", "name_address", {}, "system");
+    const made = await requestBooking({ follow_up: notes[FOLLOW_UP_KEY] });
+    if (made.ok && made.finalText) reply = String(made.finalText);
+    else if (made.error === "NEED_FOLLOW_UP") reply = FOLLOW_UP_QUESTION;
+    else if (made.error === "NEED_ANSWER") reply = nextQualifier(notes, ourTexts)?.ask || reply;
+    else if (made.error === "NEED_BACK_DOOR_TYPE") reply = BACK_DOOR_QUESTION;
+    else if (made.error === "NEED_DOOR_TYPE") reply = DOOR_TYPE_QUESTION;
   }
 
   // Still repeating after the retry while we wait for name + address: code writes the next question.
