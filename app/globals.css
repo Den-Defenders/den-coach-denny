@@ -533,3 +533,14 @@ a { color: inherit; }
 .scoreboard-table td.warn { color: #b42318; font-weight: 700; }
 .scoreboard-role { margin-left: 6px; font-size: 11px; color: #5b6b7a; text-transform: capitalize; }
 .scoreboard-note { font-size: 12px; }
+
+/* Session 7: scoreboard numbers open their list */
+.scoreboard-num { font-weight: 700; }
+.scoreboard-table td.picked { background: #eef6f5; }
+.scoreboard-detail { border: 1px solid #dfe5ea; border-radius: 12px; padding: 10px 14px; background: #fbfcfd; }
+.scoreboard-detail header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 6px; }
+.scoreboard-detail h4 { margin: 0; font-size: 15px; }
+.scoreboard-detail ul { list-style: none; margin: 0; padding: 0; }
+.scoreboard-detail li { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 0; border-top: 1px solid #eef1f4; font-size: 14px; }
+.scoreboard-detail-when { color: #5b6b7a; }
+.scoreboard-detail-note { color: #33414e; }

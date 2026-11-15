@@ -12,10 +12,11 @@
  * lib/sms/bot.ts. That runs after Twilio already has its answer (next/server
  * after(), inside scheduleBotReply), so Twilio's 15-second webhook limit never matters.
  */
-import { postCustomerWaitingAlert, slackAlertsEnabled } from "@/lib/sms/alerts";
+import { postBookedCustomerTextedAlert, postCustomerWaitingAlert, slackAlertsEnabled } from "@/lib/sms/alerts";
 import { scheduleBotReply } from "@/lib/sms/bot";
 import { stopDrip } from "@/lib/sms/drip";
 import { maybeSendHoldText } from "@/lib/sms/inbox";
+import { needsAnswer } from "@/lib/sms/ownership";
 import { DENNY_ONLY_OPT_OUT_SOURCES, classifyKeyword, normalizePhone } from "@/lib/sms/rules";
 import { sendOptInConfirmation, sendOptOutConfirmation, smsNow } from "@/lib/sms/send";
 import {
@@ -61,6 +62,20 @@ async function handlePausedInbound(phone: string, messageId: number, body: strin
     await audit({ phone, action: "slack_alert", reason: "customer_waiting", detail: { messageId }, actor: "system" });
   } catch (error) {
     console.error("SMS paused-number handling failed:", error instanceof Error ? error.message : error);
+  }
+}
+
+/** A customer in 📅 Booked texted while the AI is on: tag the owner once per stretch of texts. */
+async function tagOwnerIfBooked(phone: string, messageId: number, body: string, photos: number) {
+  try {
+    if (await conversationFolder(phone) !== "booked" || !slackAlertsEnabled()) return;
+    if ((await conversationState(phone)).botStatus !== "on") return; // paused: handlePausedInbound alerts
+    if (!needsAnswer(body) && !photos) return;
+    if (await previousMessageDirection(phone, messageId) === "inbound") return;
+    await postBookedCustomerTextedAlert(phone, body, photos);
+    await audit({ phone, action: "slack_alert", reason: "booked_customer_texted", detail: { messageId }, actor: "system" });
+  } catch (error) {
+    console.error("SMS booked-customer alert failed:", error instanceof Error ? error.message : error);
   }
 }
 
@@ -129,9 +144,11 @@ export async function POST(request: Request) {
         // Session 7 PR 3: filed as spam. Keep the text, but no AI, no hold text, no Slack.
         await audit({ phone: from, action: "inbound_spam_folder", detail: { sid }, actor: "customer" });
       } else {
-        // Booked / Not interested / Revisit chats come back to the inbox when the customer texts.
+        // Not interested / Follow up later chats come back to the inbox when the customer texts.
         const left = await returnToInboxOnText(from, now);
         if (left) await audit({ phone: from, action: "folder_moved", reason: "customer_texted", detail: { from: left, to: "active" }, actor: "customer" });
+        // 📅 Booked stays in Booked: with the AI on it answers and the owner is tagged (Steven, 2026-11-15).
+        if (!left && messageId) await tagOwnerIfBooked(from, messageId, body, media.length);
         // Step 5: a lead who replies is done with the sheet drip; the AI takes over.
         if (saved) await stopDrip(from, "they replied (AI took over)", "customer", now);
         // AI reply, after Twilio has its empty TwiML. All send rules still apply inside.

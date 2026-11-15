@@ -8,8 +8,9 @@
  * A number is excluded from automated texts when any ServiceTitan customer
  * with that phone (internal records like the showroom are ignored) has:
  *   - a tag on Melanie's list (customer, location or job tag), or
- *   - an open job: Scheduled, Dispatched, In progress/Working or Hold, or
- *   - a job canceled in the last CANCELED_DAYS days.
+ *   - an open job: Scheduled, Dispatched, In progress/Working or Hold.
+ * A canceled job never blocks (Melanie via Steven, 2026-11-15: someone who canceled and
+ * fills out a new form gets the welcome text; the 90-day canceled rule was removed).
  *
  * Some tags also mean "a person answers, not the AI" (CSR_ONLY_TAGS, Steven
  * 2026-11-02). The inbound side uses that in a later PR; it's saved now.
@@ -37,7 +38,6 @@ export const BLOCK_TAGS = [
 export const CSR_ONLY_TAGS = ["Do Not Service", "1 Star Review", "Fixed Bad Review", "Warranty", "Warranty Call", "CB: Warranty Request"];
 
 const OPEN_JOB_STATUSES = ["scheduled", "dispatched", "inprogress", "working", "hold", "onhold"];
-export const CANCELED_DAYS = 90;
 /** How long a check result is reused before asking ServiceTitan again. */
 export const ST_CHECK_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -96,27 +96,15 @@ export async function checkServiceTitan(phone: string, now: Date): Promise<StChe
     }
 
     const recentJobIds: number[] = [];
-    const canceledDays: string[] = [];
-    const cutoffCanceled = now.getTime() - CANCELED_DAYS * 24 * 60 * 60 * 1000;
     const cutoffTags = now.getTime() - 2 * 365 * 24 * 60 * 60 * 1000;
     for (const id of ids) {
       const jobs = ((await reader("get_customer_jobs", { customerId: id, pageSize: 50 })) as { jobs?: Job[] })?.jobs || [];
       for (const job of jobs) {
         const status = norm(job.status || "").replace(/\s/g, "");
         if (OPEN_JOB_STATUSES.includes(status)) reasons.push(`Open job (${job.status}) created ${day(job.createdOn)}`);
-        if (status === "canceled" || status === "cancelled") {
-          const when = Date.parse(job.modifiedOn || job.completedOn || job.createdOn || "") || 0;
-          if (when >= cutoffCanceled) canceledDays.push(day(job.modifiedOn || job.completedOn || job.createdOn));
-        }
         const created = Date.parse(job.createdOn || "") || 0;
         if (job.jobId && created >= cutoffTags && recentJobIds.length < 50) recentJobIds.push(job.jobId);
       }
-    }
-    if (canceledDays.length) {
-      // One line, newest first: "Job canceled 2026-11-02 (+5 more in the last 90 days)".
-      canceledDays.sort().reverse();
-      const more = canceledDays.length - 1;
-      reasons.push(`Job canceled ${canceledDays[0]}${more ? ` (+${more} more in the last ${CANCELED_DAYS} days)` : ""}`);
     }
     if (recentJobIds.length) {
       const jobTags = (await reader("get_job_tags", { jobIds: recentJobIds })) as JobTagsResult;
