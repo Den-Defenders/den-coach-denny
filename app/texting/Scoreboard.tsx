@@ -135,7 +135,7 @@ export default function Scoreboard({ onFollowUps, onBack, onOpenChat }: { onFoll
                 <th title="Replies that took more than 1 hour of team time">Over 1 hr</th>
                 <th>Texts sent</th>
                 <th title="Chats taken back by the 1-hour rule">Auto-released</th>
-                <th title="Booked in ServiceTitan clicks">Booked</th>
+                <th title="Customers they booked: Booked in ServiceTitan on a Ready-to-book card, or Move to → 📅 Booked">Booked</th>
               </tr>
             </thead>
             <tbody>

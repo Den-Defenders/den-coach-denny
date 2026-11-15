@@ -213,19 +213,30 @@ export async function buildScoreboard(since: Date, now: Date, people: string[], 
     row.typicalReplyMinutes = median(list);
   }
 
-  const audits = await sql`SELECT phone, action, actor, created_at, detail->>'from' AS released_from FROM sms_audit
-    WHERE created_at >= ${since.toISOString()}::timestamptz AND action IN ('auto_released', 'booking_marked_booked')`;
+  // Booked = "Booked in ServiceTitan" on a Ready-to-book card OR "Move to → 📅 Booked" by a person
+  // (Steven, 2026-11-15: Chris booked a "wants a call" customer and filed it, which has no card).
+  // One per customer per person, so clicking the button (which also files it) counts once.
+  const audits = await sql`SELECT phone, action, actor, reason, created_at, detail->>'from' AS released_from FROM sms_audit
+    WHERE created_at >= ${since.toISOString()}::timestamptz
+      AND (action IN ('auto_released', 'booking_marked_booked') OR (action = 'folder_moved' AND reason = 'booked'))
+    ORDER BY created_at`;
+  const bookedSeen = new Set<string>();
   for (const a of audits) {
     if (a.phone && hidden.has(String(a.phone))) continue;
     const at = new Date(a.created_at as string).getTime();
     if (a.action === "auto_released" && a.released_from) {
       bump(rows, String(a.released_from)).autoReleased++;
       add("released", String(a.released_from), () => ({ phone: String(a.phone), at: when(at), note: "Released: no reply within 1 hour of team time" }));
+      continue;
     }
-    if (a.action === "booking_marked_booked" && a.actor && a.actor !== "staff") {
-      bump(rows, String(a.actor)).booked++;
-      add("booked", String(a.actor), () => ({ phone: String(a.phone), at: when(at), note: "Booked in ServiceTitan" }));
-    }
+    const actor = a.actor ? String(a.actor) : "";
+    if (!actor || !isPersonSender(actor) || actor === "staff" || actor === "customer") continue;
+    const key = `${actor.toLowerCase()}|${a.phone}`;
+    if (bookedSeen.has(key)) continue;
+    bookedSeen.add(key);
+    bump(rows, actor).booked++;
+    const note = a.action === "booking_marked_booked" ? "Booked in ServiceTitan (Ready-to-book card)" : "Moved to 📅 Booked";
+    add("booked", actor, () => ({ phone: String(a.phone), at: when(at), note }));
   }
 
   // Busiest first: waiting now, then follow-ups due, then replies.
