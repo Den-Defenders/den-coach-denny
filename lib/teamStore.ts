@@ -65,8 +65,14 @@ function databaseUrl(): string | null {
   );
 }
 
+/** Test hook: a fixed team list instead of the database (null = the real database). */
+let teamForTests: TeamMember[] | null = null;
+export function setTeamMembersForTests(members: TeamMember[] | null) {
+  teamForTests = members;
+}
+
 export function teamDatabaseConfigured(): boolean {
-  return Boolean(databaseUrl());
+  return Boolean(teamForTests) || Boolean(databaseUrl());
 }
 
 function sqlClient(): SqlClient {
@@ -165,6 +171,7 @@ function rowToMember(row: Record<string, unknown>): TeamMember {
 }
 
 export async function findTeamMember(email: string): Promise<TeamMember | null> {
+  if (teamForTests) return teamForTests.find((m) => m.email === normalizeEmail(email)) ?? null;
   const sql = sqlClient();
   await ensureTable(sql);
   const rows = (await sql`SELECT * FROM den_team_members WHERE email = ${normalizeEmail(email)} LIMIT 1`) as Record<string, unknown>[];
@@ -172,6 +179,7 @@ export async function findTeamMember(email: string): Promise<TeamMember | null> 
 }
 
 export async function listTeamMembers(): Promise<TeamMember[]> {
+  if (teamForTests) return teamForTests;
   const sql = sqlClient();
   await ensureTable(sql);
   const rows = (await sql`SELECT * FROM den_team_members ORDER BY active DESC, role, display_name`) as Record<string, unknown>[];

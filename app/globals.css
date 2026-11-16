@@ -560,3 +560,8 @@ a { color: inherit; }
 .inbox-note-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; }
 .inbox-note-preview { display: block; font-size: 12px; color: #8a6d00; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
 .inbox-booking-note { margin: 6px 0; padding: 6px 8px; background: #fff6d6; border-radius: 8px; font-size: 14px; }
+
+/* 👁 View as (owners, look-only) */
+.inbox-viewas { display: block; font-size: 13px; margin: 2px 0 6px; color: #5b6b7a; }
+.inbox-viewas select { margin-left: 4px; }
+.inbox-viewas-banner { margin: 4px 0 8px; padding: 6px 10px; border-radius: 10px; background: #ece6ff; color: #3b2a80; font-size: 13px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
