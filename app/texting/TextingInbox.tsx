@@ -3,7 +3,8 @@
 import Scoreboard from "./Scoreboard";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type Flag = { needsCsr: boolean; pinned: boolean; reason: string | null; waiting: boolean };
+/** fyi (2026-11-16): 'Customer said “Thank you”' when their texts need no answer (gray, not red). */
+type Flag = { needsCsr: boolean; pinned: boolean; reason: string | null; waiting: boolean; fyi?: string | null };
 
 type Conversation = {
   phone: string;
@@ -569,6 +570,7 @@ export default function TextingInbox() {
                   {c.place && <span className="inbox-place">📍 {c.place}</span>}
                   <span className="inbox-badges">
                     {c.flag.needsCsr && <span className={`inbox-badge ${c.flag.pinned ? "green" : "red"}`}>{c.flag.pinned ? c.flag.reason : `Needs CSR · ${c.flag.reason}`}</span>}
+                    {c.flag.fyi && <span className="inbox-badge gray" title="No reply needed. It doesn't count as waiting and won't be released.">💬 {c.flag.fyi}</span>}
                     {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
                     {!c.assignedTo && c.releasedName && <span className="inbox-badge amber">⏰ Released from {c.releasedName} (no reply in 1 hr)</span>}
                     {c.followUp && <span className="inbox-badge amber">{c.followUp}</span>}
@@ -667,6 +669,7 @@ export default function TextingInbox() {
 
             <div className="inbox-status">
               {flag.needsCsr && <span className={`inbox-badge ${flag.pinned ? "green" : "red"}`}>{flag.pinned ? flag.reason : `Needs CSR · ${flag.reason}`}</span>}
+              {flag.fyi && <span className="inbox-badge gray">💬 {flag.fyi} · no reply needed</span>}
               {thread.optOut ? <span className="inbox-badge gray">Opted out {longWhen(thread.optOut.optedOutAt)}</span>
                 : thread.botStatus === "paused" ? <span className="inbox-badge amber">AI paused: a person answers this customer</span>
                   : <span className="inbox-badge teal">AI is answering this customer</span>}

@@ -619,6 +619,8 @@ export type InboxRow = {
   lastAt: string;
   /** The home's ZIP (2026-11-16, for "📍 City, ST" in the list): the AI-checked ZIP, else the form's. */
   zip: string | null;
+  /** The customer's texts since our last real reply and Mark handled ("" = a photo). Only when the newest text is theirs. */
+  unanswered: string[];
 };
 
 const mediaList = (value: unknown): string[] => {
@@ -655,7 +657,8 @@ export async function listInboxConversations(options: { search?: string; limit?:
       c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
       m.status AS last_status, m.created_at AS last_at,
-      v.customer_notes->>'zip' AS note_zip, v.customer_notes->>'form_zip' AS note_form_zip, v.lead_info->>'zip' AS lead_zip
+      v.customer_notes->>'zip' AS note_zip, v.customer_notes->>'form_zip' AS note_form_zip, v.lead_info->>'zip' AS lead_zip,
+      un.texts AS unanswered
     FROM sms_conversations v
     JOIN sms_contacts c ON c.phone = v.phone
     LEFT JOIN sms_opt_outs o ON o.phone = v.phone
@@ -664,6 +667,17 @@ export async function listInboxConversations(options: { search?: string; limit?:
       WHERE conversation_id = v.id AND status <> 'send_failed' AND coalesce(sent_by, '') NOT IN (${HOLD_SENDER}, ${CHECKING_SENDER})
       ORDER BY created_at DESC, id DESC LIMIT 1
     ) m ON true
+    LEFT JOIN LATERAL (
+      -- "Thank you" / "ok" texts don't make a chat red (2026-11-16): the texts since our last real reply.
+      SELECT array_agg(CASE WHEN jsonb_typeof(u.media) = 'array' AND jsonb_array_length(u.media) > 0 THEN '' ELSE coalesce(u.body, '') END
+          ORDER BY u.created_at, u.id) AS texts
+      FROM sms_messages u
+      WHERE m.direction = 'inbound' AND u.conversation_id = v.id AND u.direction = 'inbound'
+        AND u.created_at > coalesce(v.handoff_resolved_at, 'epoch'::timestamptz)
+        AND u.created_at > coalesce((SELECT max(w.created_at) FROM sms_messages w
+          WHERE w.conversation_id = v.id AND w.direction = 'outbound' AND w.status <> 'send_failed'
+            AND coalesce(w.sent_by, '') NOT IN (${HOLD_SENDER}, ${CHECKING_SENDER})), 'epoch'::timestamptz)
+    ) un ON true
     WHERE (m.created_at IS NOT NULL OR v.lead_at IS NOT NULL)
       AND coalesce(v.folder, 'active') = ANY(string_to_array(${folders}::text, ','))
       AND (${phones}::text IS NULL OR v.phone = ANY(string_to_array(${phones}::text, ',')))
@@ -706,6 +720,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
     lastStatus: String(r.last_status || ""),
     lastAt: toIso(r.last_at) || toIso(r.lead_at) || "",
     zip: [r.note_zip, r.note_form_zip, r.lead_zip].map((v) => /\b(\d{5})\b/.exec(String(v ?? ""))?.[1]).find(Boolean) ?? null,
+    unanswered: Array.isArray(r.unanswered) ? (r.unanswered as unknown[]).map((t) => String(t ?? "")) : [],
   }));
 }
 
@@ -999,6 +1014,24 @@ export async function inboundMediaUrl(messageId: number, index: number): Promise
 }
 
 /** Direction of the text just before this one (to alert only on the first unanswered text). Hold texts don't count. */
+/**
+ * The customer's texts before this one in the same unanswered stretch (since our last real
+ * reply and since Mark handled), oldest first. "" = a photo. Used so a "Thank you" note in
+ * Slack is followed by a real "customer is waiting" alert if they then ask something (2026-11-16).
+ */
+export async function unansweredTextsBefore(phone: string, messageId: number): Promise<string[]> {
+  const sql = await db();
+  const rows = await sql`SELECT u.body, u.media FROM sms_messages u
+    JOIN sms_conversations v ON v.id = u.conversation_id
+    WHERE u.phone = ${phone} AND u.direction = 'inbound' AND u.id < ${messageId}
+      AND u.created_at > coalesce(v.handoff_resolved_at, 'epoch'::timestamptz)
+      AND u.created_at > coalesce((SELECT max(w.created_at) FROM sms_messages w
+        WHERE w.phone = ${phone} AND w.id < ${messageId} AND w.direction = 'outbound' AND w.status <> 'send_failed'
+          AND coalesce(w.sent_by, '') NOT IN (${HOLD_SENDER}, ${CHECKING_SENDER})), 'epoch'::timestamptz)
+    ORDER BY u.id`;
+  return rows.map((r) => (mediaList(r.media).length ? "" : String(r.body || "")));
+}
+
 export async function previousMessageDirection(phone: string, messageId: number): Promise<"inbound" | "outbound" | null> {
   const sql = await db();
   const rows = await sql`SELECT direction FROM sms_messages WHERE phone = ${phone} AND id < ${messageId}

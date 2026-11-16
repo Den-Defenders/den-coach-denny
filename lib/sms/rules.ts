@@ -260,3 +260,21 @@ export function holidayName(local: Pick<LocalTime, "year" | "month" | "day">): s
   if (is(11, nthWeekday(year, 11, 4, 4))) return "Thanksgiving";
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Texts that don't ask for an answer (Steven, 2026-11-15 / 11-16)
+// ---------------------------------------------------------------------------
+
+/**
+ * "ok", "Thank you", "Thanks so much!", "sounds good", 👍 ... They never start the 1-hour
+ * release clock, never turn a chat red "Needs CSR", and get a "Customer said ..." Slack note
+ * instead of "customer is waiting".
+ */
+const NO_ANSWER_NEEDED = /^(ok(ay)?|k|kk|(ok(ay)?[\s,]+)?(thanks?|thank (you|u)|thx|ty)([\s,]+(so much|very much|a lot|again))?|cool|great|perfect|(ok(ay)?[\s,]+)?sounds (good|great)|got it|will do|awesome|nice|yes thanks|you too|have a (good|great|nice) (day|one|night|weekend)|👍|🙏|❤️|😊|🙂)[\s.!\u{1F3FB}-\u{1F3FF}]*$/iu;
+
+export function needsAnswer(body: string): boolean {
+  const text = (body || "").trim();
+  if (!text) return true; // a photo with no words still needs a look
+  if (classifyKeyword(text, { optedOut: false }).keyword !== null) return false;
+  return !NO_ANSWER_NEEDED.test(text);
+}

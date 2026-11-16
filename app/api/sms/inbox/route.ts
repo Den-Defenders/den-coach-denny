@@ -33,7 +33,7 @@ import { bookingFrom, bookingLines, shortTimeWords } from "@/lib/sms/booking";
 import { dripLabel, stopDrip } from "@/lib/sms/drip";
 import { followUpLabel, followUpPlanFor, stopFollowUps } from "@/lib/sms/followup";
 import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
-import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
+import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox, unansweredTexts } from "@/lib/sms/inbox";
 import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
 import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
 import { placeForZip } from "@/lib/sms/place";
@@ -197,6 +197,7 @@ export async function GET(request: Request) {
         lastAt: last?.createdAt || "",
         bookingRequest: booking,
         bookingDoneAt: thread.bookingDoneAt,
+        unanswered: last?.direction === "inbound" ? unansweredTexts(thread.messages, thread.handoffResolvedAt) : [],
       }, now);
       const team = await inboxTeam();
       const followUp = thread.lead.at ? await followUpPlanFor(phone) : null;
