@@ -264,8 +264,9 @@ export async function GET(request: Request) {
     const view = listView(url.searchParams.get("folder"));
     const search = url.searchParams.get("q")?.trim() || undefined;
     const seesEveryone = canAssignOthers(access);
-    // CSRs see their own follow-ups; owners and managers see everyone's (or one person's).
-    const followUpOwner = seesEveryone ? (normalizeEmail(url.searchParams.get("owner") || "") || null) : access.email || "-";
+    // Everyone sees everyone's follow-ups (Steven, 2026-11-16), with a person filter; it's the one
+    // place a CSR can take over another CSR's customer.
+    const followUpOwner = normalizeEmail(url.searchParams.get("owner") || "") || null;
     const followUps = await followUpList(followUpOwner, now);
     const followUpByPhone = new Map<string, FollowUpItem>(followUps.map((f) => [f.phone, f]));
     let rows;
@@ -313,6 +314,8 @@ export async function GET(request: Request) {
       counts: { ...counts, followups: followUps.filter((f) => f.reason !== "scheduled").length },
       seesEveryone,
       team: seesEveryone ? team.map((m) => ({ email: m.email, name: m.displayName })) : [],
+      // The Follow-ups person filter (everyone).
+      followUpPeople: team.map((m) => ({ email: m.email.toLowerCase(), name: m.displayName || m.email.split("@")[0] })),
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
       me: access.email,
       viewingAs,
@@ -384,8 +387,15 @@ export async function POST(request: Request) {
       }
       case "claim": {
         if (!access.email) return json({ ok: false, message: "Your login has no email, so it can't own customers." }, 400);
+        // A CSR can take another CSR's customer only from the Follow-ups tab, and only while it's on
+        // the follow-up list (due or Later). Anywhere else it's the owner's (Steven, 2026-11-16).
+        let fromFollowUps = false;
         if (thread.assignedTo && thread.assignedTo !== access.email && !canAssignOthers(access)) {
-          return json({ ok: false, message: `${nameFor(thread.assignedTo, await inboxTeam())} already has this customer. Ask a manager to reassign it.` }, 409);
+          const onList = body.from === "followups" && (await followUpList(null, now)).some((f) => f.phone === phone);
+          if (!onList) {
+            return json({ ok: false, message: `${nameFor(thread.assignedTo, await inboxTeam())} already has this customer. You can take it from the Follow-ups tab when it's on the follow-up list, or ask a manager to reassign it.` }, 409);
+          }
+          fromFollowUps = true;
         }
         if (thread.assignedTo !== access.email) {
           const blocked = await capBlock(access, phone);
@@ -395,8 +405,8 @@ export async function POST(request: Request) {
           }
         }
         await assignConversation(phone, access.email, now);
-        await audit({ phone, action: "assigned", reason: "claimed", detail: { from: thread.assignedTo }, actor: who });
-        return json({ ok: true, message: "This customer is yours now." });
+        await audit({ phone, action: "assigned", reason: fromFollowUps ? "taken_from_followups" : "claimed", detail: { from: thread.assignedTo }, actor: who });
+        return json({ ok: true, message: fromFollowUps ? `This customer is yours now (taken from ${nameFor(thread.assignedTo, await inboxTeam())}'s follow-ups).` : "This customer is yours now." });
       }
       case "release": {
         if (!thread.assignedTo) return json({ ok: true, message: "Nobody owns this customer." });

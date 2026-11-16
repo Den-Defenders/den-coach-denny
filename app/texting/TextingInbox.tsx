@@ -240,9 +240,10 @@ export default function TextingInbox() {
   const [view, setView] = useState<View>("active");
   const [followOwner, setFollowOwner] = useState("");
   const [counts, setCounts] = useState<Partial<Record<View, number>>>({});
-  const [listTeam, setListTeam] = useState<{ email: string; name: string }[]>([]);
   /** Owners and managers see everyone's follow-ups. */
   const [seesEveryone, setSeesEveryone] = useState(false);
+  /** Follow-ups person filter (everyone can use it). */
+  const [followUpPeople, setFollowUpPeople] = useState<{ email: string; name: string }[]>([]);
   /** "Revisit later…" picked in Move to: show the date choices. */
   const [revisitOpen, setRevisitOpen] = useState(false);
   const [revisitDay, setRevisitDay] = useState("");
@@ -295,8 +296,8 @@ export default function TextingInbox() {
     if (response?.ok) {
       setConversations(json.conversations || []);
       setCounts(json.counts || {});
-      setListTeam(json.team || []);
       setSeesEveryone(Boolean(json.seesEveryone));
+      setFollowUpPeople(json.followUpPeople || []);
       setMe(json.me || null);
       setMyWaiting(json.myWaiting || null);
       setViewingAs(json.viewingAs || null);
@@ -475,7 +476,7 @@ export default function TextingInbox() {
   const visible = view === "active" ? conversations.filter((c) => matchesFilter(c, filter, me)) : conversations;
   const viewTabs: [View, string][] = [
     ["active", "💬 Inbox"],
-    ["followups", `📋 ${seesEveryone ? "Follow-ups" : "My follow-ups"}${counts.followups ? ` (${counts.followups})` : ""}`],
+    ["followups", `📋 Follow-ups${counts.followups ? ` (${counts.followups})` : ""}`],
     ["booked", "📅 Booked"],
     ["not_interested", "🚫 Not interested"],
     ["spam", `🗑️ Spam${counts.spam ? ` (${counts.spam})` : ""}`],
@@ -531,13 +532,13 @@ export default function TextingInbox() {
               <button key={key} role="tab" aria-selected={view === key} className={`inbox-filter${view === key ? " active" : ""}`} onClick={() => setView(key)}>{label}</button>
             ))}
           </div>
-          {view === "followups" && seesEveryone && listTeam.length > 0 && (
+          {view === "followups" && followUpPeople.length > 0 && (
             <select className="inbox-owner-filter" aria-label="Whose follow-ups" value={followOwner} onChange={(e) => setFollowOwner(e.target.value)}>
               <option value="">Everyone&apos;s follow-ups</option>
-              {listTeam.map((m) => <option key={m.email} value={m.email}>{m.name}</option>)}
+              {followUpPeople.map((m) => <option key={m.email} value={m.email}>{m.email === me ? `${m.name} (me)` : m.name}</option>)}
             </select>
           )}
-          {view === "followups" && <div className="team-hint inbox-folder-hint">{seesEveryone ? "Customers each person owns" : "Customers you own"} who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later.</div>}
+          {view === "followups" && <div className="team-hint inbox-folder-hint">Everyone&apos;s customers who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later. This is the one place you can take over someone else&apos;s customer.</div>}
           {view === "active" && <div className="inbox-filters" role="tablist" aria-label="Filter">
             {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["mine", `Mine${myNeeds ? ` (${myNeeds})` : ""}`], ["unassigned", "Unassigned"], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>
@@ -640,7 +641,11 @@ export default function TextingInbox() {
             <div className="inbox-owner">
               <span>👤 Owner: <b>{!thread.assignedTo ? "Nobody yet (shared queue)" : thread.assignedTo === data.me ? "You" : thread.assignedName}</b></span>
               {thread.assignedTo !== data.me && (!thread.assignedTo || data.canAssign) && (
-                <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("claim")}>Take it</button>
+                <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("claim", view === "followups" ? { from: "followups" } : {})}>Take it</button>
+              )}
+              {/* A CSR can take someone else's customer only from the Follow-ups tab (Steven, 2026-11-16). */}
+              {thread.assignedTo && thread.assignedTo !== data.me && !data.canAssign && view === "followups" && (
+                <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("claim", { from: "followups" })}>Take it over</button>
               )}
               {thread.assignedTo && (thread.assignedTo === data.me || data.canAssign) && (
                 <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("release")}>Release</button>
