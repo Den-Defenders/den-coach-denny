@@ -544,3 +544,19 @@ a { color: inherit; }
 .scoreboard-detail li { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 0; border-top: 1px solid #eef1f4; font-size: 14px; }
 .scoreboard-detail-when { color: #5b6b7a; }
 .scoreboard-detail-note { color: #33414e; }
+
+/* Team notes (2026-11-16): internal notes + call outcomes in a chat */
+.inbox-note { align-items: center; }
+.inbox-note .inbox-bubble { background: #fff6d6; border: 1px solid #f0d77a; color: #3d3200; max-width: 85%; }
+.inbox-note .sim-who { color: #8a6d00; }
+.inbox-note-actions { display: flex; gap: 10px; font-size: 12px; margin-top: 2px; }
+.inbox-note-edit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 85%; }
+.inbox-note-edit textarea { width: 100%; }
+.inbox-notes-box { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #e3d28f; }
+.inbox-note-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.inbox-note-buttons .btn.active { background: #fff6d6; border-color: #e0bf3c; }
+.inbox-note-form { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.inbox-note-form textarea { width: 100%; background: #fffcf0; }
+.inbox-note-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; }
+.inbox-note-preview { display: block; font-size: 12px; color: #8a6d00; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.inbox-booking-note { margin: 6px 0; padding: 6px 8px; background: #fff6d6; border-radius: 8px; font-size: 14px; }

@@ -27,7 +27,8 @@
  */
 import { followUpList } from "@/lib/sms/folders";
 import { isPersonSender, needsAnswer, ownedWaitingChats, teamMinutesBetween } from "@/lib/sms/ownership";
-import { CHECKING_SENDER, HOLD_SENDER, smsDb } from "@/lib/sms/store";
+import { CHECKING_SENDER, HOLD_SENDER, callNotesSince, smsDb } from "@/lib/sms/store";
+import { noteText } from "@/lib/sms/notes";
 
 export type ScoreRow = {
   email: string;
@@ -41,12 +42,14 @@ export type ScoreRow = {
   /** Replies that took more than an hour of team time. */
   slowReplies: number;
   textsSent: number;
+  /** Team notes (2026-11-16): calls logged with the 📞 buttons (talked / voicemail / no answer). */
+  callsLogged: number;
   autoReleased: number;
   booked: number;
 };
 
 /** The numbers you can tap for a list (Steven, 2026-11-15). Typical/Avg reply open the Replies list. */
-export const SCORE_METRICS = ["owns", "waiting", "followups", "replies", "slow", "texts", "released", "booked"] as const;
+export const SCORE_METRICS = ["owns", "waiting", "followups", "replies", "slow", "texts", "calls", "released", "booked"] as const;
 export type ScoreMetric = (typeof SCORE_METRICS)[number];
 
 /** One line of a tapped number's list: which customer, when, and a short note. */
@@ -119,7 +122,7 @@ function bump(map: Map<string, ScoreRow>, email: string): ScoreRow {
   const key = email.toLowerCase();
   let row = map.get(key);
   if (!row) {
-    row = { email: key, ownsNow: 0, waitingNow: 0, followUpsDue: 0, replies: 0, avgReplyMinutes: null, typicalReplyMinutes: null, slowReplies: 0, textsSent: 0, autoReleased: 0, booked: 0 };
+    row = { email: key, ownsNow: 0, waitingNow: 0, followUpsDue: 0, replies: 0, avgReplyMinutes: null, typicalReplyMinutes: null, slowReplies: 0, textsSent: 0, callsLogged: 0, autoReleased: 0, booked: 0 };
     map.set(key, row);
   }
   return row;
@@ -211,6 +214,12 @@ export async function buildScoreboard(since: Date, now: Date, people: string[], 
     const list = waits.get(row.email) || [];
     row.avgReplyMinutes = list.length ? Math.round(list.reduce((a, b) => a + b, 0) / list.length) : null;
     row.typicalReplyMinutes = median(list);
+  }
+
+  for (const n of await callNotesSince(since)) {
+    if (hidden.has(n.phone)) continue;
+    bump(rows, n.createdBy).callsLogged++;
+    add("calls", n.createdBy, () => ({ phone: n.phone, at: n.createdAt, note: noteText(n) }));
   }
 
   // Booked = "Booked in ServiceTitan" on a Ready-to-book card OR "Move to → 📅 Booked" by a person

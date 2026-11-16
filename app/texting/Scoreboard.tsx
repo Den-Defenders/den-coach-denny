@@ -18,12 +18,13 @@ type Row = {
   typicalReplyMinutes: number | null;
   slowReplies: number;
   textsSent: number;
+  callsLogged: number;
   autoReleased: number;
   booked: number;
 };
 
 type Period = "today" | "7" | "30";
-type Metric = "owns" | "waiting" | "followups" | "replies" | "slow" | "texts" | "released" | "booked";
+type Metric = "owns" | "waiting" | "followups" | "replies" | "slow" | "texts" | "calls" | "released" | "booked";
 type Detail = { phone: string; phoneLabel: string; name: string | null; at: string; note: string };
 
 const METRIC_LABELS: Record<Metric, string> = {
@@ -33,6 +34,7 @@ const METRIC_LABELS: Record<Metric, string> = {
   replies: "Replies",
   slow: "Replies over 1 hour",
   texts: "Texts sent",
+  calls: "Calls logged",
   released: "Auto-released",
   booked: "Booked",
 };
@@ -134,6 +136,7 @@ export default function Scoreboard({ onFollowUps, onBack, onOpenChat }: { onFoll
                 <th title="Average wait before they answered, team hours only. One very slow reply pulls this up.">Avg reply</th>
                 <th title="Replies that took more than 1 hour of team time">Over 1 hr</th>
                 <th>Texts sent</th>
+                <th title="Calls logged with the 📞 buttons in a chat (talked, left voicemail, no answer)">Calls logged</th>
                 <th title="Chats taken back by the 1-hour rule">Auto-released</th>
                 <th title="Customers they booked: Booked in ServiceTitan on a Ready-to-book card, or Move to → 📅 Booked">Booked</th>
               </tr>
@@ -153,6 +156,7 @@ export default function Scoreboard({ onFollowUps, onBack, onOpenChat }: { onFoll
                   {cell(r, "replies", r.replies, minutesText(r.avgReplyMinutes), r.avgReplyMinutes !== null && r.avgReplyMinutes > 60)}
                   {cell(r, "slow", r.slowReplies, undefined, r.slowReplies > 0)}
                   {cell(r, "texts", r.textsSent)}
+                  {cell(r, "calls", r.callsLogged ?? 0)}
                   {cell(r, "released", r.autoReleased, undefined, r.autoReleased > 0)}
                   {cell(r, "booked", r.booked)}
                 </tr>

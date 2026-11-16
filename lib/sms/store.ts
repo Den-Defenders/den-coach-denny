@@ -184,6 +184,20 @@ async function createTables(sql: Sql) {
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`;
   await sql`CREATE INDEX IF NOT EXISTS sms_audit_created ON sms_audit (created_at DESC)`;
+  // Team notes (Steven, 2026-11-16): internal notes and call outcomes on a chat. Never texted.
+  await sql`CREATE TABLE IF NOT EXISTS sms_notes (
+    id BIGSERIAL PRIMARY KEY,
+    conversation_id BIGINT,
+    phone TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'note',
+    body TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ,
+    updated_by TEXT,
+    deleted_at TIMESTAMPTZ
+  )`;
+  await sql`CREATE INDEX IF NOT EXISTS sms_notes_phone ON sms_notes (phone, created_at)`;
 }
 
 const iso = (d: Date) => d.toISOString();
@@ -653,7 +667,8 @@ export async function listInboxConversations(options: { search?: string; limit?:
       AND (${text}::text IS NULL
         OR v.phone LIKE ${digits}::text
         OR (coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) ILIKE ${text}::text
-        OR EXISTS (SELECT 1 FROM sms_messages s WHERE s.conversation_id = v.id AND s.body ILIKE ${text}::text))
+        OR EXISTS (SELECT 1 FROM sms_messages s WHERE s.conversation_id = v.id AND s.body ILIKE ${text}::text)
+        OR EXISTS (SELECT 1 FROM sms_notes n WHERE n.phone = v.phone AND n.deleted_at IS NULL AND n.body ILIKE ${text}::text))
     ORDER BY (v.bot_status = 'paused' AND v.handoff_reason = 'ready_to_book' AND v.handoff_resolved_at IS NULL
         AND v.booking_request IS NOT NULL AND v.booking_done_at IS NULL) DESC,
       (v.handoff_reason IS NOT NULL AND v.handoff_resolved_at IS NULL) DESC,
@@ -1169,4 +1184,81 @@ export async function contactNames(phones: string[]): Promise<Map<string, string
     if (name) out.set(String(r.phone), name);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Team notes (Steven, 2026-11-16): lib/sms/notes.ts
+// ---------------------------------------------------------------------------
+
+export const NOTE_KINDS = ["note", "call_talked", "call_voicemail", "call_no_answer"] as const;
+export type NoteKind = (typeof NOTE_KINDS)[number];
+export type TeamNote = { id: number; phone: string; kind: NoteKind; body: string; createdBy: string; createdAt: string; updatedAt: string | null; updatedBy: string | null };
+
+function noteFrom(r: Record<string, unknown>): TeamNote {
+  const kind = (NOTE_KINDS as readonly string[]).includes(String(r.kind)) ? (r.kind as NoteKind) : "note";
+  return {
+    id: Number(r.id),
+    phone: String(r.phone),
+    kind,
+    body: String(r.body || ""),
+    createdBy: String(r.created_by || ""),
+    createdAt: toIso(r.created_at) || "",
+    updatedAt: toIso(r.updated_at),
+    updatedBy: (r.updated_by as string) ?? null,
+  };
+}
+
+export async function addTeamNote(phone: string, kind: NoteKind, body: string, by: string, at: Date): Promise<TeamNote> {
+  const contact = await ensureContact(phone);
+  const sql = await db();
+  const rows = await sql`INSERT INTO sms_notes (conversation_id, phone, kind, body, created_by, created_at)
+    VALUES (${contact.conversationId}, ${phone}, ${kind}, ${body.slice(0, 2000)}, ${by.slice(0, 120)}, ${iso(at)}::timestamptz)
+    RETURNING *`;
+  return noteFrom(rows[0]);
+}
+
+export async function getTeamNote(id: number): Promise<TeamNote | null> {
+  const sql = await db();
+  const rows = await sql`SELECT * FROM sms_notes WHERE id = ${id} AND deleted_at IS NULL`;
+  return rows.length ? noteFrom(rows[0]) : null;
+}
+
+export async function editTeamNote(id: number, body: string, by: string, at: Date): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_notes SET body = ${body.slice(0, 2000)}, updated_at = ${iso(at)}::timestamptz, updated_by = ${by.slice(0, 120)}
+    WHERE id = ${id} AND deleted_at IS NULL RETURNING id`;
+  return rows.length > 0;
+}
+
+export async function deleteTeamNote(id: number, by: string, at: Date): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_notes SET deleted_at = ${iso(at)}::timestamptz, updated_by = ${by.slice(0, 120)}
+    WHERE id = ${id} AND deleted_at IS NULL RETURNING id`;
+  return rows.length > 0;
+}
+
+/** A chat's notes, oldest first. */
+export async function teamNotesFor(phone: string, limit = 200): Promise<TeamNote[]> {
+  const sql = await db();
+  const rows = await sql`SELECT * FROM sms_notes WHERE phone = ${phone} AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ${limit}`;
+  return rows.reverse().map(noteFrom);
+}
+
+/** The newest note for each phone (inbox list, Slack alerts). */
+export async function latestTeamNotes(phones: string[]): Promise<Map<string, TeamNote>> {
+  const out = new Map<string, TeamNote>();
+  if (!phones.length) return out;
+  const sql = await db();
+  const rows = await sql`SELECT DISTINCT ON (phone) * FROM sms_notes
+    WHERE phone = ANY(string_to_array(${phones.join(",")}::text, ',')) AND deleted_at IS NULL
+    ORDER BY phone, created_at DESC, id DESC`;
+  for (const r of rows) out.set(String(r.phone), noteFrom(r));
+  return out;
+}
+
+/** Call outcomes logged in a period (scoreboard). */
+export async function callNotesSince(since: Date): Promise<TeamNote[]> {
+  const sql = await db();
+  const rows = await sql`SELECT * FROM sms_notes WHERE deleted_at IS NULL AND kind LIKE 'call_%' AND created_at >= ${iso(since)}::timestamptz ORDER BY created_at`;
+  return rows.map(noteFrom);
 }

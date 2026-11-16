@@ -22,6 +22,8 @@
  *                                          flag; an unowned customer becomes the booker's
  *   POST {action:"stop_drip", phone}    -> step 5 "Stop auto texts": no more drip texts or AI follow-ups, for good
  *   POST {action:"move", phone, folder, revisit?} -> Session 7 PR 3: file the chat (revisit = 2w | 1m | 3m | YYYY-MM-DD)
+ *   POST {action:"add_note", phone, kind, body, followUp?} -> team note (never texted); followUp files it in Follow-ups → Later
+ *   POST {action:"edit_note" | "delete_note", phone, noteId, body?} -> the author, or an owner/manager
  */
 import { NextResponse } from "next/server";
 import { canAccessTextingInbox, canUseTextingInbox, type DennyAccess } from "@/lib/access";
@@ -32,6 +34,7 @@ import { followUpLabel, followUpPlanFor, stopFollowUps } from "@/lib/sms/followu
 import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
 import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
+import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
 import {
   TEAM_CLOCK_TEXT,
   capMessage,
@@ -56,6 +59,14 @@ import {
   folderFrom,
   inboxRowsFor,
   listInboxConversations,
+  NOTE_KINDS,
+  addTeamNote,
+  deleteTeamNote,
+  editTeamNote,
+  getTeamNote,
+  latestTeamNotes,
+  teamNotesFor,
+  type NoteKind,
   type ChatFolder,
   markBookingDone,
   markHandoffHandled,
@@ -193,6 +204,17 @@ export async function GET(request: Request) {
           phoneLabel: formatPhone(phone),
           folderLabel: FOLDER_LABELS[thread.folder],
           folderByName: thread.folderBy === "customer" ? "the customer's text" : nameFor(thread.folderBy, team),
+          // Team notes (Steven, 2026-11-16): internal, shown between the texts.
+          notes: (await teamNotesFor(phone)).map((n) => ({
+            id: n.id,
+            kind: n.kind,
+            label: NOTE_LABELS[n.kind],
+            body: n.body,
+            byName: nameFor(n.createdBy, team) || n.createdBy,
+            at: n.createdAt,
+            edited: Boolean(n.updatedAt),
+            canEdit: n.createdBy === access.email || canAssignOthers(access),
+          })),
           lead: thread.lead.at || thread.lead.drip.status
             ? {
                 at: thread.lead.at,
@@ -238,6 +260,7 @@ export async function GET(request: Request) {
       rows = await listInboxConversations({ search, folders });
     }
     const team = await inboxTeam();
+    const latestNotes = await latestTeamNotes(rows.map((r) => r.phone));
     const mapped = rows.map((row) => {
       const booking = bookingFrom(row.bookingRequest);
       return {
@@ -251,6 +274,7 @@ export async function GET(request: Request) {
         folderLabel: row.folder === "active" ? null : FOLDER_LABELS[row.folder],
         followUp: followUpByPhone.get(row.phone)?.label ?? null,
         followUpReason: followUpByPhone.get(row.phone)?.reason ?? null,
+        latestNote: latestNotes.get(row.phone) ? `${nameFor(latestNotes.get(row.phone)!.createdBy, team) || "Team"}: ${noteText(latestNotes.get(row.phone)!)}`.slice(0, 140) : null,
         flag: inboxFlag({ ...row, bookingRequest: booking }, now),
       };
     });
@@ -376,6 +400,47 @@ export async function POST(request: Request) {
         if (thread.folder === "active") await moveChat(phone, "booked", who, now, { from: thread.folder });
         await audit({ phone, action: "booking_marked_booked", reason: "inbox", detail: { owner: thread.assignedTo || access.email }, actor: who });
         return json({ ok: true, message: `Marked booked in ServiceTitan.${!thread.assignedTo && access.email ? " This customer is yours now." : ""} The AI stays paused; text the customer if you want to confirm.` });
+      }
+      case "add_note": {
+        // Team notes (Steven, 2026-11-16). Never texted to the customer.
+        const kind = (NOTE_KINDS as readonly string[]).includes(String(body.kind)) ? (String(body.kind) as NoteKind) : "note";
+        const text = String(body.body || "").trim().slice(0, 2000);
+        if (kind === "note" && !text) return json({ ok: false, message: "Write a note first." }, 400);
+        let followAt: Date | null = null;
+        if (body.followUp) {
+          followAt = revisitDate(String(body.followUp), now);
+          if (!followAt) return json({ ok: false, message: "Pick a follow-up date from today on." }, 400);
+        }
+        // A follow-up date on an unowned chat makes it yours (same as "Follow up later").
+        let claimed = false;
+        if (followAt && !thread.assignedTo && access.email) {
+          const blocked = await capBlock(access, phone);
+          if (blocked) return json({ ok: false, message: blocked }, 409);
+          await assignConversation(phone, access.email, now);
+          await audit({ phone, action: "assigned", reason: "follow_up_later", detail: { from: null }, actor: who });
+          claimed = true;
+        }
+        const note = await addTeamNote(phone, kind, text, who, now);
+        await audit({ phone, action: "note_added", reason: kind, detail: { noteId: note.id, followUp: followAt ? followAt.toISOString() : null }, actor: who });
+        if (followAt) await moveChat(phone, "revisit", who, now, { revisitAt: followAt, from: thread.folder });
+        const day = followAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(followAt) : "";
+        return json({ ok: true, message: `${NOTE_LABELS[kind]} saved (only your team sees it).${followAt ? ` Follow up ${day}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups.` : ""}${claimed ? " This customer is yours now." : ""}` });
+      }
+      case "edit_note":
+      case "delete_note": {
+        const note = await getTeamNote(Number(body.noteId) || 0);
+        if (!note || note.phone !== phone) return json({ ok: false, message: "That note is gone." }, 404);
+        if (note.createdBy !== access.email && !canAssignOthers(access)) return json({ ok: false, message: "Only the person who wrote it, or a manager, can change this note." }, 403);
+        if (body.action === "delete_note") {
+          await deleteTeamNote(note.id, who, now);
+          await audit({ phone, action: "note_deleted", reason: note.kind, detail: { noteId: note.id }, actor: who });
+          return json({ ok: true, message: "Note deleted." });
+        }
+        const text = String(body.body || "").trim().slice(0, 2000);
+        if (note.kind === "note" && !text) return json({ ok: false, message: "A note can't be empty. Delete it instead." }, 400);
+        await editTeamNote(note.id, text, who, now);
+        await audit({ phone, action: "note_edited", reason: note.kind, detail: { noteId: note.id }, actor: who });
+        return json({ ok: true, message: "Note updated." });
       }
       case "move": {
         const folder = String(body.folder || "");

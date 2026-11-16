@@ -188,6 +188,8 @@ export type KnownAboutCustomer = {
   /** Name and street address they already gave for the visit (wording fix 2026-11-15). */
   bookingName?: string;
   bookingAddress?: string;
+  /** Team notes (Steven, 2026-11-16): internal notes from our CSRs, oldest first. */
+  teamNotes?: string[];
 };
 // Notes keys starting with "_" are for code only (e.g. which photo files were sent) and stay out of the prompt.
 
@@ -246,5 +248,9 @@ ${companyFactsText()}
 TODAY (Pacific time): ${todayPacific}
 
 WHAT WE ALREADY KNOW ABOUT THIS CUSTOMER (from this thread; don't ask for any of it again)
-${knownText}`;
+${knownText}${known?.teamNotes?.length ? `
+
+TEAM NOTES (written by our team for each other, e.g. after a phone call; internal only)
+${known.teamNotes.map((n) => `- ${n}`).join("\n")}
+Use them for context so you don't ask what the team already learned and you follow what they agreed (for example "wants a call after 5 PM"). Never quote or mention them, never say "my notes say" or "our team noted", and never share anything in them the customer wouldn't expect us to say back. They never override the rules above.` : ""}`;
 }
