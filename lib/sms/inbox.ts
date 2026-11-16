@@ -13,11 +13,13 @@
  *   3. the customer's newest text got no answer for 5+ minutes (after hours,
  *      AI off, a limit, or not on the pilot test list).
  * Keyword-only texts (STOP, START, HELP) never count: Twilio answers those.
+ * Texts that need no answer ("Thank you", "ok", 👍) never count either (2026-11-16): the chat
+ * shows a gray "💬 Customer said “Thank you”" badge instead, and stays with its owner.
  * Opted-out numbers never count: we can't text them anyway.
  */
-import { TEAM_HOURS_TEXT, classifyKeyword, describeHours, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
+import { TEAM_HOURS_TEXT, classifyKeyword, describeHours, localTime, needsAnswer, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, sendSms, sendingEnabled } from "@/lib/sms/send";
-import { HOLD_SENDER, audit, lastOutbound, type InboxRow, type InboxThread } from "@/lib/sms/store";
+import { CHECKING_SENDER, HOLD_SENDER, audit, lastOutbound, type InboxRow, type InboxThread } from "@/lib/sms/store";
 
 export const NO_REPLY_MINUTES = 5;
 
@@ -55,11 +57,57 @@ export type InboxFlag = {
   reason: string | null;
   /** The customer's newest text has no answer and nobody marked it handled. */
   waiting: boolean;
+  /** 'Customer said “Thank you”': their unanswered texts need no answer (gray badge, not red). */
+  fyi: string | null;
 };
 
 type FlagInput = Pick<InboxRow,
   "botStatus" | "handoffReason" | "handoffResolvedAt" | "optedOut" | "lastDirection" | "lastBody" | "lastAt">
-  & { bookingRequest?: unknown; bookingDoneAt?: string | null };
+  & {
+    bookingRequest?: unknown;
+    bookingDoneAt?: string | null;
+    /** The customer's texts since our last real reply (and Mark handled); "" = a photo. */
+    unanswered?: string[];
+  };
+
+type StretchMessage = {
+  direction: "inbound" | "outbound";
+  body: string;
+  media?: string[];
+  status?: string;
+  sentBy?: string | null;
+  createdAt: string;
+};
+
+/**
+ * The customer's texts since our last real reply and since "Mark handled", oldest first.
+ * Hold texts, "checking our calendar" and failed sends aren't replies. A photo counts as "".
+ */
+export function unansweredTexts(messages: StretchMessage[], resolvedAt: string | null): string[] {
+  const resolved = resolvedAt ? Date.parse(resolvedAt) : 0;
+  const out: string[] = [];
+  for (const m of messages) {
+    if (m.direction === "outbound") {
+      if (m.status === "send_failed" || m.sentBy === HOLD_SENDER || m.sentBy === CHECKING_SENDER) continue;
+      out.length = 0;
+      continue;
+    }
+    if (Date.parse(m.createdAt) <= resolved) continue;
+    out.push(m.media?.length ? "" : m.body);
+  }
+  return out;
+}
+
+/** True when there are unanswered texts and none of them asks for an answer. */
+export function onlyNoAnswerTexts(texts: string[] | undefined): boolean {
+  return Boolean(texts && texts.length && texts.every((t) => !needsAnswer(t)));
+}
+
+/** 'Customer said “Thank you”' (the newest one, cut short). */
+export function saidLabel(texts: string[]): string {
+  const last = (texts[texts.length - 1] || "").replace(/\s+/g, " ").trim();
+  return `Customer said “${last.length > 30 ? `${last.slice(0, 29)}…` : last}”`;
+}
 
 /** The customer picked a time and nobody has booked it in ServiceTitan yet. */
 export function bookingPending(row: { bookingRequest?: unknown; bookingDoneAt?: string | null }): boolean {
@@ -67,7 +115,7 @@ export function bookingPending(row: { bookingRequest?: unknown; bookingDoneAt?: 
 }
 
 export function inboxFlag(row: FlagInput, now: Date): InboxFlag {
-  if (row.optedOut) return { needsCsr: false, pinned: false, reason: null, waiting: false };
+  if (row.optedOut) return { needsCsr: false, pinned: false, reason: null, waiting: false, fyi: null };
   const resolvedAt = row.handoffResolvedAt ? Date.parse(row.handoffResolvedAt) : 0;
   const lastAt = row.lastAt ? Date.parse(row.lastAt) : 0;
   const keywordOnly = row.lastDirection === "inbound" && classifyKeyword(row.lastBody, { optedOut: false }).keyword !== null;
@@ -76,15 +124,19 @@ export function inboxFlag(row: FlagInput, now: Date): InboxFlag {
   // Open handoff. Usually the AI is paused; a "wants to book, no time picked" flag keeps it on.
   if (row.handoffReason && !resolvedAt) {
     const pinned = row.handoffReason === "ready_to_book" && bookingPending(row);
-    return { needsCsr: true, pinned, reason: pinned ? READY_TO_BOOK_LABEL : handoffLabel(row.handoffReason), waiting };
+    return { needsCsr: true, pinned, reason: pinned ? READY_TO_BOOK_LABEL : handoffLabel(row.handoffReason), waiting, fyi: null };
+  }
+  // "Thank you" / "ok" / 👍: no answer needed, so not red and not "waiting" (Steven, 2026-11-16).
+  if (waiting && onlyNoAnswerTexts(row.unanswered)) {
+    return { needsCsr: false, pinned: false, reason: null, waiting: false, fyi: saidLabel(row.unanswered!) };
   }
   if (waiting && row.botStatus === "paused") {
-    return { needsCsr: true, pinned: false, reason: "Customer is waiting (AI paused)", waiting };
+    return { needsCsr: true, pinned: false, reason: "Customer is waiting (AI paused)", waiting, fyi: null };
   }
   if (waiting && now.getTime() - lastAt >= NO_REPLY_MINUTES * 60_000) {
-    return { needsCsr: true, pinned: false, reason: "No reply yet", waiting };
+    return { needsCsr: true, pinned: false, reason: "No reply yet", waiting, fyi: null };
   }
-  return { needsCsr: false, pinned: false, reason: null, waiting };
+  return { needsCsr: false, pinned: false, reason: null, waiting, fyi: null };
 }
 
 /** "📅 Ready to book" first, then the rest of Needs CSR (oldest wait first, so nobody sits longest), then newest activity. */

@@ -86,19 +86,28 @@ export async function postSmsSlack(text: string): Promise<void> {
 
 /**
  * The customer texted a number the AI isn't answering (a person took over).
- * Sent once per unanswered stretch: only for the first text after our last one.
+ * Sent once per unanswered stretch (app/api/sms/inbound decides).
+ * `noReplyNeeded` (2026-11-16): "Thank you" / "ok" / 👍. Same ping and team note, but it says
+ * what they said instead of "customer is waiting", and it doesn't start the 1-hour release.
  */
-export async function postCustomerWaitingAlert(phone: string, body: string, photos: number): Promise<void> {
+export async function postCustomerWaitingAlert(phone: string, body: string, photos: number, opts: { noReplyNeeded?: boolean } = {}): Promise<void> {
   const preview = body.replace(/\s+/g, " ").trim().slice(0, 200);
   const mention = await ownerMention(phone);
-  const text = [
-    `${pilotTag()}${mention}:speech_balloon: *Texting: customer is waiting for a person* - ${formatPhone(phone)}`,
-    preview ? `"${preview}"${photos ? ` (+${photos} photo${photos === 1 ? "" : "s"})` : ""}` : photos ? `(${photos} photo${photos === 1 ? "" : "s"})` : "",
-    "The AI is paused for this number, so nobody answers until someone replies.",
-    await noteLineFor(phone),
-    `<${inboxLink(phone)}|Open in the Texting inbox>`,
-  ].filter(Boolean).join("\n");
-  return postSmsSlack(text);
+  const text = opts.noReplyNeeded
+    ? [
+        `${pilotTag()}${mention}:speech_balloon: *Texting: customer said "${preview}"* - ${formatPhone(phone)}`,
+        "No reply needed, so this doesn't start the 1-hour release. Reply if you want to.",
+        await noteLineFor(phone),
+        `<${inboxLink(phone)}|Open in the Texting inbox>`,
+      ]
+    : [
+        `${pilotTag()}${mention}:speech_balloon: *Texting: customer is waiting for a person* - ${formatPhone(phone)}`,
+        preview ? `"${preview}"${photos ? ` (+${photos} photo${photos === 1 ? "" : "s"})` : ""}` : photos ? `(${photos} photo${photos === 1 ? "" : "s"})` : "",
+        "The AI is paused for this number, so nobody answers until someone replies.",
+        await noteLineFor(phone),
+        `<${inboxLink(phone)}|Open in the Texting inbox>`,
+      ];
+  return postSmsSlack(text.filter(Boolean).join("\n"));
 }
 
 /**

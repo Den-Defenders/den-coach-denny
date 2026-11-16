@@ -30,6 +30,7 @@ import {
   findOptOut,
   markOptOutKnownToTwilio,
   previousMessageDirection,
+  unansweredTextsBefore,
   recordOptOut,
   saveInbound,
   smsDatabaseConfigured,
@@ -44,22 +45,32 @@ export const maxDuration = 150;
 
 /**
  * The customer texted a number a person has taken over (AI paused). Two things:
- *   1. one hold text so they know a person will answer (lib/sms/inbox.ts decides when)
+ *   1. one hold text so they know a person will answer (lib/sms/inbox.ts decides when).
+ *      Not for "Thank you" / "ok" / 👍 (2026-11-16): nothing to answer.
  *   2. a Slack alert, once per unanswered stretch, and not while a "Needs CSR"
- *      flag is still open (that alert already went out)
+ *      flag is still open (that alert already went out). A "Thank you" gets a
+ *      "customer said ..." note instead; a real question after it still gets the
+ *      "customer is waiting" alert.
  */
 async function handlePausedInbound(phone: string, messageId: number, body: string, photos: number) {
   try {
     const state = await conversationState(phone);
     if (state.botStatus !== "paused") return;
-    const contact = await ensureContact(phone);
-    const hold = await maybeSendHoldText(phone, contact.timeZone, smsNow());
-    console.info(`SMS paused inbound ${messageId}: hold text ${hold}`);
+    const noReplyNeeded = !photos && !needsAnswer(body);
+    if (!noReplyNeeded) {
+      const contact = await ensureContact(phone);
+      const hold = await maybeSendHoldText(phone, contact.timeZone, smsNow());
+      console.info(`SMS paused inbound ${messageId}: hold text ${hold}`);
+    }
 
     if (!slackAlertsEnabled() || !state.handoffResolved) return;
-    if (await previousMessageDirection(phone, messageId) === "inbound") return;
-    await postCustomerWaitingAlert(phone, body, photos);
-    await audit({ phone, action: "slack_alert", reason: "customer_waiting", detail: { messageId }, actor: "system" });
+    const before = await unansweredTextsBefore(phone, messageId);
+    // Already told Slack the customer is waiting in this stretch.
+    if (before.some((t) => needsAnswer(t))) return;
+    // Already sent a "customer said ..." note, and this is another one.
+    if (noReplyNeeded && before.length) return;
+    await postCustomerWaitingAlert(phone, body, photos, { noReplyNeeded });
+    await audit({ phone, action: "slack_alert", reason: noReplyNeeded ? "customer_said" : "customer_waiting", detail: { messageId }, actor: "system" });
   } catch (error) {
     console.error("SMS paused-number handling failed:", error instanceof Error ? error.message : error);
   }
@@ -145,7 +156,8 @@ export async function POST(request: Request) {
         await audit({ phone: from, action: "inbound_spam_folder", detail: { sid }, actor: "customer" });
       } else {
         // Not interested / Follow up later chats come back to the inbox when the customer texts.
-        const left = await returnToInboxOnText(from, now);
+        // Not for "Thank you" / "ok" / 👍 (2026-11-16): the chat and its follow-up date stay put.
+        const left = needsAnswer(body) || media.length ? await returnToInboxOnText(from, now) : null;
         if (left) await audit({ phone: from, action: "folder_moved", reason: "customer_texted", detail: { from: left, to: "active" }, actor: "customer" });
         // 📅 Booked stays in Booked: with the AI on it answers and the owner is tagged (Steven, 2026-11-15).
         if (!left && messageId) await tagOwnerIfBooked(from, messageId, body, media.length);

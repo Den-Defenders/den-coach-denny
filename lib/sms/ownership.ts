@@ -25,7 +25,10 @@
  * Runs in /api/sms/timer (every 5 minutes), so releases land within ~5 minutes of the hour.
  */
 import { postAutoReleaseAlert } from "@/lib/sms/alerts";
-import { classifyKeyword, holidayName, localTime } from "@/lib/sms/rules";
+import { holidayName, localTime, needsAnswer } from "@/lib/sms/rules";
+
+// Lives in rules.ts so the inbox badge and Slack alerts use the same rule (2026-11-16).
+export { needsAnswer };
 import {
   CHECKING_SENDER,
   HOLD_SENDER,
@@ -126,16 +129,6 @@ export function teamMinutesBetween(start: Date, end: Date): number {
 // ---------------------------------------------------------------------------
 // Is the customer waiting for a person, and since when?
 // ---------------------------------------------------------------------------
-
-/** Texts that don't ask for an answer. */
-const NO_ANSWER_NEEDED = /^(ok(ay)?|k|kk|thanks?( you)?|thank u|thx|ty|cool|great|perfect|sounds good|got it|will do|awesome|nice|yes thanks|ok thanks?|ok thank you|👍|🙏|❤️|😊|🙂)[\s.!]*$/i;
-
-export function needsAnswer(body: string): boolean {
-  const text = body.trim();
-  if (!text) return true; // a photo with no words still needs a look
-  if (classifyKeyword(text, { optedOut: false }).keyword !== null) return false;
-  return !NO_ANSWER_NEEDED.test(text);
-}
 
 /** A text from a person (a team member's login), not the AI, drip or an automatic text. */
 export function isPersonSender(sentBy: string | null): boolean {
