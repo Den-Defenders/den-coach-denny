@@ -8,6 +8,8 @@ type Flag = { needsCsr: boolean; pinned: boolean; reason: string | null; waiting
 type Conversation = {
   phone: string;
   phoneLabel: string;
+  /** "Roseville, CA" from the ZIP on the card (2026-11-16). */
+  place: string | null;
   firstName: string | null;
   lastName: string | null;
   botStatus: "on" | "paused";
@@ -564,6 +566,7 @@ export default function TextingInbox() {
                     <strong>{displayName(c)}</strong>
                     <span className="inbox-when">{shortWhen(c.lastAt, now)}</span>
                   </span>
+                  {c.place && <span className="inbox-place">📍 {c.place}</span>}
                   <span className="inbox-badges">
                     {c.flag.needsCsr && <span className={`inbox-badge ${c.flag.pinned ? "green" : "red"}`}>{c.flag.pinned ? c.flag.reason : `Needs CSR · ${c.flag.reason}`}</span>}
                     {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
