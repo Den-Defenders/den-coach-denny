@@ -6,6 +6,7 @@
  *        &folder=<f>          -> Session 7 PR 3: active (default) | followups | booked | not_interested | revisit | spam | test
  *                                (a search looks in every folder except Spam and Test, unless you're in one of those)
  *        &owner=<email>       -> followups only: owners/managers can pick one person (default: everyone's)
+ *   (CSRs: lists show only unowned chats and their own; a search shows everything it finds)
  *   GET  ?phone=<number>      -> one conversation (texts, AI notes, handoff, reply blockers)
  *   POST {action:"send", phone, body}   -> a person's reply through the ONE send helper
  *                                          (kind "manual": 8 AM–7 PM their time, opt-outs,
@@ -276,6 +277,10 @@ export async function GET(request: Request) {
         ? [view]
         : search ? CHAT_FOLDERS.filter((f) => !hidden.includes(f)) : [view === "followups" ? "active" : view];
       rows = await listInboxConversations({ search, folders });
+      // CSRs only see chats nobody owns plus their own (Steven, 2026-11-16): someone else's
+      // customer shows up again only after it's released or reassigned. A search still finds it
+      // (with the owner's badge) so a CSR can help a customer who calls in.
+      if (!seesEveryone && !search) rows = rows.filter((r) => !r.assignedTo || r.assignedTo === access.email);
     }
     const team = await inboxTeam();
     const latestNotes = await latestTeamNotes(rows.map((r) => r.phone));
