@@ -36,6 +36,7 @@ import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox } from "@/lib/sms/inbox";
 import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
 import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
+import { placeForZip } from "@/lib/sms/place";
 import {
   TEAM_CLOCK_TEXT,
   capMessage,
@@ -295,6 +296,8 @@ export async function GET(request: Request) {
         assignedName: nameFor(row.assignedTo, team),
         releasedName: !row.assignedTo && row.releasedFrom ? nameFor(row.releasedFrom, team) : null,
         phoneLabel: formatPhone(row.phone),
+        // "Roseville, CA" from the ZIP on the card (Steven, 2026-11-16).
+        place: placeForZip(row.zip),
         folderLabel: row.folder === "active" ? null : FOLDER_LABELS[row.folder],
         followUp: followUpByPhone.get(row.phone)?.label ?? null,
         followUpReason: followUpByPhone.get(row.phone)?.reason ?? null,

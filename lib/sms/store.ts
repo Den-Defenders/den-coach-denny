@@ -617,6 +617,8 @@ export type InboxRow = {
   lastSentBy: string | null;
   lastStatus: string;
   lastAt: string;
+  /** The home's ZIP (2026-11-16, for "📍 City, ST" in the list): the AI-checked ZIP, else the form's. */
+  zip: string | null;
 };
 
 const mediaList = (value: unknown): string[] => {
@@ -652,7 +654,8 @@ export async function listInboxConversations(options: { search?: string; limit?:
       v.folder, v.revisit_at, v.folder_by,
       c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
-      m.status AS last_status, m.created_at AS last_at
+      m.status AS last_status, m.created_at AS last_at,
+      v.customer_notes->>'zip' AS note_zip, v.customer_notes->>'form_zip' AS note_form_zip, v.lead_info->>'zip' AS lead_zip
     FROM sms_conversations v
     JOIN sms_contacts c ON c.phone = v.phone
     LEFT JOIN sms_opt_outs o ON o.phone = v.phone
@@ -702,6 +705,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
     lastSentBy: r.last_at == null ? "system" : (r.last_sent_by as string) ?? null,
     lastStatus: String(r.last_status || ""),
     lastAt: toIso(r.last_at) || toIso(r.lead_at) || "",
+    zip: [r.note_zip, r.note_form_zip, r.lead_zip].map((v) => /\b(\d{5})\b/.exec(String(v ?? ""))?.[1]).find(Boolean) ?? null,
   }));
 }
 

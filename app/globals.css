@@ -432,6 +432,7 @@ a { color: inherit; }
 .inbox-item.needs { border-left: 5px solid var(--coral); }
 .inbox-item-top { display: flex; justify-content: space-between; gap: 8px; }
 .inbox-item-top strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-place { display: block; margin-top: -2px; font-size: 12px; font-weight: 600; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-when { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 .inbox-badges, .inbox-status { display: flex; flex-wrap: wrap; gap: 5px; }
 .inbox-badge { font-size: 12px; font-weight: 800; border-radius: 7px; padding: 2px 7px; }
