@@ -9,7 +9,26 @@ import { bookingLines, type BookingRequest } from "@/lib/sms/booking";
 import { formatPhone } from "@/lib/sms/rules";
 import { allowList } from "@/lib/sms/send";
 import { conversationAssignee } from "@/lib/sms/store";
+import { latestNoteLine } from "@/lib/sms/notes";
 import { findTeamMember, teamDatabaseConfigured } from "@/lib/teamStore";
+
+/** "Liz C" for a team login (falls back to the part before @). */
+async function teamName(email: string): Promise<string> {
+  try {
+    if (teamDatabaseConfigured()) {
+      const member = await findTeamMember(email);
+      if (member?.displayName) return member.displayName;
+    }
+  } catch {
+    // name lookup is best effort
+  }
+  return email.split("@")[0];
+}
+
+/** Team notes (Steven, 2026-11-16): every alert shows the chat's latest team note, if any. */
+export function noteLineFor(phone: string): Promise<string> {
+  return latestNoteLine(phone, teamName);
+}
 
 /** Where people log in to Denny (Auth0 only works on this address, not the vercel.app one). */
 export function dennyAppUrl(): string {
@@ -76,6 +95,7 @@ export async function postCustomerWaitingAlert(phone: string, body: string, phot
     `${pilotTag()}${mention}:speech_balloon: *Texting: customer is waiting for a person* - ${formatPhone(phone)}`,
     preview ? `"${preview}"${photos ? ` (+${photos} photo${photos === 1 ? "" : "s"})` : ""}` : photos ? `(${photos} photo${photos === 1 ? "" : "s"})` : "",
     "The AI is paused for this number, so nobody answers until someone replies.",
+    await noteLineFor(phone),
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
   ].filter(Boolean).join("\n");
   return postSmsSlack(text);
@@ -98,8 +118,9 @@ export async function postReadyToBookAlert(phone: string, booking: BookingReques
     `${pilotTag()}${mention}:calendar: *Texting: Ready to book* - ${formatPhone(phone)}`,
     ...lines,
     "Book it in ServiceTitan, then click *Booked in ServiceTitan* in the inbox.",
+    await noteLineFor(phone),
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
   return postSmsSlack(text);
 }
 
@@ -115,6 +136,7 @@ export async function postBookedCustomerTextedAlert(phone: string, body: string,
     `${pilotTag()}${mention}:calendar: *Texting: a booked customer texted* - ${formatPhone(phone)}`,
     preview ? `"${preview}"${photos ? ` (+${photos} photo${photos === 1 ? "" : "s"})` : ""}` : photos ? `(${photos} photo${photos === 1 ? "" : "s"})` : "",
     "The AI is answering. The chat stays in Booked, so take a look if they need a person.",
+    await noteLineFor(phone),
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
   ].filter(Boolean).join("\n");
   return postSmsSlack(text);
@@ -130,7 +152,8 @@ export async function postAutoReleaseAlert(phone: string, ownerName: string, cus
   const since = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", hour: "numeric", minute: "2-digit" }).format(waitingSince);
   const text = [
     `${pilotTag()}<!here> :alarm_clock: *Released:* ${ownerName} didn't reply within 1 hour. ${who} is still waiting (since ${since}). Open for anyone.`,
+    await noteLineFor(phone),
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
   return postSmsSlack(text);
 }

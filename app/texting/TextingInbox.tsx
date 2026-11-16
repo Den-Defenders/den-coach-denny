@@ -24,6 +24,8 @@ type Conversation = {
   followUp: string | null;
   /** quiet / revisit_due = due now; scheduled = a later follow-up date. */
   followUpReason: "quiet" | "revisit_due" | "scheduled" | null;
+  /** Team notes (2026-11-16): "Liz C: 📞 Left voicemail: call back after 5". */
+  latestNote: string | null;
   optedOut: boolean;
   lastDirection: "inbound" | "outbound";
   lastBody: string;
@@ -76,6 +78,8 @@ type Thread = {
   releasedAt: string | null;
   /** "If nobody replies, this chat goes back to the shared queue at …" (owned chats with a customer waiting). */
   releaseNote: string | null;
+  /** Team notes (Steven, 2026-11-16): internal, never texted. Oldest first. */
+  notes: TeamNoteView[];
   folder: Folder;
   folderLabel: string;
   folderAt: string | null;
@@ -106,6 +110,22 @@ type ThreadResponse = {
   me: string | null;
   canAssign: boolean;
   team: { email: string; name: string }[];
+};
+
+type NoteKind = "note" | "call_talked" | "call_voicemail" | "call_no_answer";
+type TeamNoteView = { id: number; kind: NoteKind; label: string; body: string; byName: string; at: string; edited: boolean; canEdit: boolean };
+
+const NOTE_BUTTONS: [NoteKind, string][] = [
+  ["note", "📝 Add note"],
+  ["call_talked", "📞 Called, talked"],
+  ["call_voicemail", "📞 Left voicemail"],
+  ["call_no_answer", "📞 No answer"],
+];
+const NOTE_PLACEHOLDER: Record<NoteKind, string> = {
+  note: "Note for the team: what happened, what they want, next steps… (only your team sees this)",
+  call_talked: "How did the call go? What are the next steps? (optional)",
+  call_voicemail: "Anything to add? (optional)",
+  call_no_answer: "Anything to add? (optional)",
 };
 
 type Filter = "all" | "needs" | "mine" | "unassigned" | "ai" | "paused" | "optout";
@@ -226,6 +246,13 @@ export default function TextingInbox() {
   /** "Revisit later…" picked in Move to: show the date choices. */
   const [revisitOpen, setRevisitOpen] = useState(false);
   const [revisitDay, setRevisitDay] = useState("");
+  /** Team notes: the note being written (kind picked with the buttons), and one being edited. */
+  const [noteKind, setNoteKind] = useState<NoteKind | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteFollow, setNoteFollow] = useState("");
+  const [noteDay, setNoteDay] = useState("");
+  const [editingNote, setEditingNote] = useState<{ id: number; body: string } | null>(null);
+  const [deletingNote, setDeletingNote] = useState<number | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [data, setData] = useState<ThreadResponse | null>(null);
   const [threadError, setThreadError] = useState("");
@@ -336,6 +363,11 @@ export default function TextingInbox() {
       setNotice("");
       setEditingName(false);
       setRevisitOpen(false);
+      setNoteKind(null);
+      setNoteDraft("");
+      setNoteFollow("");
+      setEditingNote(null);
+      setDeletingNote(null);
       lastCount.current = 0;
     }
     setSelected(phone);
@@ -361,6 +393,17 @@ export default function TextingInbox() {
     setNotice(json.message || (response?.ok ? "Done." : "Something went wrong."));
     await Promise.all([loadThread(selected), loadList()]);
     return { ok: Boolean(response?.ok && json.ok !== false), json };
+  }
+
+  async function saveNote() {
+    if (!noteKind || busy) return;
+    const followUp = noteFollow === "date" ? noteDay : noteFollow ? isoDay(Number(noteFollow)) : "";
+    const result = await act("add_note", { kind: noteKind, body: noteDraft.trim(), followUp: followUp || undefined });
+    if (result?.ok) {
+      setNoteKind(null);
+      setNoteDraft("");
+      setNoteFollow("");
+    }
   }
 
   async function send() {
@@ -489,6 +532,7 @@ export default function TextingInbox() {
                   </span>
                   {c.flag.pinned && c.bookingTime && <span className="inbox-booking-when">{c.bookingTime}</span>}
                   <span className={`inbox-preview${c.flag.waiting ? " unread" : ""}`}>{prefix}{preview}</span>
+                  {c.latestNote && <span className="inbox-note-preview">📝 {c.latestNote}</span>}
                 </button>
               </li>
             );
@@ -598,6 +642,9 @@ export default function TextingInbox() {
                       : <li key={line} className="inbox-booking-check">⚠️ {line}</li>;
                   })}
                 </ul>
+                {thread.notes.length > 0 && (
+                  <div className="inbox-booking-note">📝 <b>Latest team note</b> ({thread.notes[thread.notes.length - 1].byName}, {longWhen(thread.notes[thread.notes.length - 1].at)}): {thread.notes[thread.notes.length - 1].kind === "note" ? "" : `${thread.notes[thread.notes.length - 1].label}${thread.notes[thread.notes.length - 1].body ? ": " : ""}`}{thread.notes[thread.notes.length - 1].body}</div>
+                )}
                 <div className="inbox-booking-actions">
                   <button className="btn btn-outline btn-small" onClick={() => copyBooking(thread.booking!.lines)}>Copy details</button>
                   {!thread.booking.doneAt && (
@@ -651,7 +698,41 @@ export default function TextingInbox() {
             )}
 
             <div className="inbox-messages">
-              {thread.messages.map((m) => {
+              {[
+                ...thread.messages.map((m) => ({ at: Date.parse(m.createdAt), m, n: null as TeamNoteView | null })),
+                ...thread.notes.map((n) => ({ at: Date.parse(n.at), m: null, n })),
+              ].sort((a, b) => a.at - b.at).map(({ m, n }) => {
+                if (n) {
+                  return (
+                    <div key={`note-${n.id}`} className="inbox-row inbox-note">
+                      <div className="sim-who">{n.kind === "note" ? "📝 Team note" : n.label} · {n.byName} · {longWhen(n.at)}{n.edited ? " · edited" : ""} · only your team sees this</div>
+                      {editingNote?.id === n.id ? (
+                        <div className="inbox-note-edit">
+                          <textarea rows={3} value={editingNote.body} onChange={(e) => setEditingNote({ id: n.id, body: e.target.value })} />
+                          <button className="btn btn-teal btn-small" disabled={busy} onClick={async () => { const r = await act("edit_note", { noteId: n.id, body: editingNote.body }); if (r?.ok) setEditingNote(null); }}>Save</button>
+                          <button className="inbox-link" onClick={() => setEditingNote(null)}>Cancel</button>
+                        </div>
+                      ) : (
+                        n.body && <div className="inbox-bubble">{n.body}</div>
+                      )}
+                      {n.canEdit && editingNote?.id !== n.id && (
+                        <div className="inbox-note-actions">
+                          <button className="inbox-link" onClick={() => { setDeletingNote(null); setEditingNote({ id: n.id, body: n.body }); }}>Edit</button>
+                          {deletingNote === n.id ? (
+                            <>
+                              <span>Delete this note?</span>
+                              <button className="inbox-link" disabled={busy} onClick={async () => { await act("delete_note", { noteId: n.id }); setDeletingNote(null); }}>Yes, delete</button>
+                              <button className="inbox-link" onClick={() => setDeletingNote(null)}>No</button>
+                            </>
+                          ) : (
+                            <button className="inbox-link" onClick={() => setDeletingNote(n.id)}>Delete</button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                if (!m) return null;
                 const failed = ["send_failed", "failed", "undelivered"].includes(m.status);
                 const who = m.direction === "inbound" ? "customer" : m.sentBy === "denny-ai" || m.sentBy === "denny-checking" || m.sentBy === "denny-followup" ? "ai" : m.sentBy === "system" || m.sentBy === "denny-hold" || m.sentBy === "drip" ? "system" : "person";
                 return (
@@ -695,6 +776,37 @@ export default function TextingInbox() {
                 <button className="btn btn-teal btn-small" disabled={busy || !reply.canSend || !draft.trim() || tooLong} onClick={send}>Send text</button>
               </div>
               {notice && <div className="notice inbox-notice">{notice}</div>}
+            </div>
+
+            <div className="inbox-notes-box" aria-label="Team notes">
+              <div className="inbox-note-buttons">
+                {NOTE_BUTTONS.map(([kind, label]) => (
+                  <button key={kind} className={`btn btn-outline btn-small${noteKind === kind ? " active" : ""}`} disabled={busy} onClick={() => setNoteKind(noteKind === kind ? null : kind)}>{label}</button>
+                ))}
+              </div>
+              {noteKind && (
+                <div className="inbox-note-form">
+                  <textarea rows={3} value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} maxLength={2000} placeholder={NOTE_PLACEHOLDER[noteKind]}
+                    onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveNote(); } }} />
+                  <div className="inbox-note-bar">
+                    <label>
+                      Follow up:{" "}
+                      <select value={noteFollow} onChange={(e) => { setNoteFollow(e.target.value); if (e.target.value === "date" && !noteDay) setNoteDay(isoDay(1)); }}>
+                        <option value="">No date</option>
+                        <option value="1">Tomorrow</option>
+                        <option value="2">In 2 days</option>
+                        <option value="7">In 1 week</option>
+                        <option value="14">In 2 weeks</option>
+                        <option value="date">Pick a date…</option>
+                      </select>
+                    </label>
+                    {noteFollow === "date" && <input type="date" aria-label="Follow up on" value={noteDay} min={isoDay(0)} onChange={(e) => setNoteDay(e.target.value)} />}
+                    <button className="btn btn-teal btn-small" disabled={busy || (noteKind === "note" && !noteDraft.trim()) || (noteFollow === "date" && !noteDay)} onClick={saveNote}>Save note</button>
+                    <button className="inbox-link" onClick={() => { setNoteKind(null); setNoteDraft(""); setNoteFollow(""); }}>Cancel</button>
+                  </div>
+                  <div className="team-hint">Only your team sees notes; they&apos;re never texted. {noteFollow ? "A follow-up date puts this chat in Follow-ups → Later until that day." : ""}</div>
+                </div>
+              )}
             </div>
           </>
         )}

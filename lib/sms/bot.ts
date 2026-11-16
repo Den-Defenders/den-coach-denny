@@ -32,7 +32,7 @@ import salesZipDirectory from "@/app/lib/salesZipDirectory.json";
 import { COMPANY_FACTS, NV_ASK_TEAM_CITIES, NV_SERVED_CITIES } from "@/lib/ai/companyFacts";
 import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
 import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from "@/lib/doorPhotos";
-import { inboxLink, ownerMention, pilotTag, postReadyToBookAlert, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
+import { inboxLink, noteLineFor, ownerMention, pilotTag, postReadyToBookAlert, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
 import {
   CHECKING_TEXT,
   BACK_DOOR_QUESTION,
@@ -79,6 +79,7 @@ import {
 import { smsBotSystemPrompt, type KnownAboutCustomer } from "@/lib/sms/botPrompt";
 import { maybeSendHoldText } from "@/lib/sms/inbox";
 import { asksAboutCall } from "@/lib/sms/drip";
+import { notesForAi } from "@/lib/sms/notes";
 import {
   BOOKING_ADDRESS_KEY, BOOKING_NAME_KEY, FOLLOW_UP_KEY, FOLLOW_UP_QUESTION,
   askedFollowUp, followUpFromText, isFollowUpQuestion, looksLikeAnswer, nextQualifier, pendingQualifier, qualifierAck,
@@ -631,6 +632,7 @@ export async function postHandoffToSlack(phone: string, reason: string, summary:
     `Reason: ${reason.replace(/_/g, " ")}`,
     summary,
     notesLine(notes),
+    await noteLineFor(phone),
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
   ].filter(Boolean).join("\n");
   await postSmsSlack(text);
@@ -688,7 +690,7 @@ export type ComposeResult =
  * No sending here: the caller sends (real) or shows it (Simulator).
  */
 export async function composeBotReply(
-  input: { thread: ThreadMessage[]; notes: Record<string, string>; now: Date },
+  input: { thread: ThreadMessage[]; notes: Record<string, string>; now: Date; teamNotes?: string[] },
   fx: BotEffects,
 ): Promise<ComposeResult> {
   const { thread } = input;
@@ -763,6 +765,7 @@ export async function composeBotReply(
     chosenTime: picked ? timeWords(picked) : undefined,
     bookingName: notes[BOOKING_NAME_KEY] || undefined,
     bookingAddress: notes[BOOKING_ADDRESS_KEY] || undefined,
+    teamNotes: input.teamNotes?.length ? input.teamNotes : undefined,
     bookingStep: notes[FOLLOW_UP_KEY] === "text"
       ? (() => { const q = nextQualifier(notes, ourTexts); return q ? `they chose to keep texting; answer anything they asked, save any answer with save_customer_notes, then ask: "${q.ask}"` : "all questions answered; call request_booking with follow_up text"; })()
       : askedFollowUp(ourTexts) && !notes[FOLLOW_UP_KEY] ? "we asked if they'd like a call from a rep or to keep texting; when they answer, call request_booking with follow_up" : undefined,
@@ -1447,7 +1450,8 @@ export async function runBotReply(phone: string, inboundId: number): Promise<Bot
       return skip(phone, capHit.reason, inboundId);
     }
 
-    const composed = await composeBotReply({ thread, notes: state.customerNotes, now: smsNow() }, liveEffects(phone, inboundId));
+    const teamNotes = await notesForAi(phone);
+    const composed = await composeBotReply({ thread, notes: state.customerNotes, now: smsNow(), teamNotes }, liveEffects(phone, inboundId));
     if (composed.kind === "opted_out") return { status: "opted_out" };
     if (composed.kind === "no_reply") {
       if (composed.reason === "nothing_to_answer") return skip(phone, "nothing_to_answer", inboundId);
