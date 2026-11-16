@@ -270,6 +270,11 @@ export default function TextingInbox() {
   const searchRef = useRef(search);
   const viewRef = useRef<View>(view);
   const ownerRef = useRef(followOwner);
+  /** "👁 View as" (owners only, look-only): whose page we're showing. "" = me. */
+  const [viewAs, setViewAs] = useState("");
+  const viewAsRef = useRef("");
+  const [viewingAs, setViewingAs] = useState<{ email: string; name: string; role: string } | null>(null);
+  const [viewAsOptions, setViewAsOptions] = useState<{ email: string; name: string; role: string }[]>([]);
 
   const listQuery = useCallback(() => {
     const params = new URLSearchParams();
@@ -277,6 +282,7 @@ export default function TextingInbox() {
     if (q) params.set("q", q);
     if (viewRef.current !== "active" && viewRef.current !== "scoreboard") params.set("folder", viewRef.current);
     if (viewRef.current === "followups" && ownerRef.current) params.set("owner", ownerRef.current);
+    if (viewAsRef.current) params.set("viewAs", viewAsRef.current);
     return params.toString();
   }, []);
 
@@ -293,6 +299,8 @@ export default function TextingInbox() {
       setSeesEveryone(Boolean(json.seesEveryone));
       setMe(json.me || null);
       setMyWaiting(json.myWaiting || null);
+      setViewingAs(json.viewingAs || null);
+      if (Array.isArray(json.viewAsOptions) && json.viewAsOptions.length) setViewAsOptions(json.viewAsOptions);
       setListError("");
     } else {
       setListError(json.error || "Could not load the inbox.");
@@ -302,7 +310,8 @@ export default function TextingInbox() {
   }, [listQuery]);
 
   const loadThread = useCallback(async (phone: string) => {
-    const response = await fetch(`/api/sms/inbox?phone=${encodeURIComponent(phone)}`, { cache: "no-store" }).catch(() => null);
+    const as = viewAsRef.current ? `&viewAs=${encodeURIComponent(viewAsRef.current)}` : "";
+    const response = await fetch(`/api/sms/inbox?phone=${encodeURIComponent(phone)}${as}`, { cache: "no-store" }).catch(() => null);
     const json = response ? await response.json().catch(() => ({})) : {};
     if (response?.ok && json.thread) {
       setData(json as ThreadResponse);
@@ -337,6 +346,21 @@ export default function TextingInbox() {
     const timer = setTimeout(loadList, 0);
     return () => clearTimeout(timer);
   }, [view, followOwner, loadList]);
+
+  // Switching "👁 View as" reloads everything as that person (the Scoreboard isn't theirs to see).
+  function switchViewAs(email: string) {
+    viewAsRef.current = email;
+    setViewAs(email);
+    setFollowOwner("");
+    ownerRef.current = "";
+    if (viewRef.current === "scoreboard") {
+      viewRef.current = "active";
+      setView("active");
+    }
+    setNotice("");
+    loadList();
+    if (selected) loadThread(selected);
+  }
 
   // The open conversation refreshes every 5 seconds so new texts show up.
   useEffect(() => {
@@ -382,6 +406,10 @@ export default function TextingInbox() {
 
   async function act(action: string, extra: Record<string, unknown> = {}) {
     if (!selected) return null;
+    if (viewAsRef.current) {
+      setNotice(`👁 You're viewing as ${viewingAs?.name || "someone else"} (look-only). Switch back to yourself to text, take, move or add notes.`);
+      return null;
+    }
     setBusy(true);
     const response = await fetch("/api/sms/inbox", {
       method: "POST",
@@ -471,6 +499,21 @@ export default function TextingInbox() {
       <section className="surface inbox-list" aria-label="Conversations">
         <div className="inbox-list-head">
           <h2>Texting {needsCount > 0 && <span className="inbox-count">{needsCount} need a person</span>}</h2>
+          {viewAsOptions.length > 0 && (
+            <label className="inbox-viewas">
+              👁 View as{" "}
+              <select value={viewAs} onChange={(e) => switchViewAs(e.target.value)}>
+                <option value="">Me</option>
+                {viewAsOptions.map((m) => <option key={m.email} value={m.email}>{m.name} ({m.role})</option>)}
+              </select>
+            </label>
+          )}
+          {viewingAs && (
+            <div className="inbox-viewas-banner">
+              👁 Viewing as <b>{viewingAs.name}</b> ({viewingAs.role}). Look-only: nothing you click does anything.
+              <button className="inbox-link" onClick={() => switchViewAs("")}>Back to me</button>
+            </div>
+          )}
           {myWaiting && myWaiting.count > 0 && (
             <div className={`team-hint inbox-my-waiting${myWaiting.count >= myWaiting.max ? " full" : ""}`}>
               {myWaiting.count} of {myWaiting.max} customers waiting on you{myWaiting.count >= myWaiting.max ? ". Reply to some before taking more." : ""}
@@ -763,7 +806,7 @@ export default function TextingInbox() {
                 onChange={(e) => setDraft(e.target.value)}
                 rows={3}
                 maxLength={MAX_CHARS + 50}
-                disabled={!reply.canSend}
+                disabled={!reply.canSend || Boolean(viewingAs)}
                 placeholder={reply.canSend ? "Type your text… (Ctrl+Enter sends)" : "Can't text this customer."}
                 onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }}
               />
