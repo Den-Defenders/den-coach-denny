@@ -1148,10 +1148,11 @@ export async function followUpCandidates(owner?: string): Promise<FollowUpCandid
       FROM sms_messages m WHERE m.conversation_id = v.id
     ) x ON true
     WHERE o.phone IS NULL
-      AND NOT (v.booking_request IS NOT NULL AND v.booking_done_at IS NULL)
       AND (
+        -- A follow-up date someone picked always shows (2026-11-16: an old open booking card hid one).
         (v.folder = 'revisit' AND v.revisit_at IS NOT NULL)
         OR (v.folder IS NULL AND v.assigned_to IS NOT NULL AND x.last_out IS NOT NULL
+          AND NOT (v.booking_request IS NOT NULL AND v.booking_done_at IS NULL)
           AND (x.last_in IS NULL OR x.last_out > x.last_in)
           AND NOT (v.bot_status = 'on' AND v.followups_off = false AND v.lead_at IS NOT NULL))
       )
