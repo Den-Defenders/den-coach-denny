@@ -113,12 +113,17 @@ async function inboxTeam(): Promise<TeamMember[]> {
  * "👁 View as" (Steven, 2026-11-16): an owner sees the Texting page exactly as a team member
  * does (their Mine, follow-ups, waiting count, no Scoreboard). Look-only: it only changes what
  * GET shows; every POST still runs as the real person, and the page blocks actions while viewing.
+ * Managers too (Steven, 2026-11-16): they can view as anyone on the inbox team, same as owners.
  */
+function canViewAs(real: DennyAccess, member: { email: string }): boolean {
+  return canAssignOthers(real) && member.email.toLowerCase() !== real.email;
+}
+
 async function viewAsAccess(real: DennyAccess, url: URL): Promise<{ access: DennyAccess; viewingAs: { email: string; name: string; role: string } | null }> {
   const wanted = normalizeEmail(url.searchParams.get("viewAs") || "");
-  if (!wanted || real.role !== "owner" || wanted === real.email) return { access: real, viewingAs: null };
+  if (!wanted || wanted === real.email || !canAssignOthers(real)) return { access: real, viewingAs: null };
   const member = (await inboxTeam()).find((m) => m.email.toLowerCase() === wanted);
-  if (!member) return { access: real, viewingAs: null };
+  if (!member || !canViewAs(real, member)) return { access: real, viewingAs: null };
   return {
     access: { email: member.email.toLowerCase(), displayName: member.displayName, role: member.role, member },
     viewingAs: { email: member.email.toLowerCase(), name: member.displayName || member.email.split("@")[0], role: member.role },
@@ -323,10 +328,8 @@ export async function GET(request: Request) {
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
       me: access.email,
       viewingAs,
-      // Owners can pick anyone on the inbox team to "👁 View as".
-      viewAsOptions: real.role === "owner"
-        ? team.filter((m) => m.email.toLowerCase() !== real.email).map((m) => ({ email: m.email.toLowerCase(), name: m.displayName || m.email.split("@")[0], role: m.role }))
-        : [],
+      // "👁 View as": owners and managers can pick anyone on the inbox team.
+      viewAsOptions: team.filter((m) => canViewAs(real, m)).map((m) => ({ email: m.email.toLowerCase(), name: m.displayName || m.email.split("@")[0], role: m.role })),
       myWaiting: await myWaiting(access),
       now: now.toISOString(),
     });
