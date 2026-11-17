@@ -21,6 +21,8 @@
  *  10. caps: per number 25/hour and 60/day, 2 automated/day, 1,500/day for everyone (env can lower/raise).
  *      Session 6 PR 6: a person's own texts (kind "manual") skip the per-number caps (only the
  *      company-wide cap applies): the caps stop bot loops and bugs, not CSRs.
+ *
+ * Session 8: every text goes out from the customer's own number of ours (sticky, lib/sms/numbers.ts).
  */
 import {
   MAX_BODY_CHARS,
@@ -48,8 +50,10 @@ import {
   markOutboundFailed,
   optOutConfirmationSent,
   recordOptOut,
+  setConversationNumber,
   smsDatabaseConfigured,
 } from "@/lib/sms/store";
+import { sendingNumberFor } from "@/lib/sms/numbers";
 import { TWILIO_UNSUBSCRIBED_ERROR, messagingConfig, twilioSendMessage, type TwilioSendResult } from "@/lib/sms/twilio";
 
 export type SendPurpose = "care" | "marketing";
@@ -118,7 +122,7 @@ export function allowList(): { everyone: boolean; numbers: string[] } {
 
 // Tests can swap the clock and Twilio.
 let clock: () => Date = () => new Date();
-let sender: (to: string, body: string, mediaUrls?: string[]) => Promise<TwilioSendResult> = twilioSendMessage;
+let sender: (to: string, body: string, mediaUrls?: string[], from?: string | null) => Promise<TwilioSendResult> = twilioSendMessage;
 export function setSendDepsForTests(deps: { now?: () => Date; send?: typeof sender } | null) {
   clock = deps?.now ?? (() => new Date());
   sender = deps?.send ?? twilioSendMessage;
@@ -223,8 +227,10 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
   }
 
   // Send. Record first so nothing goes out without a row.
+  // Session 8: always from this customer's own number of ours (sticky), never Twilio's pick.
+  const from = sendingNumberFor(contact.ourNumber);
   const messageId = await createOutbound({ conversationId: contact.conversationId, phone, body, kind, purpose, sentBy: actor, at: now, media });
-  const result = await sender(phone, body, media);
+  const result = await sender(phone, body, media, from);
   if (!result.ok) {
     await markOutboundFailed(messageId, result.code, result.message);
     if (result.code === TWILIO_UNSUBSCRIBED_ERROR) {
@@ -233,8 +239,10 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
     }
     return block("twilio_rejected", `Twilio didn't accept the text: ${result.message}`, { code: result.code, httpStatus: result.httpStatus, messageId });
   }
-  await markOutboundAccepted(messageId, result.sid, result.status, result.from);
-  await audit({ phone, action: "sent", reason: kind, detail: { purpose, messageId, sid: result.sid, chars: body.length, ...(media.length ? { photos: media.length } : {}) }, actor });
+  await markOutboundAccepted(messageId, result.sid, result.status, result.from || from);
+  // First text to this customer: the number it went from is theirs from now on.
+  if (!contact.ourNumber) await setConversationNumber(contact.conversationId, from, now);
+  await audit({ phone, action: "sent", reason: kind, detail: { purpose, messageId, sid: result.sid, from, chars: body.length, ...(media.length ? { photos: media.length } : {}) }, actor });
   return { ok: true, messageId, twilioSid: result.sid, status: result.status };
 }
 

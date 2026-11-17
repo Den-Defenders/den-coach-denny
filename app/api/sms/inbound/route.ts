@@ -120,7 +120,9 @@ export async function POST(request: Request) {
   try {
     const optOut = await findOptOut(from);
     const keyword = classifyKeyword(body, { optedOut: Boolean(optOut), twilioOptOutType: params.get("OptOutType") });
-    const { saved, messageId } = await saveInbound({ phone: from, ourNumber: normalizePhone(params.get("To") || ""), body, twilioSid: sid, media, at: now });
+    const { saved, messageId, numberChanged } = await saveInbound({ phone: from, ourNumber: normalizePhone(params.get("To") || ""), body, twilioSid: sid, media, at: now });
+    // Session 8: they texted a different number of ours than before, so we answer from that one now.
+    if (numberChanged?.from) await audit({ phone: from, action: "our_number_changed", reason: "customer_texted_other_number", detail: { ...numberChanged, sid }, actor: "customer" });
     // One line per text in Vercel Runtime Logs (no message body), to trace texts that don't show up.
     console.info(`SMS inbound ${sid} saved=${saved} keyword=${keyword.keyword || "none"} twilioOptOutType=${params.get("OptOutType") || "-"}`);
     if (!saved) return emptyTwiml(); // Twilio retry of a text we already have

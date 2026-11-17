@@ -138,6 +138,9 @@ async function createTables(sql: Sql) {
   // Step 5 PR 3: AI follow-ups when the AI is left on read ("Stop auto texts" turns them off for good).
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS followups_off BOOLEAN NOT NULL DEFAULT false`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS followup_lock_until TIMESTAMPTZ`;
+  // Session 8 (Nor-Cal numbers): which of our Twilio numbers this customer texts with (sticky).
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS our_number TEXT`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS our_number_at TIMESTAMPTZ`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -158,6 +161,11 @@ async function createTables(sql: Sql) {
   )`;
   await sql`CREATE INDEX IF NOT EXISTS sms_messages_phone_created ON sms_messages (phone, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS sms_messages_out_created ON sms_messages (created_at DESC) WHERE direction = 'outbound'`;
+  // Session 8: conversations from before our_number existed keep the number they last used (the 916 pilot).
+  await sql`UPDATE sms_conversations v SET our_number = m.our_number, our_number_at = m.created_at
+    FROM (SELECT DISTINCT ON (conversation_id) conversation_id, our_number, created_at FROM sms_messages
+          WHERE our_number IS NOT NULL ORDER BY conversation_id, created_at DESC) m
+    WHERE v.id = m.conversation_id AND v.our_number IS NULL`;
   await sql`CREATE TABLE IF NOT EXISTS sms_opt_outs (
     phone TEXT PRIMARY KEY,
     opted_out_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -208,14 +216,21 @@ const toIso = (v: unknown): string | null => (v == null ? null : new Date(v as s
 // Contacts and conversations
 // ---------------------------------------------------------------------------
 
-export type SmsContact = { phone: string; timeZone: string; conversationId: number; lastInboundAt: string | null };
+export type SmsContact = {
+  phone: string;
+  timeZone: string;
+  conversationId: number;
+  lastInboundAt: string | null;
+  /** Session 8: the number of ours this customer texts with (null = not set yet: the default number). */
+  ourNumber: string | null;
+};
 
 /** Make sure the phone has a contact + its single conversation. */
 export async function ensureContact(phone: string): Promise<SmsContact> {
   const sql = await db();
   await sql`INSERT INTO sms_contacts (phone) VALUES (${phone}) ON CONFLICT (phone) DO NOTHING`;
   await sql`INSERT INTO sms_conversations (phone) VALUES (${phone}) ON CONFLICT (phone) DO NOTHING`;
-  const rows = await sql`SELECT c.phone, c.time_zone, v.id AS conversation_id, v.last_inbound_at
+  const rows = await sql`SELECT c.phone, c.time_zone, v.id AS conversation_id, v.last_inbound_at, v.our_number
     FROM sms_contacts c JOIN sms_conversations v ON v.phone = c.phone WHERE c.phone = ${phone}`;
   const row = rows[0];
   return {
@@ -223,7 +238,15 @@ export async function ensureContact(phone: string): Promise<SmsContact> {
     timeZone: safeTimeZone(String(row?.time_zone || DEFAULT_TIME_ZONE)),
     conversationId: Number(row?.conversation_id),
     lastInboundAt: toIso(row?.last_inbound_at),
+    ourNumber: row?.our_number ? String(row.our_number) : null,
   };
+}
+
+/** Session 8: this conversation texts from this number of ours from now on. */
+export async function setConversationNumber(conversationId: number, number: string, at: Date) {
+  const sql = await db();
+  await sql`UPDATE sms_conversations SET our_number = ${number}, our_number_at = ${iso(at)}::timestamptz, updated_at = now()
+    WHERE id = ${conversationId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +262,17 @@ export type InboundInput = {
   at: Date;
 };
 
-/** Save a text they sent us. saved=false when Twilio retried a text we already have. */
-export async function saveInbound(input: InboundInput): Promise<{ saved: boolean; messageId: number | null; contact: SmsContact }> {
+/**
+ * Save a text they sent us. saved=false when Twilio retried a text we already have.
+ * Session 8: the conversation follows the number of ours they texted (numberChanged says from/to
+ * when that moved it), so our reply comes from the number they wrote to.
+ */
+export async function saveInbound(input: InboundInput): Promise<{
+  saved: boolean;
+  messageId: number | null;
+  contact: SmsContact;
+  numberChanged: { from: string | null; to: string } | null;
+}> {
   const contact = await ensureContact(input.phone);
   const sql = await db();
   const media = input.media.length ? JSON.stringify(input.media) : null;
@@ -250,10 +282,16 @@ export async function saveInbound(input: InboundInput): Promise<{ saved: boolean
       ${input.twilioSid}, ${input.ourNumber}, 'received', ${iso(input.at)}::timestamptz, ${iso(input.at)}::timestamptz)
     ON CONFLICT (twilio_sid) DO NOTHING
     RETURNING id`;
-  if (!rows.length) return { saved: false, messageId: null, contact };
+  if (!rows.length) return { saved: false, messageId: null, contact, numberChanged: null };
   await sql`UPDATE sms_conversations SET last_inbound_at = ${iso(input.at)}::timestamptz, updated_at = now()
     WHERE id = ${contact.conversationId}`;
-  return { saved: true, messageId: Number(rows[0].id), contact: { ...contact, lastInboundAt: iso(input.at) } };
+  let numberChanged: { from: string | null; to: string } | null = null;
+  if (input.ourNumber && input.ourNumber !== contact.ourNumber) {
+    await setConversationNumber(contact.conversationId, input.ourNumber, input.at);
+    numberChanged = { from: contact.ourNumber, to: input.ourNumber };
+  }
+  const ourNumber = input.ourNumber || contact.ourNumber;
+  return { saved: true, messageId: Number(rows[0].id), contact: { ...contact, lastInboundAt: iso(input.at), ourNumber }, numberChanged };
 }
 
 export type OutboundInput = {

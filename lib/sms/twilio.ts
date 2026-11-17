@@ -5,7 +5,8 @@
  * package), same as lib/websiteBotSms.ts.
  *
  *   - checks X-Twilio-Signature on every webhook
- *   - sends through the "Den Defenders" Messaging Service
+ *   - sends through the "Den Defenders" Messaging Service, From = the customer's
+ *     own number of ours (Session 8, lib/sms/numbers.ts)
  *
  * Nothing here decides WHETHER to text someone. That is lib/sms/send.ts.
  */
@@ -90,11 +91,20 @@ export type TwilioSendResult =
 /** Twilio error 21610 = this number replied STOP to us (Twilio blocks it). */
 export const TWILIO_UNSUBSCRIBED_ERROR = "21610";
 
-/** Send a text; mediaUrls (public https image links) turn it into a picture text (MMS). */
-export async function twilioSendMessage(to: string, body: string, mediaUrls: string[] = []): Promise<TwilioSendResult> {
+/** Twilio error 21711 = that From number isn't in the "Den Defenders" Messaging Service. */
+export const TWILIO_SENDER_NOT_IN_SERVICE_ERROR = "21711";
+
+/**
+ * Send a text; mediaUrls (public https image links) turn it into a picture text (MMS).
+ * from (Session 8): one of our numbers in the Messaging Service. With From + MessagingServiceSid,
+ * Twilio sends from exactly that number and still applies the service's settings (opt-out, 10DLC
+ * campaign, status callback). Without From, Twilio would pick a number from the pool itself.
+ */
+export async function twilioSendMessage(to: string, body: string, mediaUrls: string[] = [], from: string | null = null): Promise<TwilioSendResult> {
   const cfg = messagingConfig();
   if (!cfg) return { ok: false, code: null, message: "Twilio Messaging is not configured.", httpStatus: 0 };
   const form = new URLSearchParams({ To: to, Body: body, MessagingServiceSid: cfg.messagingServiceSid });
+  if (from) form.set("From", from);
   for (const url of mediaUrls) form.append("MediaUrl", url);
   const base = webhookBaseUrl();
   if (base) form.set("StatusCallback", `${base}/api/sms/status`);
