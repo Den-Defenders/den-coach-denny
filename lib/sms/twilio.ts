@@ -160,3 +160,32 @@ export async function twilioBalance(): Promise<{ balance: number; currency: stri
   balanceCache = { at: Date.now(), value };
   return value;
 }
+
+// ---------------------------------------------------------------------------
+// Session 8 PR 2: which numbers are in the "Den Defenders" Messaging Service, for the
+// Texting numbers page (a number must be in the service or Twilio refuses its texts, 21711).
+// Read-only; null when Twilio can't be reached. Cached 5 minutes.
+// ---------------------------------------------------------------------------
+let serviceNumbersCache: { at: number; value: string[] | null } | null = null;
+
+export async function twilioServiceNumbers(): Promise<string[] | null> {
+  if (serviceNumbersCache && Date.now() - serviceNumbersCache.at < 5 * 60_000) return serviceNumbersCache.value;
+  const cfg = messagingConfig();
+  if (!cfg) return null;
+  let value: string[] | null = null;
+  try {
+    const res = await fetch(`https://messaging.twilio.com/v1/Services/${cfg.messagingServiceSid}/PhoneNumbers?PageSize=100`, {
+      headers: { Authorization: `Basic ${Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString("base64")}` },
+      signal: AbortSignal.timeout(5_000),
+      cache: "no-store",
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { phone_numbers?: { phone_number?: string }[] };
+      value = (data.phone_numbers || []).map((p) => String(p.phone_number || "")).filter(Boolean);
+    }
+  } catch (error) {
+    console.warn("Twilio service numbers check failed:", error instanceof Error ? error.message : error);
+  }
+  serviceNumbersCache = { at: Date.now(), value };
+  return value;
+}

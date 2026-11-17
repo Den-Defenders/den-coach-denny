@@ -9,9 +9,10 @@ export const dynamic = "force-dynamic";
 export default async function SmsTestPage() {
   if (!await canViewOwner()) notFound();
   return (
-    <DenShell title="Texting test" subtitle="Pilot number (916) 891-1680" theme="texting">
+    <DenShell title="Texting test" subtitle="Texting setup and tests" theme="texting">
       <div className="hero-actions" style={{ marginBottom: 14 }}>
         <a className="btn btn-outline" href="/door-photos">Door photos for the bot</a>
+        <a className="btn btn-outline" href="/sms-numbers">Texting numbers</a>
       </div>
       <SmsTester />
     </DenShell>
