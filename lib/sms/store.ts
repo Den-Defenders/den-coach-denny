@@ -141,6 +141,8 @@ async function createTables(sql: Sql) {
   // Session 8 (Nor-Cal numbers): which of our Twilio numbers this customer texts with (sticky).
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS our_number TEXT`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS our_number_at TIMESTAMPTZ`;
+  // Session 8 PR 2: why the conversation has that number ("ad set Chico", "ZIP 95926", "they texted it", ...).
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS our_number_reason TEXT`;
   await sql`CREATE TABLE IF NOT EXISTS sms_messages (
     id BIGSERIAL PRIMARY KEY,
     conversation_id BIGINT NOT NULL REFERENCES sms_conversations(id),
@@ -242,10 +244,11 @@ export async function ensureContact(phone: string): Promise<SmsContact> {
   };
 }
 
-/** Session 8: this conversation texts from this number of ours from now on. */
-export async function setConversationNumber(conversationId: number, number: string, at: Date) {
+/** Session 8: this conversation texts from this number of ours from now on (reason: why, for the page/inbox). */
+export async function setConversationNumber(conversationId: number, number: string, at: Date, reason: string | null = null) {
   const sql = await db();
-  await sql`UPDATE sms_conversations SET our_number = ${number}, our_number_at = ${iso(at)}::timestamptz, updated_at = now()
+  await sql`UPDATE sms_conversations SET our_number = ${number}, our_number_at = ${iso(at)}::timestamptz,
+      our_number_reason = ${reason ? reason.slice(0, 120) : null}, updated_at = now()
     WHERE id = ${conversationId}`;
 }
 
@@ -287,7 +290,7 @@ export async function saveInbound(input: InboundInput): Promise<{
     WHERE id = ${contact.conversationId}`;
   let numberChanged: { from: string | null; to: string } | null = null;
   if (input.ourNumber && input.ourNumber !== contact.ourNumber) {
-    await setConversationNumber(contact.conversationId, input.ourNumber, input.at);
+    await setConversationNumber(contact.conversationId, input.ourNumber, input.at, "they texted this number");
     numberChanged = { from: contact.ourNumber, to: input.ourNumber };
   }
   const ourNumber = input.ourNumber || contact.ourNumber;

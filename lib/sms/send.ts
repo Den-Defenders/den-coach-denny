@@ -241,7 +241,7 @@ export async function sendSms(request: SendRequest): Promise<SendResult> {
   }
   await markOutboundAccepted(messageId, result.sid, result.status, result.from || from);
   // First text to this customer: the number it went from is theirs from now on.
-  if (!contact.ourNumber) await setConversationNumber(contact.conversationId, from, now);
+  if (!contact.ourNumber) await setConversationNumber(contact.conversationId, from, now, "default number");
   await audit({ phone, action: "sent", reason: kind, detail: { purpose, messageId, sid: result.sid, from, chars: body.length, ...(media.length ? { photos: media.length } : {}) }, actor });
   return { ok: true, messageId, twilioSid: result.sid, status: result.status };
 }

@@ -23,7 +23,8 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { normalizePhone } from "@/lib/sms/rules";
-import { addConsent, audit, ensureContact, saveCustomerNotes, setContactName, setHandoff, smsDb } from "@/lib/sms/store";
+import { pickNumberForLead } from "@/lib/sms/markets";
+import { addConsent, audit, ensureContact, saveCustomerNotes, setContactName, setConversationNumber, setHandoff, smsDb } from "@/lib/sms/store";
 
 /** Largest request we accept (a lead form is a few hundred bytes). */
 export const MAX_LEAD_BYTES = 20_000;
@@ -463,7 +464,19 @@ export async function processLiveLead(lead: ParsedLead, leadId: number, now: Dat
   const isExisting = Boolean(existing) && existing.drip_restart_ok !== true
     && (existing.lead_at != null || existing.has_messages === true || existing.drip_status != null);
 
-  await ensureContact(phone);
+  const contact = await ensureContact(phone);
+  // Session 8 PR 2: a new lead gets the number for its ad set / ZIP / area code (Texting numbers page).
+  // A conversation that already has a number keeps it (sticky): re-submits and people who texted us first.
+  if (!isExisting || !contact.ourNumber) {
+    try {
+      const pick = await pickNumberForLead({ adSet: f.adSet, zip: f.zip, phone });
+      await setConversationNumber(contact.conversationId, pick.number, now, pick.reason);
+      await audit({ phone, action: "number_assigned", reason: pick.matchedBy, detail: { leadId, number: pick.number, name: pick.name, reason: pick.reason, skipped: pick.skipped, adSet: f.adSet, zip: f.zip }, actor: "zapier" });
+    } catch (error) {
+      // Never lose a lead over this: without a number the default (916) number is used.
+      console.error("SMS lead number pick failed:", error instanceof Error ? error.message : error);
+    }
+  }
   if (consent) {
     await addConsent(phone, "care", "facebook_lead_form", JSON.stringify({
       leadId, form: f.formName, campaign: f.campaignName, source: f.leadSource, platform: f.platform, submittedAt: f.submittedAt,
@@ -526,7 +539,8 @@ export async function processLiveLead(lead: ParsedLead, leadId: number, now: Dat
  * Owners' test button (/sms-test): let the next lead for this number start a
  * fresh drip, as if it were new. Texts stay; since Session 6 PR 8 the old notes,
  * handoffs, booking card and lead status are cleared too (old test notes made the
- * AI reuse an old ZIP and skip questions). Optionally skip the ServiceTitan check
+ * AI reuse an old ZIP and skip questions). Session 8: the texting number is cleared too, so the next
+ * lead picks its number again (ad set / ZIP / area code). Optionally skip the ServiceTitan check
  * for this number (test phones are often real customers).
  */
 export async function resetLeadForTest(phone: string, options: { skipServiceTitan: boolean }): Promise<boolean> {
@@ -538,6 +552,7 @@ export async function resetLeadForTest(phone: string, options: { skipServiceTita
       handoff_summary = NULL, handoff_at = NULL, handoff_reason = NULL, handoff_resolved_at = NULL, handoff_resolved_by = NULL,
       customer_notes = '{}'::jsonb, lead_status = NULL, lead_status_at = NULL,
       booking_request = NULL, booking_done_at = NULL, booking_done_by = NULL, bot_status = 'on',
+      our_number = NULL, our_number_at = NULL, our_number_reason = NULL,
       updated_at = now()
     WHERE phone = ${phone} RETURNING id`;
   return rows.length > 0;

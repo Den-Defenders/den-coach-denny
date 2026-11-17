@@ -387,6 +387,10 @@ a { color: inherit; }
 .team-actions { white-space: nowrap; }
 .team-link { border: 0; background: none; color: var(--teal-dark); font-weight: 750; cursor: pointer; padding: 4px 6px; }
 .team-link:hover { color: var(--coral); }
+/* Session 8: Texting numbers page (editable table cells). */
+.sms-numbers-table input:not([type="checkbox"]), .sms-numbers-table select, .sms-numbers-table textarea { width: 100%; min-width: 120px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; font-size: 14px; background: #fff; color: var(--ink); resize: vertical; }
+.sms-numbers-table input:focus, .sms-numbers-table select:focus, .sms-numbers-table textarea:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px rgba(53,189,181,.14); }
+.sms-numbers-table td { vertical-align: top; }
 .sms-message { display: grid; gap: 6px; margin-top: 14px; font-weight: 700; }
 .sms-message > span { font-size: 14px; color: var(--muted); }
 .sms-message textarea { width: 100%; min-height: 110px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; font: inherit; font-weight: 400; color: var(--ink); background: #fff; resize: vertical; }
