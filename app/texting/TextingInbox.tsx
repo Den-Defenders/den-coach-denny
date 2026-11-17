@@ -274,7 +274,7 @@ export default function TextingInbox() {
   const searchRef = useRef(search);
   const viewRef = useRef<View>(view);
   const ownerRef = useRef(followOwner);
-  /** "👁 View as" (owners only, look-only): whose page we're showing. "" = me. */
+  /** "👁 View as" (owners and managers, look-only): whose page we're showing. "" = me. */
   const [viewAs, setViewAs] = useState("");
   const viewAsRef = useRef("");
   const [viewingAs, setViewingAs] = useState<{ email: string; name: string; role: string } | null>(null);
