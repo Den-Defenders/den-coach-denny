@@ -3,6 +3,7 @@
  *   GET                                   -> our numbers, ad sets, Twilio service check, recent picks
  *   POST {action:"save", numbers, adSets}  -> replace the setup (checked first; nothing saved on a problem)
  *   POST {action:"test", adSet, zip, phone} -> which number would this lead get? (nothing saved)
+ *   POST {action:"hatch_check", phone}      -> PR 2b: would the Hatch guard hold this lead? (read-only)
  */
 import { NextResponse } from "next/server";
 import { getCurrentAccess } from "@/lib/currentAccess";
@@ -16,7 +17,10 @@ import {
   type AdSetInput,
   type NumberInput,
 } from "@/lib/sms/markets";
+import { HATCH_GUARD_DAYS, hatchActivity, hatchGuardEnabled } from "@/lib/sms/hatchGuard";
 import { defaultSendingNumber } from "@/lib/sms/numbers";
+import { normalizePhone } from "@/lib/sms/rules";
+import { smsNow } from "@/lib/sms/send";
 import { audit } from "@/lib/sms/store";
 import { twilioServiceNumbers } from "@/lib/sms/twilio";
 
@@ -34,7 +38,10 @@ export async function GET() {
   if (!await requireOwner()) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
   try {
     const [numbers, adSets, serviceNumbers, picks] = await Promise.all([listNumbers(), listAdSets(), twilioServiceNumbers(), recentPicks()]);
-    return NextResponse.json({ numbers, adSets, serviceNumbers, picks, defaultNumber: defaultSendingNumber() }, { headers: NO_STORE });
+    return NextResponse.json({
+      numbers, adSets, serviceNumbers, picks, defaultNumber: defaultSendingNumber(),
+      hatchGuard: { on: hatchGuardEnabled(), days: HATCH_GUARD_DAYS },
+    }, { headers: NO_STORE });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Couldn't load the texting numbers." }, { status: 500, headers: NO_STORE });
   }
@@ -49,6 +56,11 @@ export async function POST(request: Request) {
       const [numbers, adSets] = await Promise.all([listNumbers(), listAdSets()]);
       const pick = pickFrom(numbers, adSets, { adSet: String(body.adSet || ""), zip: String(body.zip || ""), phone: String(body.phone || "") });
       return NextResponse.json({ pick }, { headers: NO_STORE });
+    }
+    if (body.action === "hatch_check") {
+      const phone = normalizePhone(String(body.phone || ""));
+      if (!phone) return NextResponse.json({ error: "Type a valid phone number." }, { status: 400, headers: NO_STORE });
+      return NextResponse.json({ hatch: await hatchActivity(phone, smsNow()) }, { headers: NO_STORE });
     }
     if (body.action === "save") {
       const numbersIn = Array.isArray(body.numbers) ? (body.numbers as NumberInput[]).slice(0, 60) : [];

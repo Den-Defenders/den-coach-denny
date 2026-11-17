@@ -38,6 +38,8 @@ export const TEXTING_READ_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "get_job_tags",
   // Session 6 PR 2: read the stored Hatch history for STOP texts (lib/sms/hatchOptOuts.ts).
   "hatch_stored_search_messages",
+  // Session 8 PR 2b: Hatch guard, was this lead in Hatch in the last 60 days? (lib/sms/hatchGuard.ts).
+  "hatch_stored_search_contacts",
 ]);
 
 export const WEBSITE_BOT_WRITE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
