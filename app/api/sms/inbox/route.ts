@@ -60,6 +60,9 @@ import {
   folderCounts,
   folderFrom,
   inboxRowsFor,
+  chatsTakenOverBy,
+  takenOverInfo,
+  type TakenOver,
   listInboxConversations,
   NOTE_KINDS,
   addTeamNote,
@@ -160,6 +163,21 @@ function nameFor(email: string | null, team: TeamMember[]): string | null {
   return team.find((m) => m.email === email)?.displayName || email.split("@")[0];
 }
 
+/** "🔁 Taken from Liz C · Nov 16" (Steven, 2026-11-16): this owner is covering someone else's customer. */
+function takenLabel(t: TakenOver | undefined, team: TeamMember[]): string | null {
+  if (!t) return null;
+  const name = team.find((m) => m.email.toLowerCase() === t.from)?.displayName || t.from.split("@")[0];
+  const day = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric" }).format(new Date(t.at));
+  return `🔁 ${t.how === "followups" ? "Taken from" : "Reassigned from"} ${name} · ${day}`;
+}
+
+/** Team members whose name (or email name) has the search in it: their customers match too. */
+function ownersMatching(search: string | undefined, team: TeamMember[]): string[] {
+  const q = (search || "").trim().toLowerCase();
+  if (q.length < 2) return [];
+  return team.filter((m) => (m.displayName || "").toLowerCase().includes(q) || m.email.toLowerCase().split("@")[0].includes(q)).map((m) => m.email.toLowerCase());
+}
+
 type ListView = ChatFolder | "followups";
 
 function listView(value: string | null): ListView {
@@ -222,6 +240,7 @@ export async function GET(request: Request) {
               }
             : null,
           assignedName: nameFor(thread.assignedTo, team),
+          takenFrom: takenLabel((await takenOverInfo([{ phone, assignedTo: thread.assignedTo }])).get(phone), team),
           releasedName: !thread.assignedTo && thread.releasedFrom ? nameFor(thread.releasedFrom, team) : null,
           releaseNote: plan
             ? `Customer waiting since ${pacificWhen(plan.waitingSince)}. If nobody replies, this chat goes back to the shared queue ${plan.releaseAt.getTime() <= now.getTime() ? "within 5 minutes" : `at ${pacificWhen(plan.releaseAt)}`} (1 hour of team time, ${TEAM_CLOCK_TEXT}).`
@@ -272,25 +291,34 @@ export async function GET(request: Request) {
     const search = url.searchParams.get("q")?.trim() || undefined;
     const seesEveryone = canAssignOthers(access);
     // Everyone sees everyone's follow-ups (Steven, 2026-11-16), with a person filter; it's the one
-    // place a CSR can take over another CSR's customer.
-    const followUpOwner = normalizeEmail(url.searchParams.get("owner") || "") || null;
-    const followUps = await followUpList(followUpOwner, now);
-    const followUpByPhone = new Map<string, FollowUpItem>(followUps.map((f) => [f.phone, f]));
+    // place a CSR can take over another CSR's customer. Quick filters: All / Mine / 🔁 Took over.
+    const ownerParam = (url.searchParams.get("owner") || "").trim().toLowerCase();
+    const tookMode = view === "followups" && ownerParam === "took";
+    const followUpOwner = tookMode ? null : normalizeEmail(ownerParam) || null;
+    const allFollowUps = await followUpList(null, now);
+    const followUps = followUpOwner ? allFollowUps.filter((f) => (f.owner || "").toLowerCase() === followUpOwner.toLowerCase()) : allFollowUps;
+    const followUpByPhone = new Map<string, FollowUpItem>(allFollowUps.map((f) => [f.phone, f]));
+    const tookOver = access.email ? await chatsTakenOverBy(access.email) : [];
+    const team = await inboxTeam();
+    // A team member's name in the search finds their customers too ("Liz" → Liz's chats).
+    const searchOwners = ownersMatching(search, team);
     let rows;
-    if (view === "followups" && !search) {
-      rows = await inboxRowsFor(followUps.map((f) => f.phone));
+    if (view === "followups") {
+      // On Follow-ups the search stays inside the list.
+      const phones = tookMode ? tookOver.map((t) => t.phone) : followUps.map((f) => f.phone);
+      rows = await inboxRowsFor(phones, { search, searchOwners });
     } else {
       const hidden: ChatFolder[] = ["spam", "test"];
       const folders: ChatFolder[] = view === "spam" || view === "test"
         ? [view]
-        : search ? CHAT_FOLDERS.filter((f) => !hidden.includes(f)) : [view === "followups" ? "active" : view];
-      rows = await listInboxConversations({ search, folders });
+        : search ? CHAT_FOLDERS.filter((f) => !hidden.includes(f)) : [view];
+      rows = await listInboxConversations({ search, folders, searchOwners });
       // CSRs only see chats nobody owns plus their own (Steven, 2026-11-16): someone else's
       // customer shows up again only after it's released or reassigned. A search still finds it
       // (with the owner's badge) so a CSR can help a customer who calls in.
       if (!seesEveryone && !search) rows = rows.filter((r) => !r.assignedTo || r.assignedTo === access.email);
     }
-    const team = await inboxTeam();
+    const taken = await takenOverInfo(rows);
     const latestNotes = await latestTeamNotes(rows.map((r) => r.phone));
     const mapped = rows.map((row) => {
       const booking = bookingFrom(row.bookingRequest);
@@ -300,6 +328,7 @@ export async function GET(request: Request) {
         // Shown under the "📅 Ready to book" badge so the time is visible without opening it.
         bookingTime: booking && !row.bookingDoneAt ? shortTimeWords(booking.chosen) : null,
         assignedName: nameFor(row.assignedTo, team),
+        takenFrom: takenLabel(taken.get(row.phone), team),
         releasedName: !row.assignedTo && row.releasedFrom ? nameFor(row.releasedFrom, team) : null,
         phoneLabel: formatPhone(row.phone),
         // "Roseville, CA" from the ZIP on the card (Steven, 2026-11-16).
@@ -312,15 +341,21 @@ export async function GET(request: Request) {
       };
     });
     // Follow-ups: oldest first. Everything else: the usual inbox order.
-    const order = new Map(followUps.map((f, i) => [f.phone, i]));
-    const conversations = view === "followups" && !search
+    // Took over: newest first.
+    const order = new Map((tookMode ? tookOver.map((t) => t.phone) : followUps.map((f) => f.phone)).map((p, i) => [p, i]));
+    const conversations = view === "followups"
       ? mapped.sort((a, b) => (order.get(a.phone) ?? 0) - (order.get(b.phone) ?? 0))
       : sortInbox(mapped);
     const counts = await folderCounts();
     return json({
       conversations,
       view,
-      counts: { ...counts, followups: followUps.filter((f) => f.reason !== "scheduled").length },
+      counts: { ...counts, followups: allFollowUps.filter((f) => f.reason !== "scheduled").length },
+      // Follow-ups quick filters: Mine = my due follow-ups; Took over = customers I'm covering.
+      followUpCounts: {
+        mine: access.email ? allFollowUps.filter((f) => f.reason !== "scheduled" && (f.owner || "").toLowerCase() === access.email!.toLowerCase()).length : 0,
+        took: tookOver.length,
+      },
       seesEveryone,
       team: seesEveryone ? team.map((m) => ({ email: m.email, name: m.displayName })) : [],
       // The Follow-ups person filter (everyone).

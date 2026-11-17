@@ -184,6 +184,7 @@ async function createTables(sql: Sql) {
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`;
   await sql`CREATE INDEX IF NOT EXISTS sms_audit_created ON sms_audit (created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS sms_audit_phone ON sms_audit (phone, created_at DESC)`;
   // Team notes (Steven, 2026-11-16): internal notes and call outcomes on a chat. Never texted.
   await sql`CREATE TABLE IF NOT EXISTS sms_notes (
     id BIGSERIAL PRIMARY KEY,
@@ -645,12 +646,20 @@ function searchPatterns(search: string | undefined): { text: string | null; digi
  * always come first so they never fall off the list. Conversations with no
  * texts at all are left out. Optional search: name, phone digits or message text.
  */
-export async function listInboxConversations(options: { search?: string; limit?: number; folders?: ChatFolder[]; phones?: string[] } = {}): Promise<InboxRow[]> {
+export async function listInboxConversations(options: {
+  search?: string;
+  limit?: number;
+  folders?: ChatFolder[];
+  phones?: string[];
+  /** Team members whose name matched the search: their customers match too (2026-11-16). */
+  searchOwners?: string[];
+} = {}): Promise<InboxRow[]> {
   const sql = await db();
   const limit = Math.min(Math.max(options.limit ?? 300, 1), 500);
   const { text, digits } = searchPatterns(options.search);
   const folders = (options.folders?.length ? options.folders : ["active"]).join(",");
   const phones = options.phones?.length ? options.phones.join(",") : null;
+  const owners = text && options.searchOwners?.length ? options.searchOwners.map((e) => e.toLowerCase()).join(",") : null;
   const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
       v.lead_status, v.assigned_to, v.released_from, v.released_at, v.booking_request, v.booking_done_at, v.lead_at, v.drip_status,
       v.folder, v.revisit_at, v.folder_by,
@@ -683,6 +692,7 @@ export async function listInboxConversations(options: { search?: string; limit?:
       AND (${phones}::text IS NULL OR v.phone = ANY(string_to_array(${phones}::text, ',')))
       AND (${text}::text IS NULL
         OR v.phone LIKE ${digits}::text
+        OR lower(coalesce(v.assigned_to, '')) = ANY(string_to_array(coalesce(${owners}::text, ''), ','))
         OR (coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) ILIKE ${text}::text
         OR EXISTS (SELECT 1 FROM sms_messages s WHERE s.conversation_id = v.id AND s.body ILIKE ${text}::text)
         OR EXISTS (SELECT 1 FROM sms_notes n WHERE n.phone = v.phone AND n.deleted_at IS NULL AND n.body ILIKE ${text}::text))
@@ -1206,9 +1216,55 @@ export async function followUpCandidates(owner?: string): Promise<FollowUpCandid
 }
 
 /** Inbox rows for these phones (any folder), for the follow-up list. */
-export async function inboxRowsFor(phones: string[]): Promise<InboxRow[]> {
+export async function inboxRowsFor(phones: string[], search?: { search?: string; searchOwners?: string[] }): Promise<InboxRow[]> {
   if (!phones.length) return [];
-  return listInboxConversations({ phones, folders: [...CHAT_FOLDERS], limit: 500 });
+  return listInboxConversations({ phones, folders: [...CHAT_FOLDERS], limit: 500, ...search });
+}
+
+/**
+ * Who a chat was taken over from (Steven, 2026-11-16): the newest ownership change for each
+ * phone, kept only when it moved the chat from one person to another (taken from Follow-ups,
+ * or a manager reassigning it) and that person still owns it.
+ */
+export type TakenOver = { phone: string; from: string; to: string; how: "followups" | "reassigned"; at: string };
+
+function takenOverFrom(r: Record<string, unknown>, owner: string | null): TakenOver | null {
+  const detail = (r.detail && typeof r.detail === "object" ? r.detail : {}) as Record<string, unknown>;
+  const from = typeof detail.from === "string" ? detail.from.toLowerCase() : "";
+  const how = r.reason === "taken_from_followups" ? "followups" : r.reason === "assigned" ? "reassigned" : null;
+  const to = String((how === "reassigned" ? detail.to : r.actor) || "").toLowerCase();
+  if (!how || !from || !owner || from === to || to !== owner.toLowerCase()) return null;
+  return { phone: String(r.phone), from, to, how, at: toIso(r.created_at) || "" };
+}
+
+export async function takenOverInfo(rows: { phone: string; assignedTo: string | null }[]): Promise<Map<string, TakenOver>> {
+  const out = new Map<string, TakenOver>();
+  const owned = rows.filter((r) => r.assignedTo);
+  if (!owned.length) return out;
+  const sql = await db();
+  const found = await sql`SELECT DISTINCT ON (phone) phone, reason, detail, actor, created_at FROM sms_audit
+    WHERE action = 'assigned' AND phone = ANY(string_to_array(${owned.map((r) => r.phone).join(",")}::text, ','))
+    ORDER BY phone, created_at DESC, id DESC`;
+  const ownerOf = new Map(owned.map((r) => [r.phone, r.assignedTo]));
+  for (const r of found) {
+    const hit = takenOverFrom(r, ownerOf.get(String(r.phone)) ?? null);
+    if (hit) out.set(hit.phone, hit);
+  }
+  return out;
+}
+
+/** The chats this person owns because they took them over (or a manager handed them over), newest first. */
+export async function chatsTakenOverBy(email: string): Promise<TakenOver[]> {
+  const sql = await db();
+  const rows = await sql`SELECT a.phone, a.reason, a.detail, a.actor, a.created_at, v.assigned_to
+    FROM sms_conversations v
+    JOIN LATERAL (
+      SELECT phone, reason, detail, actor, created_at FROM sms_audit
+      WHERE phone = v.phone AND action = 'assigned' ORDER BY created_at DESC, id DESC LIMIT 1
+    ) a ON true
+    WHERE lower(v.assigned_to) = ${email.toLowerCase()} AND coalesce(v.folder, 'active') NOT IN ('spam', 'test')
+    ORDER BY a.created_at DESC`;
+  return rows.map((r) => takenOverFrom(r, (r.assigned_to as string) ?? null)).filter((t): t is TakenOver => Boolean(t));
 }
 
 /** "First Last" for each phone that has a name (scoreboard lists). */

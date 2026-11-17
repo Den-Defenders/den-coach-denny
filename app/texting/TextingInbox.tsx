@@ -17,6 +17,8 @@ type Conversation = {
   handoffReason: string | null;
   assignedTo: string | null;
   assignedName: string | null;
+  /** "🔁 Taken from Liz C · Nov 16": the owner is covering someone else's customer (2026-11-16). */
+  takenFrom?: string | null;
   /** Session 7: auto-released from this owner (no reply in 1 team hour). */
   releasedName: string | null;
   /** Session 7 PR 3: the folder when it isn't the inbox (search results and folder views). */
@@ -77,6 +79,8 @@ type Thread = {
   leadStatus: string | null;
   assignedTo: string | null;
   assignedName: string | null;
+  /** "🔁 Taken from Liz C · Nov 16": the owner is covering someone else's customer (2026-11-16). */
+  takenFrom?: string | null;
   releasedName: string | null;
   releasedAt: string | null;
   /** "If nobody replies, this chat goes back to the shared queue at …" (owned chats with a customer waiting). */
@@ -245,8 +249,10 @@ export default function TextingInbox() {
   const [counts, setCounts] = useState<Partial<Record<View, number>>>({});
   /** Owners and managers see everyone's follow-ups. */
   const [seesEveryone, setSeesEveryone] = useState(false);
-  /** Follow-ups person filter (everyone can use it). */
+  /** Follow-ups person filter (owners/managers). */
   const [followUpPeople, setFollowUpPeople] = useState<{ email: string; name: string }[]>([]);
+  /** Follow-ups quick filters (2026-11-16): Mine = my due follow-ups, Took over = customers I'm covering. */
+  const [followUpCounts, setFollowUpCounts] = useState<{ mine: number; took: number }>({ mine: 0, took: 0 });
   /** "Revisit later…" picked in Move to: show the date choices. */
   const [revisitOpen, setRevisitOpen] = useState(false);
   const [revisitDay, setRevisitDay] = useState("");
@@ -301,6 +307,7 @@ export default function TextingInbox() {
       setCounts(json.counts || {});
       setSeesEveryone(Boolean(json.seesEveryone));
       setFollowUpPeople(json.followUpPeople || []);
+      setFollowUpCounts(json.followUpCounts || { mine: 0, took: 0 });
       setMe(json.me || null);
       setMyWaiting(json.myWaiting || null);
       setViewingAs(json.viewingAs || null);
@@ -487,7 +494,7 @@ export default function TextingInbox() {
     ...(seesEveryone ? [["scoreboard", "📊 Scoreboard"] as [View, string]] : []),
   ];
   const showScoreboard = view === "scoreboard" && seesEveryone;
-  const firstLater = view === "followups" ? visible.findIndex((c) => c.followUpReason === "scheduled") : -1;
+  const firstLater = view === "followups" && followOwner !== "took" ? visible.findIndex((c) => c.followUpReason === "scheduled") : -1;
   const needsCount = conversations.filter((c) => c.flag.needsCsr).length;
   const myNeeds = conversations.filter((c) => c.flag.needsCsr && me && c.assignedTo === me).length;
   const thread = data?.thread;
@@ -527,7 +534,7 @@ export default function TextingInbox() {
             className="inbox-search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, number or text"
+            placeholder="Search name, number, text or team member"
             aria-label="Search conversations"
           />
           <div className="inbox-filters inbox-folders" role="tablist" aria-label="Folder">
@@ -535,13 +542,24 @@ export default function TextingInbox() {
               <button key={key} role="tab" aria-selected={view === key} className={`inbox-filter${view === key ? " active" : ""}`} onClick={() => setView(key)}>{label}</button>
             ))}
           </div>
-          {view === "followups" && followUpPeople.length > 0 && (
-            <select className="inbox-owner-filter" aria-label="Whose follow-ups" value={followOwner} onChange={(e) => setFollowOwner(e.target.value)}>
+          {view === "followups" && (
+            <div className="inbox-filters" role="tablist" aria-label="Whose follow-ups">
+              {([["", "All"], [me || "", `Mine${followUpCounts.mine ? ` (${followUpCounts.mine})` : ""}`], ["took", `🔁 Took over${followUpCounts.took ? ` (${followUpCounts.took})` : ""}`]] as [string, string][])
+                .filter(([key], i) => i !== 1 || key)
+                .map(([key, label]) => (
+                  <button key={label} role="tab" aria-selected={followOwner === key} className={`inbox-filter${followOwner === key ? " active" : ""}`} onClick={() => setFollowOwner(key)}>{label}</button>
+                ))}
+            </div>
+          )}
+          {view === "followups" && seesEveryone && followUpPeople.length > 0 && (
+            <select className="inbox-owner-filter" aria-label="Whose follow-ups" value={followOwner === "took" ? "" : followOwner} onChange={(e) => setFollowOwner(e.target.value)}>
               <option value="">Everyone&apos;s follow-ups</option>
               {followUpPeople.map((m) => <option key={m.email} value={m.email}>{m.email === me ? `${m.name} (me)` : m.name}</option>)}
             </select>
           )}
-          {view === "followups" && <div className="team-hint inbox-folder-hint">Everyone&apos;s customers who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later. This is the one place you can take over someone else&apos;s customer.</div>}
+          {view === "followups" && <div className="team-hint inbox-folder-hint">{followOwner === "took"
+            ? "Customers you took over from someone else's follow-ups (or a manager handed you). Newest first."
+            : "Everyone's customers who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later. This is the one place you can take over someone else's customer. Tip: type a team member's name in the search to see their customers."}</div>}
           {view === "active" && <div className="inbox-filters" role="tablist" aria-label="Filter">
             {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["mine", `Mine${myNeeds ? ` (${myNeeds})` : ""}`], ["unassigned", "Unassigned"], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>
@@ -555,7 +573,7 @@ export default function TextingInbox() {
           {loaded && visible.length === 0 && (
             <li className="team-hint inbox-empty">{search ? "No conversations match that search." : view === "active" && filter === "needs" ? "Nobody is waiting for a person. 👍" : EMPTY_TEXT[view]}</li>
           )}
-          {view === "followups" && visible.length > 0 && firstLater !== 0 && <li className="inbox-section">Due now</li>}
+          {view === "followups" && followOwner !== "took" && visible.length > 0 && firstLater !== 0 && <li className="inbox-section">Due now</li>}
           {visible.map((c, index) => {
             const preview = c.lastBody || (c.lastMediaCount ? "📎 Photo" : "");
             const prefix = c.lastDirection === "outbound" ? `${senderLabel(c.lastSentBy)}: ` : "";
@@ -572,6 +590,7 @@ export default function TextingInbox() {
                     {c.flag.needsCsr && <span className={`inbox-badge ${c.flag.pinned ? "green" : "red"}`}>{c.flag.pinned ? c.flag.reason : `Needs CSR · ${c.flag.reason}`}</span>}
                     {c.flag.fyi && <span className="inbox-badge gray" title="No reply needed. It doesn't count as waiting and won't be released.">💬 {c.flag.fyi}</span>}
                     {c.assignedTo && <span className={`inbox-badge ${c.assignedTo === me ? "navy" : "gray"}`}>👤 {c.assignedTo === me ? "You" : c.assignedName}</span>}
+                    {c.takenFrom && <span className="inbox-badge purple">{c.takenFrom}</span>}
                     {!c.assignedTo && c.releasedName && <span className="inbox-badge amber">⏰ Released from {c.releasedName} (no reply in 1 hr)</span>}
                     {c.followUp && <span className="inbox-badge amber">{c.followUp}</span>}
                     {c.folderLabel && !c.followUp && <span className="inbox-badge gray">{c.folder === "revisit" && c.revisitAt ? `⏰ Follow up ${dayLabel(c.revisitAt)}` : c.folderLabel}</span>}
@@ -655,6 +674,7 @@ export default function TextingInbox() {
               {thread.assignedTo && (thread.assignedTo === data.me || data.canAssign) && (
                 <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("release")}>Release</button>
               )}
+              {thread.takenFrom && <span className="inbox-badge purple">{thread.takenFrom}</span>}
               {!thread.assignedTo && thread.releasedName && (
                 <span className="inbox-badge amber">⏰ Released from {thread.releasedName} (no reply in 1 hr){thread.releasedAt ? ` · ${longWhen(thread.releasedAt)}` : ""}</span>
               )}
