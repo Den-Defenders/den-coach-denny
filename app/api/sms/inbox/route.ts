@@ -38,6 +38,7 @@ import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox,
 import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
 import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
 import { placeForZip } from "@/lib/sms/place";
+import { handBackToAi } from "@/lib/sms/handback";
 import { callsFor } from "@/lib/sms/calls";
 import { listNumbers, type SmsNumber } from "@/lib/sms/markets";
 import { defaultSendingNumber } from "@/lib/sms/numbers";
@@ -79,7 +80,6 @@ import {
   type ChatFolder,
   markBookingDone,
   markHandoffHandled,
-  resumeBot,
   setContactName,
   smsDatabaseConfigured,
   takeOverConversation,
@@ -469,11 +469,13 @@ export async function POST(request: Request) {
         await audit({ phone, action: "bot_paused", reason: "person_took_over", actor: who });
         return json({ ok: true, message: `AI paused for ${formatPhone(phone)}. You're answering this customer.` });
       }
+      // "🤖 Hand back to AI" (Steven, 2026-11-18; replaces "Turn AI back on"): the AI answers
+      // again and the drip / AI follow-ups pick back up (lib/sms/handback.ts). The owner keeps the customer.
+      case "hand_back":
       case "resume_bot": {
-        if (thread.optOut) return json({ ok: false, message: "This customer opted out. The AI stays off." }, 422);
-        await resumeBot(phone);
-        await audit({ phone, action: "bot_resumed", reason: "inbox", actor: who });
-        return json({ ok: true, message: `AI replies are back on for ${formatPhone(phone)}. It answers their next text.` });
+        const result = await handBackToAi(phone, who, now, "button");
+        if (!result.ok) return json({ ok: false, message: result.message }, 422);
+        return json({ ok: true, message: result.message, autoTexts: result.autoTexts, nextAt: result.nextAt });
       }
       case "mark_handled": {
         await markHandoffHandled(phone, who, now);
@@ -555,7 +557,10 @@ export async function POST(request: Request) {
         }
         const note = await addTeamNote(phone, kind, text, who, now);
         await audit({ phone, action: "note_added", reason: kind, detail: { noteId: note.id, followUp: followAt ? followAt.toISOString() : null }, actor: who });
-        const handBack = followAt ? await moveChat(phone, "revisit", who, now, { revisitAt: followAt, from: thread.folder }) : null;
+        // A follow-up date hands back to the AI (Follow up later); so does the "Hand back to AI" box (after a call).
+        const handBack = followAt
+          ? await moveChat(phone, "revisit", who, now, { revisitAt: followAt, from: thread.folder })
+          : body.handBack === true ? await handBackToAi(phone, who, now, "button") : null;
         const day = followAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(followAt) : "";
         return json({ ok: true, message: `${NOTE_LABELS[kind]} saved (only your team sees it).${followAt ? ` Follow up ${day}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups.` : ""}${claimed ? " This customer is yours now." : ""}${handBack?.ok ? ` ${handBack.message}` : ""}` });
       }
