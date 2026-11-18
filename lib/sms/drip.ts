@@ -416,9 +416,41 @@ export async function processDrip(phone: string, now: Date = smsNow()): Promise<
 }
 
 /**
- * Session 8 PR 2b: someone clicked "Stopped in Hatch". Start Denny's drip at the next text for
- * today (never the "+10 minutes" one, it would read oddly a day later). If the lead already
- * replied, the AI has them: the drip just ends, like any drip after a reply.
+ * Drip stops that a person's hand-back undoes (Steven, 2026-11-18): the drip stopped only
+ * because a CSR stepped in (texted / paused the AI) or filed the chat to "Follow up later"
+ * under the old rule. Everything else (replied, STOP, not interested, booked, spam,
+ * ServiceTitan, "Stop auto texts", blocked sends) stays stopped.
+ */
+export const RESUMABLE_DRIP_STOPS = ["a person took over", "filed to revisit later"];
+
+type ResumeRow = { id: unknown; drip_day1: unknown; drip_last_sent_at: unknown; time_zone: unknown; replied: unknown };
+
+/** Pick the drip back up at the next text still ahead (never the welcome or the +10 min text again). */
+async function resumeAtNextStep(phone: string, r: ResumeRow, fromStatus: "hatch_hold" | "stopped", by: string, now: Date, action: string): Promise<"started" | "done"> {
+  const sql = await smsDb();
+  const timeZone = safeTimeZone(String(r.time_zone || ""));
+  const day1 = String(r.drip_day1 || localYmd(now, timeZone));
+  const [y1, m1, d1] = day1.split("-").map(Number);
+  const [y2, m2, d2] = localYmd(now, timeZone).split("-").map(Number);
+  const dayNow = Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86_400_000) + 1;
+  const next = DRIP_STEPS.findIndex((s, i) => i >= 2 && s.day >= dayNow);
+  if (next < 0) {
+    await sql`UPDATE sms_conversations SET drip_status = 'done', drip_next_at = NULL, updated_at = now() WHERE id = ${r.id} AND drip_status = ${fromStatus}`;
+    await audit({ phone, action, reason: "drip already over", actor: by });
+    return "done";
+  }
+  const lastSent = r.drip_last_sent_at ? new Date(r.drip_last_sent_at as string) : now;
+  const due = dueTime(next, day1, lastSent, timeZone);
+  await sql`UPDATE sms_conversations SET drip_status = 'active', drip_step = ${next}, drip_next_at = ${due.toISOString()}::timestamptz,
+      drip_stop_reason = NULL, drip_stopped_at = NULL, drip_stopped_by = NULL, updated_at = now()
+    WHERE id = ${r.id} AND drip_status = ${fromStatus}`;
+  await audit({ phone, action, reason: `drip resumes at text ${next + 1}`, detail: { due: due.toISOString() }, actor: by });
+  return "started";
+}
+
+/**
+ * "Stopped in Hatch" (Session 8): Melanie stopped this lead in Hatch, so Denny's drip
+ * starts at the next text for today (or later).
  */
 export async function releaseHatchHold(phone: string, by: string, now: Date = smsNow()): Promise<"started" | "replied" | "done" | "not_on_hold"> {
   const sql = await smsDb();
@@ -433,23 +465,29 @@ export async function releaseHatchHold(phone: string, by: string, now: Date = sm
     await stopDrip(phone, "they replied (AI took over)", by, now);
     return "replied";
   }
-  const timeZone = safeTimeZone(String(r.time_zone || ""));
-  const day1 = String(r.drip_day1 || localYmd(now, timeZone));
-  const [y1, m1, d1] = day1.split("-").map(Number);
-  const [y2, m2, d2] = localYmd(now, timeZone).split("-").map(Number);
-  const dayNow = Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86_400_000) + 1;
-  const next = DRIP_STEPS.findIndex((s, i) => i >= 2 && s.day >= dayNow);
-  if (next < 0) {
-    await sql`UPDATE sms_conversations SET drip_status = 'done', drip_next_at = NULL, updated_at = now() WHERE id = ${r.id}`;
-    await audit({ phone, action: "hatch_hold_released", reason: "drip already over", actor: by });
-    return "done";
+  return resumeAtNextStep(phone, r as ResumeRow, "hatch_hold", by, now, "hatch_hold_released");
+}
+
+/**
+ * "Hand back to AI" (Steven, 2026-11-18): a never-replied lead whose drip stopped only
+ * because a CSR stepped in gets Melanie's drip back at the next text still ahead.
+ * If they replied since the drip started, the drip stays stopped as "they replied" and
+ * AI follow-ups take over. Returns what happened.
+ */
+export async function resumeStoppedDrip(phone: string, by: string, now: Date = smsNow()): Promise<"started" | "replied" | "done" | "not_resumable"> {
+  const sql = await smsDb();
+  const rows = await sql`SELECT v.id, v.drip_day1, v.drip_last_sent_at, v.drip_started_at, v.drip_stop_reason, c.time_zone,
+      EXISTS (SELECT 1 FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'inbound'
+        AND v.drip_started_at IS NOT NULL AND m.created_at > v.drip_started_at) AS replied
+    FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone
+    WHERE v.phone = ${phone} AND v.drip_status = 'stopped'`;
+  const r = rows[0];
+  if (!r || !RESUMABLE_DRIP_STOPS.includes(String(r.drip_stop_reason || "")) || !r.drip_day1) return "not_resumable";
+  if (r.replied === true) {
+    await sql`UPDATE sms_conversations SET drip_stop_reason = 'they replied (AI took over)', updated_at = now() WHERE id = ${r.id} AND drip_status = 'stopped'`;
+    return "replied";
   }
-  const lastSent = r.drip_last_sent_at ? new Date(r.drip_last_sent_at as string) : now;
-  const due = dueTime(next, day1, lastSent, timeZone);
-  await sql`UPDATE sms_conversations SET drip_status = 'active', drip_step = ${next}, drip_next_at = ${due.toISOString()}::timestamptz, updated_at = now()
-    WHERE id = ${r.id} AND drip_status = 'hatch_hold'`;
-  await audit({ phone, action: "hatch_hold_released", reason: `drip resumes at text ${next + 1}`, detail: { due: due.toISOString() }, actor: by });
-  return "started";
+  return resumeAtNextStep(phone, r as ResumeRow, "stopped", by, now, "drip_resumed");
 }
 
 // The welcome goes out right after Zapier gets its answer (tests run it inline).

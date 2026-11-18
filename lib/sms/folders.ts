@@ -9,7 +9,9 @@
  *   🚫 Not interested — said no but didn't text STOP. Lead status not_interested (AI follow-ups stop), no drip.
  *   ⏰ Follow up later — (folder "revisit") a CSR picks a date. There's no separate tab (Steven, 2026-11-13):
  *                        it sits in the Follow-ups tab under "Later" and moves up to "Due" on that date.
- *                        Filing it makes the chat yours if nobody owned it. No drip, no AI follow-ups.
+ *                        Filing it makes the chat yours if nobody owned it. It also hands the chat back
+ *                        to the AI (Steven, 2026-11-18): the drip / AI follow-ups keep running on their
+ *                        cadence, and the date is a call reminder for the CSR on top.
  *   🗑️ Spam           — hidden. AI off, no Slack alerts, no hold texts, no Needs CSR, nothing automatic.
  *                        Stays in Spam even if the number texts again.
  *   🧪 Test           — hidden from the inbox, but everything still works (AI, Slack, drip) for testing.
@@ -27,6 +29,7 @@
  * managers and owners see everyone's (and can reassign).
  */
 import { stopDrip } from "@/lib/sms/drip";
+import { handBackToAi, type HandBackResult } from "@/lib/sms/handback";
 import { teamMinutesBetween } from "@/lib/sms/ownership";
 import {
   audit,
@@ -51,12 +54,16 @@ export const FOLDER_LABELS: Record<ChatFolder, string> = {
 export const FOLLOW_UP_QUIET_MINUTES = 8 * 60;
 
 /** Move a chat to a folder, with what that folder means for automatic texts. */
-export async function moveChat(phone: string, folder: ChatFolder, by: string, at: Date, options: { revisitAt?: Date | null; from?: ChatFolder } = {}): Promise<void> {
+export async function moveChat(phone: string, folder: ChatFolder, by: string, at: Date, options: { revisitAt?: Date | null; from?: ChatFolder } = {}): Promise<HandBackResult | null> {
   const revisitAt = folder === "revisit" ? options.revisitAt ?? null : null;
   await setFolder(phone, folder, by, at, revisitAt);
-  if (folder === "booked" || folder === "revisit") {
-    await stopDrip(phone, folder === "booked" ? "booked" : "filed to revisit later", by, at);
+  let handBack: HandBackResult | null = null;
+  if (folder === "booked") {
+    await stopDrip(phone, "booked", by, at);
     await followUpsOff(phone);
+  } else if (folder === "revisit") {
+    // Steven, 2026-11-18: automation keeps going; the date is a call reminder on top.
+    handBack = await handBackToAi(phone, by, at, "follow_up_later");
   } else if (folder === "not_interested") {
     await setLeadStatus(phone, "not_interested", at);
     await stopDrip(phone, "not interested", by, at);
@@ -71,6 +78,7 @@ export async function moveChat(phone: string, folder: ChatFolder, by: string, at
     detail: { from: options.from ?? null, to: folder, revisitAt: revisitAt ? revisitAt.toISOString() : null },
     actor: by,
   });
+  return handBack;
 }
 
 /** Revisit presets in the "Move to…" menu. */

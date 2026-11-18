@@ -9,17 +9,23 @@
  *
  * Who gets them (all must be true):
  *   - a form lead (lead_at set) with form consent (the send helper checks)
- *   - the drip is done, or it stopped because they replied
+ *   - the drip is done, or it stopped because they replied, or because a CSR stepped in
+ *     and then handed the chat back to the AI (Steven, 2026-11-18)
+ *   - not in 📅 Booked, 🚫 Not interested or 🗑️ Spam ("⏰ Follow up later" keeps them
+ *     running: the CSR's date is a call reminder on top, Steven 2026-11-18)
  *   - the AI is on, no open "Needs CSR" flag, no open booking, not "not interested",
  *     not opted out, nobody clicked "Stop auto texts"
  *   - our text is the last one (they left us on read)
  * Cadence (days after our last text): 2, 3, 5, 14, 21, 4, 6, 14, 30, 45, 60, then every 60.
+ * A hand-back counts as our last touch (after a call there may be no text from us).
+ * The AI reads the team's notes (calls, voicemails) when it writes them.
  * Every text: ServiceTitan check, 9 AM - 5 PM their time, no holidays, caps,
  * through the ONE send helper (kind "automated", sent_by "denny-followup").
  * On/off: SMS_DRIP_ENABLED (same switch as the drip).
  */
 import { composeFollowUp } from "@/lib/sms/bot";
-import { bookingBlocksDrip, dripEnabled, intoWindow } from "@/lib/sms/drip";
+import { RESUMABLE_DRIP_STOPS, bookingBlocksDrip, dripEnabled, intoWindow } from "@/lib/sms/drip";
+import { notesForAi } from "@/lib/sms/notes";
 import { safeTimeZone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
 import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
@@ -39,6 +45,17 @@ export type FollowUpPlan =
 type Row = Record<string, unknown>;
 const d = (v: unknown) => (v == null ? null : new Date(v as string));
 
+/** Folders where no automatic text ever goes out. */
+export const NO_AUTO_TEXT_FOLDERS = ["booked", "not_interested", "spam"];
+
+/** The drip is over for this lead in a way that lets AI follow-ups run. */
+export function dripAllowsFollowUps(status: unknown, stopReason: unknown): boolean {
+  if (status === "done") return true;
+  if (status !== "stopped") return false;
+  const reason = String(stopReason || "");
+  return reason.startsWith("they replied") || RESUMABLE_DRIP_STOPS.includes(reason);
+}
+
 /** Why a conversation gets no follow-ups right now, or when the next one is due. */
 async function planFor(row: Row): Promise<FollowUpPlan> {
   if (row.followups_off === true) return { none: "Auto texts stopped for this customer" };
@@ -46,15 +63,19 @@ async function planFor(row: Row): Promise<FollowUpPlan> {
   if (row.opted_out === true) return { none: "Opted out" };
   if (row.bot_status === "paused") return { none: "A person is answering" };
   if (row.lead_status === "not_interested") return { none: "Not interested" };
+  if (NO_AUTO_TEXT_FOLDERS.includes(String(row.folder || ""))) return { none: `In ${row.folder === "booked" ? "📅 Booked" : row.folder === "spam" ? "🗑️ Spam" : "🚫 Not interested"}` };
   if (row.handoff_reason && !row.handoff_resolved_at) return { none: "Waiting on the team (Needs CSR)" };
   const leadAt = d(row.lead_at) as Date;
   if (bookingBlocksDrip(row.booking_request, row.booking_done_at, leadAt)) return { none: "Booking in progress" };
   const lastIn = d(row.last_in);
-  const lastOut = d(row.last_out);
+  // "Hand back to AI" after a call counts as our last touch (there may be no text from us after it).
+  const sentOut = d(row.last_out);
+  const handBack = d(row.ai_handback_at);
+  const lastOut = sentOut && handBack ? (handBack > sentOut ? handBack : sentOut) : sentOut || handBack;
   const neverReplied = !lastIn || lastIn < leadAt;
-  const dripDone = row.drip_status === "done";
-  const replied = row.drip_status === "stopped" && String(row.drip_stop_reason || "").startsWith("they replied");
-  if (!dripDone && !replied) return { none: row.drip_status === "active" ? "Drip still running" : "No drip" };
+  if (!dripAllowsFollowUps(row.drip_status, row.drip_stop_reason)) {
+    return { none: row.drip_status === "active" ? "Drip still running" : row.drip_status === "hatch_hold" ? "Waiting on Hatch" : "No drip" };
+  }
   if (!lastOut) return { none: "Nothing sent yet" };
   if (!neverReplied && lastIn && lastIn >= lastOut) return { none: "Their text is waiting for an answer" };
   const since = neverReplied ? leadAt : (lastIn as Date);
@@ -71,7 +92,7 @@ async function loadRows(where: { phone?: string; now?: Date; limit?: number }): 
   const sql = await smsDb();
   if (where.phone) {
     return sql`SELECT v.id, v.phone, v.lead_at, v.drip_status, v.drip_stop_reason, v.booking_request, v.booking_done_at,
-        v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, c.time_zone,
+        v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, v.folder, v.ai_handback_at, c.time_zone,
         EXISTS (SELECT 1 FROM sms_opt_outs o WHERE o.phone = v.phone) AS opted_out,
         (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'inbound') AS last_in,
         (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'outbound'
@@ -79,7 +100,7 @@ async function loadRows(where: { phone?: string; now?: Date; limit?: number }): 
       FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone WHERE v.phone = ${where.phone}`;
   }
   return sql`SELECT v.id, v.phone, v.lead_at, v.drip_status, v.drip_stop_reason, v.booking_request, v.booking_done_at,
-      v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, c.time_zone,
+      v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, v.folder, v.ai_handback_at, c.time_zone,
       EXISTS (SELECT 1 FROM sms_opt_outs o WHERE o.phone = v.phone) AS opted_out,
       (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'inbound') AS last_in,
       (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'outbound'
@@ -87,7 +108,9 @@ async function loadRows(where: { phone?: string; now?: Date; limit?: number }): 
     FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone
     WHERE v.lead_at IS NOT NULL AND v.followups_off = false AND v.bot_status = 'on'
       AND coalesce(v.lead_status, '') <> 'not_interested'
-      AND (v.drip_status = 'done' OR (v.drip_status = 'stopped' AND v.drip_stop_reason LIKE 'they replied%'))
+      AND coalesce(v.folder, 'active') NOT IN ('booked', 'not_interested', 'spam')
+      AND (v.drip_status = 'done' OR (v.drip_status = 'stopped'
+        AND (v.drip_stop_reason LIKE 'they replied%' OR v.drip_stop_reason = ANY(string_to_array(${RESUMABLE_DRIP_STOPS.join("|")}::text, '|')))))
       AND (v.followup_lock_until IS NULL OR v.followup_lock_until <= ${(where.now || smsNow()).toISOString()}::timestamptz)
     ORDER BY v.updated_at LIMIT ${Math.min(where.limit ?? 200, 500)}`;
 }
@@ -147,10 +170,11 @@ export async function processFollowUp(row: Row, now: Date): Promise<FollowUpOutc
 
   const state = await conversationState(phone);
   const thread = await threadForBot(phone, 40);
+  const teamNotes = await notesForAi(phone);
   const daysSinceLast = Math.max(1, Math.round((now.getTime() - plan.lastOutAt.getTime()) / DAY));
   let written: { text: string; model: string } | null = null;
   for (let attempt = 0; attempt < 2 && !written; attempt++) {
-    written = await composeFollowUp({ thread, notes: state.customerNotes, now, number: plan.number, daysSinceLast, neverReplied: plan.neverReplied });
+    written = await composeFollowUp({ thread, notes: state.customerNotes, now, number: plan.number, daysSinceLast, neverReplied: plan.neverReplied, teamNotes });
   }
   if (!written) {
     await audit({ phone, action: "followup_skipped", reason: "no safe text from the AI", detail: { number: plan.number }, actor: FOLLOWUP_SENDER });
