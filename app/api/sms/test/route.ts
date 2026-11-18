@@ -117,10 +117,13 @@ export async function POST(request: Request) {
   if (body.action === "reset_lead_test") {
     const phone = normalizePhone(String(body.phone || ""));
     if (!phone) return NextResponse.json({ ok: false, message: "Invalid number." }, { status: 400, headers: NO_STORE });
-    // Only pilot test numbers (never a real lead once the list is "*").
+    // Only test numbers, never a real lead: the pilot list while it isn't "*", plus (Session 8)
+    // SMS_TEST_PHONES = staff test phones, comma-separated, so tests still work after go-live.
     const allowed = allowList();
-    if (allowed.everyone || !allowed.numbers.includes(phone)) {
-      return NextResponse.json({ ok: false, message: "Only numbers on the pilot test list (SMS_ALLOWED_TO) can be reset." }, { status: 400, headers: NO_STORE });
+    const testPhones = (process.env.SMS_TEST_PHONES || "").split(",").map((p) => normalizePhone(p)).filter(Boolean);
+    const onPilotList = !allowed.everyone && allowed.numbers.includes(phone);
+    if (!onPilotList && !testPhones.includes(phone)) {
+      return NextResponse.json({ ok: false, message: "Only staff test phones (Vercel SMS_TEST_PHONES) can be reset." }, { status: 400, headers: NO_STORE });
     }
     try {
       const ok = await resetLeadForTest(phone, { skipServiceTitan: body.skipServiceTitan === true });
