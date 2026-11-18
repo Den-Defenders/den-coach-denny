@@ -31,6 +31,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Session 8: calls to our texting numbers. No login, but the route rejects any
+  // request without a valid X-Twilio-Signature (lib/sms/twilio.ts).
+  if (pathname === "/api/voice/inbound") {
+    return NextResponse.next();
+  }
+
   // Let Auth0 handle login, callback, and logout routes.
   const authResponse = await auth0.middleware(request);
 

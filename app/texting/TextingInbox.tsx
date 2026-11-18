@@ -70,6 +70,8 @@ type Thread = {
   phoneLabel: string;
   /** Session 8: which of our numbers this chat texts from. */
   texting?: { number: string; numberLabel: string; market: string; reason: string | null };
+  /** Session 8 PR 4: calls from this phone to our numbers (forwarded to ServiceTitan). */
+  calls?: { at: string; market: string; forwardedTo: string | null }[];
   firstName: string | null;
   lastName: string | null;
   timeZone: string;
@@ -787,6 +789,17 @@ export default function TextingInbox() {
                     <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("stop_drip")}>Stop auto texts</button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {thread.calls && thread.calls.length > 0 && (
+              <div className="inbox-lead" aria-label="Calls">
+                <div className="inbox-lead-head"><b>📞 Called us</b></div>
+                {thread.calls.map((c) => (
+                  <div key={c.at} className="inbox-lead-drip">
+                    {longWhen(c.at)} · {c.market}{c.forwardedTo ? ` → rang ServiceTitan ${c.forwardedTo}` : ""}
+                  </div>
+                ))}
               </div>
             )}
 
