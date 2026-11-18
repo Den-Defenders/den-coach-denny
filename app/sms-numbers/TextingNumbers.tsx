@@ -198,7 +198,8 @@ export default function TextingNumbers() {
           </button>
         </div>
         <p className="team-hint" style={{ marginTop: 8 }}>
-          Buy the number in Twilio and add it to the Den Defenders Messaging Service first. &quot;Calls forward to&quot; is used once Denny answers the calls (next update).
+          Buy the number in Twilio and add it to the Den Defenders Messaging Service first. Calls to a number go to its &quot;Calls forward to&quot; line once the
+          number&apos;s Voice setting in Twilio points at <code>https://den-coach-denny.vercel.app/api/voice/inbound</code>. Changes here apply to the next call.
         </p>
       </section>
 

@@ -38,6 +38,7 @@ import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox,
 import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
 import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
 import { placeForZip } from "@/lib/sms/place";
+import { callsFor } from "@/lib/sms/calls";
 import { listNumbers, type SmsNumber } from "@/lib/sms/markets";
 import { defaultSendingNumber } from "@/lib/sms/numbers";
 import {
@@ -94,6 +95,15 @@ async function loadNumbers(): Promise<SmsNumber[]> {
     return await listNumbers();
   } catch (error) {
     console.error("SMS inbox numbers failed:", error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+async function recentCalls(phone: string): Promise<{ at: string; market: string; forwardedTo: string | null }[]> {
+  try {
+    const [calls, numbers] = await Promise.all([callsFor(phone), loadNumbers()]);
+    return calls.map((c) => ({ at: c.at, market: marketFor(c.ourNumber, numbers).market, forwardedTo: c.forwardedTo ? formatPhone(c.forwardedTo) : null }));
+  } catch (error) {
+    console.error("SMS inbox calls failed:", error instanceof Error ? error.message : error);
     return [];
   }
 }
@@ -269,6 +279,8 @@ export async function GET(request: Request) {
           phoneLabel: formatPhone(phone),
           // Session 8: "Texting from Chico · (530) 456-4834".
           texting: { ...marketFor(thread.ourNumber, await loadNumbers()), reason: thread.ourNumberReason },
+          // Session 8 PR 4: calls from this phone to our numbers (forwarded to ServiceTitan).
+          calls: await recentCalls(phone),
           folderLabel: FOLDER_LABELS[thread.folder],
           folderByName: thread.folderBy === "customer" ? "the customer's text" : nameFor(thread.folderBy, team),
           // Team notes (Steven, 2026-11-16): internal, shown between the texts.
