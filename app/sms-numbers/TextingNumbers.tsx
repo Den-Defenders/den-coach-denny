@@ -132,6 +132,7 @@ export default function TextingNumbers() {
         </p>
         <div className="hero-actions" style={{ marginTop: 10 }}>
           <a className="btn btn-outline" href="/sms-test">Back to the test page</a>
+          <a className="btn btn-outline" href="/sms-results">Lead results</a>
           <button className="btn btn-outline" onClick={() => void load()}>Refresh</button>
         </div>
         {error && <div className="notice" style={{ marginTop: 12 }}>{error}</div>}

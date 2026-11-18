@@ -273,7 +273,7 @@ export function parseLead(raw: Record<string, string>): ParsedLead {
 // ---------------------------------------------------------------------------
 
 let tablesReady: Promise<void> | null = null;
-async function leadsDb() {
+export async function leadsDb() {
   const sql = await smsDb();
   if (!tablesReady) {
     tablesReady = (async () => {

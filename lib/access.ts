@@ -221,6 +221,9 @@ const ROUTE_RULES: Rule[] = [
   { prefix: "/api/sms/test", roles: ["owner"] },
   // Session 8: Texting numbers page (our Twilio numbers + which ad sets use them): owners only.
   { prefix: "/sms-numbers", roles: ["owner"] },
+  // Lead results report (replies, calls, bookings by form choice / ad set): owners only.
+  { prefix: "/sms-results", roles: ["owner"] },
+  { prefix: "/api/sms/results", roles: ["owner"] },
   { prefix: "/api/sms/numbers", roles: ["owner"] },
   // Texting Simulator (pilot): owners only. Nothing is texted from it.
   { prefix: "/sms-sim", roles: ["owner"] },
