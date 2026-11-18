@@ -40,6 +40,7 @@ const HANDOFF_LABELS: Record<string, string> = {
   st_excluded: "ServiceTitan: no auto texts",
   st_csr_only: "ServiceTitan tag: a person answers",
   cap_reached: "Texting limit reached: a person replies",
+  in_hatch: "Was in Hatch: stop them in Hatch",
 };
 
 export function handoffLabel(reason: string | null): string {

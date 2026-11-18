@@ -22,6 +22,7 @@
  *   POST {action:"mark_booked", phone}  -> "Booked in ServiceTitan" (step 4a): clears the "📅 Ready to book"
  *                                          flag; an unowned customer becomes the booker's
  *   POST {action:"stop_drip", phone}    -> step 5 "Stop auto texts": no more drip texts or AI follow-ups, for good
+ *   POST {action:"hatch_stopped", phone} -> Session 8 PR 2b: "Stopped in Hatch": start Denny's drip held by the Hatch guard
  *   POST {action:"move", phone, folder, revisit?} -> Session 7 PR 3: file the chat (revisit = 2w | 1m | 3m | YYYY-MM-DD)
  *   POST {action:"add_note", phone, kind, body, followUp?} -> team note (never texted); followUp files it in Follow-ups → Later
  *   POST {action:"edit_note" | "delete_note", phone, noteId, body?} -> the author, or an owner/manager
@@ -30,7 +31,7 @@ import { NextResponse } from "next/server";
 import { canAccessTextingInbox, canUseTextingInbox, type DennyAccess } from "@/lib/access";
 import { getCurrentAccess } from "@/lib/currentAccess";
 import { bookingFrom, bookingLines, shortTimeWords } from "@/lib/sms/booking";
-import { dripLabel, stopDrip } from "@/lib/sms/drip";
+import { dripLabel, releaseHatchHold, stopDrip } from "@/lib/sms/drip";
 import { followUpLabel, followUpPlanFor, stopFollowUps } from "@/lib/sms/followup";
 import { stCheckSummary, type StCheck } from "@/lib/sms/stCheck";
 import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox, unansweredTexts } from "@/lib/sms/inbox";
@@ -269,7 +270,8 @@ export async function GET(request: Request) {
                 stCheck: thread.lead.stCheck ? stCheckSummary(thread.lead.stCheck as StCheck) : null,
                 followUp: followUp ? followUpLabel(followUp, thread.timeZone) : "",
                 followUpsOff: Boolean(followUp && "none" in followUp && followUp.none.startsWith("Auto texts stopped")),
-                canStop: thread.lead.drip.status === "active" || Boolean(followUp && !("none" in followUp)),
+                canStop: thread.lead.drip.status === "active" || thread.lead.drip.status === "hatch_hold" || Boolean(followUp && !("none" in followUp)),
+                onHatchHold: thread.lead.drip.status === "hatch_hold",
               }
             : null,
           handoffLabel: thread.handoffReason
@@ -405,6 +407,18 @@ export async function POST(request: Request) {
         const followUpsStopped = await stopFollowUps(phone, who);
         const any = dripStopped || followUpsStopped;
         return json({ ok: any, message: any ? "Auto texts stopped for this customer: no more drip texts or AI follow-ups." : "This customer has no auto texts running." });
+      }
+      case "hatch_stopped": {
+        const outcome = await releaseHatchHold(phone, who, now);
+        if (outcome === "not_on_hold") return json({ ok: false, message: "This customer's drip isn't waiting on Hatch." }, 409);
+        if (thread.handoffReason === "in_hatch") await markHandoffHandled(phone, who, now);
+        await audit({ phone, action: "hatch_stopped", reason: outcome, actor: who });
+        const message = outcome === "started"
+          ? "Thanks! Denny's drip is on for this customer now."
+          : outcome === "replied"
+            ? "Thanks! They already replied, so the AI has them (no drip needed)."
+            : "Thanks! Their drip window is already over, so no drip texts.";
+        return json({ ok: true, message });
       }
       case "take_over": {
         // Pausing the AI on an unowned chat makes it yours, so the cap applies here too.

@@ -21,12 +21,17 @@
  *   - $400 / financing steps are "marketing": skipped while
  *     SMS_PROMO_TEXTS_ENABLED is off.
  *   - On/off for everything: SMS_DRIP_ENABLED=true.
+ *   - Session 8 PR 2b (Hatch guard, lib/sms/hatchGuard.ts): a lead Hatch had in the last
+ *     60 days gets one "we switched" text instead of the welcome, then the drip waits
+ *     (drip_status 'hatch_hold') until someone clicks "Stopped in Hatch" in the inbox.
  */
 import { after } from "next/server";
 import { holidayName, localTime, safeTimeZone, withinSendingHours } from "@/lib/sms/rules";
 import { promoTextsEnabled, sendSms, smsNow, type SendPurpose } from "@/lib/sms/send";
 import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
 import { audit, findOptOut, setHandoff, smsDb } from "@/lib/sms/store";
+import { HATCH_GUARD_DAYS, HATCH_SWITCH_NOW, HATCH_SWITCH_TOMORROW, hatchActivity, hatchGuardEnabled } from "@/lib/sms/hatchGuard";
+import { postInHatchAlert } from "@/lib/sms/alerts";
 
 export const DRIP_SENDER = "drip";
 
@@ -251,12 +256,12 @@ async function loadDrip(phone: string): Promise<DripRow | null> {
   };
 }
 
-/** Stop a lead's drip for good. by = who/what stopped it. */
+/** Stop a lead's drip for good (also a drip waiting on "Stopped in Hatch"). by = who/what stopped it. */
 export async function stopDrip(phone: string, reason: string, by: string, at: Date = smsNow()): Promise<boolean> {
   const sql = await smsDb();
   const rows = await sql`UPDATE sms_conversations SET drip_status = 'stopped', drip_stop_reason = ${reason.slice(0, 120)},
       drip_stopped_at = ${at.toISOString()}::timestamptz, drip_stopped_by = ${by.slice(0, 120)}, drip_next_at = NULL, updated_at = now()
-    WHERE phone = ${phone} AND drip_status = 'active' RETURNING id`;
+    WHERE phone = ${phone} AND drip_status IN ('active', 'hatch_hold') RETURNING id`;
   if (rows.length) await audit({ phone, action: "drip_stopped", reason, actor: by });
   return rows.length > 0;
 }
@@ -282,7 +287,7 @@ async function retryLater(row: DripRow, at: Date) {
 }
 
 export type DripOutcome =
-  | "sent" | "skipped_promo" | "stopped" | "retry_later" | "not_due" | "busy" | "done" | "drip_off" | "not_active";
+  | "sent" | "skipped_promo" | "stopped" | "retry_later" | "not_due" | "busy" | "done" | "drip_off" | "not_active" | "hatch_hold";
 
 const RETRY_BLOCKS = new Set([
   "outside_hours", "holiday", "contact_hourly_cap", "contact_daily_cap", "automated_daily_cap", "system_daily_cap", "sending_disabled",
@@ -347,13 +352,43 @@ export async function processDrip(phone: string, now: Date = smsNow()): Promise<
     return "skipped_promo";
   }
 
+  // Session 8 PR 2b, Hatch guard: was this lead in Hatch in the last 60 days?
+  let inHatch: { lastAt: string | null; workspace: string | null } | null = null;
+  if (row.step === 0 && hatchGuardEnabled()) {
+    const hatch = await hatchActivity(phone, now);
+    if (!hatch.ok) {
+      // Never leave a new lead waiting: the normal welcome goes out.
+      await audit({ phone, action: "hatch_check_failed", reason: hatch.error, actor: DRIP_SENDER });
+    } else if (hatch.inHatch) {
+      inHatch = { lastAt: hatch.lastAt, workspace: hatch.workspace };
+    }
+  }
+
+  const welcomeText = inHatch
+    ? (localTime(now, row.timeZone).hour < CALL_NOW_UNTIL_HOUR ? HATCH_SWITCH_NOW : HATCH_SWITCH_TOMORROW)
+    : welcomeBody(now, row.timeZone);
   const result = await sendSms({
     to: phone,
-    body: renderDrip(row.step === 0 ? welcomeBody(now, row.timeZone) : step.body, row.firstName),
+    body: renderDrip(row.step === 0 ? welcomeText : step.body, row.firstName),
     kind,
     purpose: step.purpose,
     sentBy: DRIP_SENDER,
   });
+
+  if (result.ok && inHatch) {
+    const day1 = row.day1 || localYmd(now, row.timeZone);
+    await sql`UPDATE sms_conversations SET drip_status = 'hatch_hold', drip_step = 1, drip_next_at = NULL,
+        drip_day1 = ${day1}, drip_last_sent_at = ${now.toISOString()}::timestamptz, updated_at = now()
+      WHERE id = ${row.id}`;
+    const when = inHatch.lastAt ? new Date(inHatch.lastAt).toLocaleDateString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric" }) : "recently";
+    const where = inHatch.workspace ? ` (${inHatch.workspace})` : "";
+    await setHandoff(phone, "in_hatch",
+      `Hatch had this lead in the last ${HATCH_GUARD_DAYS} days (last activity ${when}${where}), so Denny sent the "we switched" text instead of the welcome and is holding its drip. Stop them in Hatch, then click "Stopped in Hatch" to start Denny's drip.`,
+      now, { keepAi: true });
+    await audit({ phone, action: "hatch_hold", reason: "in_hatch", detail: { lastAt: inHatch.lastAt, workspace: inHatch.workspace, messageId: result.messageId }, actor: DRIP_SENDER });
+    await postInHatchAlert(phone, inHatch.lastAt, inHatch.workspace);
+    return "hatch_hold";
+  }
 
   if (result.ok) {
     const day1 = row.day1 || localYmd(now, row.timeZone);
@@ -378,6 +413,43 @@ export async function processDrip(phone: string, now: Date = smsNow()): Promise<
   // opted out, no consent, not on the pilot list, Twilio refused…: stop.
   await stopDrip(phone, `send blocked: ${result.reason}`, "system", now);
   return "stopped";
+}
+
+/**
+ * Session 8 PR 2b: someone clicked "Stopped in Hatch". Start Denny's drip at the next text for
+ * today (never the "+10 minutes" one, it would read oddly a day later). If the lead already
+ * replied, the AI has them: the drip just ends, like any drip after a reply.
+ */
+export async function releaseHatchHold(phone: string, by: string, now: Date = smsNow()): Promise<"started" | "replied" | "done" | "not_on_hold"> {
+  const sql = await smsDb();
+  const rows = await sql`SELECT v.id, v.drip_day1, v.drip_last_sent_at, v.drip_started_at, c.time_zone,
+      EXISTS (SELECT 1 FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'inbound'
+        AND v.drip_started_at IS NOT NULL AND m.created_at > v.drip_started_at) AS replied
+    FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone
+    WHERE v.phone = ${phone} AND v.drip_status = 'hatch_hold'`;
+  const r = rows[0];
+  if (!r) return "not_on_hold";
+  if (r.replied === true) {
+    await stopDrip(phone, "they replied (AI took over)", by, now);
+    return "replied";
+  }
+  const timeZone = safeTimeZone(String(r.time_zone || ""));
+  const day1 = String(r.drip_day1 || localYmd(now, timeZone));
+  const [y1, m1, d1] = day1.split("-").map(Number);
+  const [y2, m2, d2] = localYmd(now, timeZone).split("-").map(Number);
+  const dayNow = Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86_400_000) + 1;
+  const next = DRIP_STEPS.findIndex((s, i) => i >= 2 && s.day >= dayNow);
+  if (next < 0) {
+    await sql`UPDATE sms_conversations SET drip_status = 'done', drip_next_at = NULL, updated_at = now() WHERE id = ${r.id}`;
+    await audit({ phone, action: "hatch_hold_released", reason: "drip already over", actor: by });
+    return "done";
+  }
+  const lastSent = r.drip_last_sent_at ? new Date(r.drip_last_sent_at as string) : now;
+  const due = dueTime(next, day1, lastSent, timeZone);
+  await sql`UPDATE sms_conversations SET drip_status = 'active', drip_step = ${next}, drip_next_at = ${due.toISOString()}::timestamptz, updated_at = now()
+    WHERE id = ${r.id} AND drip_status = 'hatch_hold'`;
+  await audit({ phone, action: "hatch_hold_released", reason: `drip resumes at text ${next + 1}`, detail: { due: due.toISOString() }, actor: by });
+  return "started";
 }
 
 // The welcome goes out right after Zapier gets its answer (tests run it inline).
@@ -433,6 +505,7 @@ export function dripLabel(d: { status: string | null; step: number | null; nextA
   if (d.status === "done") return `Drip finished (all ${total} texts)`;
   if (d.status === "stopped") return `Drip stopped: ${d.stopReason || "stopped"}`;
   if (d.status === "off") return `No drip: ${d.stopReason || "drip was off"}`;
+  if (d.status === "hatch_hold") return "Drip on hold: they were in Hatch. Stop them in Hatch, then click Stopped in Hatch.";
   const step = (d.step ?? 0) + 1;
   const when = d.nextAt
     ? new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(d.nextAt))

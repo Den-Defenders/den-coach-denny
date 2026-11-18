@@ -8,7 +8,8 @@
 import { bookingLines, type BookingRequest } from "@/lib/sms/booking";
 import { formatPhone } from "@/lib/sms/rules";
 import { allowList } from "@/lib/sms/send";
-import { conversationAssignee } from "@/lib/sms/store";
+import { conversationAssignee, ensureContact } from "@/lib/sms/store";
+import { numberName } from "@/lib/sms/markets";
 import { latestNoteLine } from "@/lib/sms/notes";
 import { findTeamMember, teamDatabaseConfigured } from "@/lib/teamStore";
 
@@ -164,5 +165,43 @@ export async function postAutoReleaseAlert(phone: string, ownerName: string, cus
     await noteLineFor(phone),
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
   ].filter(Boolean).join("\n");
+  return postSmsSlack(text);
+}
+
+/** Session 8 PR 2b: who stops "was in Hatch" leads in Hatch (Steven, 2026-11-17: Melanie). */
+export function hatchContactEmail(): string {
+  return (process.env.SMS_HATCH_ALERT_EMAIL || "mfreeman@dendefenders.com").trim().toLowerCase();
+}
+
+/**
+ * Session 8 PR 2b (Hatch guard): a new lead was already in Hatch, so Denny sent the "we switched"
+ * text and is holding its drip. Tags Melanie (Slack member ID on the Team page) to stop them in Hatch.
+ */
+export async function postInHatchAlert(phone: string, lastAt: string | null, workspace: string | null): Promise<void> {
+  if (!slackAlertsEnabled()) return;
+  let mention = "";
+  try {
+    if (teamDatabaseConfigured()) {
+      const member = await findTeamMember(hatchContactEmail());
+      if (member?.active && member.slackMemberId) mention = `<@${member.slackMemberId}> `;
+    }
+  } catch {
+    // tag is best effort
+  }
+  let fromLine = "";
+  try {
+    const contact = await ensureContact(phone);
+    const name = await numberName(contact.ourNumber);
+    if (contact.ourNumber) fromLine = ` from ${name && name !== formatPhone(contact.ourNumber) ? `${name} ` : ""}${formatPhone(contact.ourNumber)}`;
+  } catch {
+    // number name is best effort
+  }
+  const when = lastAt ? new Date(lastAt).toLocaleDateString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric" }) : "recently";
+  const text = [
+    `${pilotTag()}${mention}:warning: *Texting: new lead was already in Hatch* - ${formatPhone(phone)}`,
+    `Hatch had them in the last 60 days (last activity ${when}${workspace ? `, ${workspace}` : ""}). Denny sent the "we switched" text${fromLine} and is holding its drip.`,
+    "Stop them in Hatch, then click *Stopped in Hatch* in the inbox to start Denny's drip.",
+    `<${inboxLink(phone)}|Open in the Texting inbox>`,
+  ].join("\n");
   return postSmsSlack(text);
 }

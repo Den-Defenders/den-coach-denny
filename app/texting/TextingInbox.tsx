@@ -105,6 +105,8 @@ type Thread = {
     followUp: string;
     followUpsOff: boolean;
     canStop: boolean;
+    /** Session 8 PR 2b: the drip waits until someone stops them in Hatch. */
+    onHatchHold?: boolean;
   } | null;
   optOut: { optedOutAt: string; source: string; keyword: string | null } | null;
   messages: Message[];
@@ -759,6 +761,9 @@ export default function TextingInbox() {
                 {thread.lead.stCheck && <div className="team-hint">{thread.lead.stCheck}</div>}
                 {thread.lead.canStop && (
                   <div className="inbox-booking-actions">
+                    {thread.lead.onHatchHold && (
+                      <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("hatch_stopped")}>Stopped in Hatch</button>
+                    )}
                     <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("stop_drip")}>Stop auto texts</button>
                   </div>
                 )}

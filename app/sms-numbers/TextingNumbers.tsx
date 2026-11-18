@@ -6,6 +6,7 @@ type NumberRow = { number: string; name: string; forwardTo: string; textingOn: b
 type AdSetRow = { words: string; number: string };
 type Pick = { number: string; name: string; matchedBy: string; reason: string; skipped: string[] };
 type RecentPick = { at: string; phoneLast4: string; number: string; reason: string; skipped: string[] };
+type HatchResult = { ok: true; inHatch: boolean; lastAt: string | null; workspace: string | null; contacts: number } | { ok: false; error: string };
 
 type Loaded = {
   numbers: { number: string; name: string; forwardTo: string | null; textingOn: boolean; zips: string[]; areaCodes: string[]; updatedAt: string | null; updatedBy: string | null }[];
@@ -13,6 +14,7 @@ type Loaded = {
   serviceNumbers: string[] | null;
   picks: RecentPick[];
   defaultNumber: string;
+  hatchGuard: { on: boolean; days: number };
 };
 
 function pretty(e164: string): string {
@@ -37,6 +39,9 @@ export default function TextingNumbers() {
   const [dirty, setDirty] = useState(false);
   const [test, setTest] = useState({ adSet: "", zip: "", phone: "" });
   const [pick, setPick] = useState<Pick | null>(null);
+  const [hatchPhone, setHatchPhone] = useState("");
+  const [hatch, setHatch] = useState<HatchResult | null>(null);
+  const [hatchBusy, setHatchBusy] = useState(false);
 
   const load = useCallback(async () => {
     setError("");
@@ -94,6 +99,19 @@ export default function TextingNumbers() {
     else setError(body?.error || "Check failed.");
   }
 
+  async function runHatchCheck() {
+    setHatch(null); setHatchBusy(true);
+    const res = await fetch("/api/sms/numbers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "hatch_check", phone: hatchPhone }),
+    });
+    const body = await res.json().catch(() => ({}));
+    setHatchBusy(false);
+    if (res.ok) setHatch(body.hatch);
+    else setError(body?.error || "Hatch check failed.");
+  }
+
   const service = data?.serviceNumbers ?? null;
   const savedNumbers = new Set((data?.numbers || []).map((n) => n.number));
   const options = numbers.filter((n) => savedNumbers.has(n.number));
@@ -102,7 +120,7 @@ export default function TextingNumbers() {
     <div className="team-page">
       <section className="surface team-form">
         <h2>How a new lead gets its number</h2>
-        <ol className="team-hint" style={{ margin: "0 0 8px 18px", padding: 0 }}>
+        <ol className="team-hint" style={{ margin: "0 0 8px 0", paddingLeft: 22, listStyle: "decimal" }}>
           <li><b>Ad set:</b> the ad set name from the Zap contains the words below (&quot;Chico&quot; matches &quot;Chico - Doors Nov&quot;).</li>
           <li><b>ZIP</b> from the form: an exact 5-digit ZIP first, then its first 3 digits.</li>
           <li><b>Their phone&apos;s area code.</b></li>
@@ -159,7 +177,7 @@ export default function TextingNumbers() {
                           <span>{isDefault ? "Always on" : n.textingOn ? "On" : "Off"}</span>
                         </label>
                       </td>
-                      <td><input value={n.forwardTo} placeholder="(916) 409-6367" onChange={(e) => editNumber(i, { forwardTo: e.target.value })} /></td>
+                      <td><input value={n.forwardTo} placeholder="Not set: calls go to (916) 409-6367" onChange={(e) => editNumber(i, { forwardTo: e.target.value })} /></td>
                       <td><textarea rows={2} value={n.zips} onChange={(e) => editNumber(i, { zips: e.target.value })} /></td>
                       <td><input value={n.areaCodes} onChange={(e) => editNumber(i, { areaCodes: e.target.value })} /></td>
                       <td className="team-actions">
@@ -239,6 +257,28 @@ export default function TextingNumbers() {
           <div className="notice" style={{ marginTop: 12 }}>
             <b>{pick.name} · {pretty(pick.number)}</b> ({MATCHED[pick.matchedBy] || pick.matchedBy}: {pick.reason})
             {pick.skipped.map((s) => <div key={s}>Skipped: {s}</div>)}
+          </div>
+        )}
+      </section>
+
+      <section className="surface team-form">
+        <h2>Hatch guard</h2>
+        <p className="team-hint">
+          {data ? <b>{data.hatchGuard.on ? "ON" : "OFF (SMS_HATCH_GUARD)"}</b> : "…"}. A new lead Hatch had in the last {data?.hatchGuard.days ?? 60} days gets the
+          &quot;we switched&quot; text instead of the welcome, and Denny&apos;s drip waits until someone clicks <b>Stopped in Hatch</b> in the inbox.
+          The Hatch copy syncs about once a day.
+        </p>
+        <div className="team-grid" style={{ alignItems: "end" }}>
+          <label><span>Is this phone in Hatch?</span><input value={hatchPhone} placeholder="(209) 555-1234" onChange={(e) => setHatchPhone(e.target.value)} /></label>
+          <button className="btn btn-outline" disabled={hatchBusy || !hatchPhone.trim()} onClick={() => void runHatchCheck()}>{hatchBusy ? "Checking…" : "Check Hatch"}</button>
+        </div>
+        {hatch && (
+          <div className="notice" style={{ marginTop: 12 }}>
+            {!hatch.ok
+              ? <>⚠ Couldn&apos;t check Hatch: {hatch.error}. New leads get the normal welcome while this fails.</>
+              : hatch.inHatch
+                ? <>In Hatch: last activity {hatch.lastAt ? when(hatch.lastAt) : "recently"}{hatch.workspace ? ` (${hatch.workspace})` : ""}. A new lead from this phone would get the &quot;we switched&quot; text and wait for Stopped in Hatch.</>
+                : <>Not in Hatch in the last {data?.hatchGuard.days ?? 60} days{hatch.lastAt ? ` (last activity ${when(hatch.lastAt)})` : ""}. A new lead from this phone gets the normal welcome.</>}
           </div>
         )}
       </section>
