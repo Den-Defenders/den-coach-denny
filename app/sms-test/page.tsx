@@ -13,6 +13,7 @@ export default async function SmsTestPage() {
       <div className="hero-actions" style={{ marginBottom: 14 }}>
         <a className="btn btn-outline" href="/door-photos">Door photos for the bot</a>
         <a className="btn btn-outline" href="/sms-numbers">Texting numbers</a>
+        <a className="btn btn-outline" href="/sms-results">Lead results</a>
       </div>
       <SmsTester />
     </DenShell>
