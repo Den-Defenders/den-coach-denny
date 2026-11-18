@@ -661,6 +661,8 @@ export type InboxRow = {
   lastAt: string;
   /** The home's ZIP (2026-11-16, for "📍 City, ST" in the list): the AI-checked ZIP, else the form's. */
   zip: string | null;
+  /** Session 8: the number of ours this customer texts with (null = not set yet: the default number). */
+  ourNumber: string | null;
   /** The customer's texts since our last real reply and Mark handled ("" = a photo). Only when the newest text is theirs. */
   unanswered: string[];
 };
@@ -703,7 +705,7 @@ export async function listInboxConversations(options: {
   const owners = text && options.searchOwners?.length ? options.searchOwners.map((e) => e.toLowerCase()).join(",") : null;
   const rows = await sql`SELECT v.phone, v.bot_status, v.handoff_reason, v.handoff_summary, v.handoff_at, v.handoff_resolved_at,
       v.lead_status, v.assigned_to, v.released_from, v.released_at, v.booking_request, v.booking_done_at, v.lead_at, v.drip_status,
-      v.folder, v.revisit_at, v.folder_by,
+      v.folder, v.revisit_at, v.folder_by, v.our_number,
       c.first_name, c.last_name, (o.phone IS NOT NULL) AS opted_out,
       m.direction AS last_direction, m.body AS last_body, m.media AS last_media, m.sent_by AS last_sent_by,
       m.status AS last_status, m.created_at AS last_at,
@@ -771,6 +773,7 @@ export async function listInboxConversations(options: {
     lastStatus: String(r.last_status || ""),
     lastAt: toIso(r.last_at) || toIso(r.lead_at) || "",
     zip: [r.note_zip, r.note_form_zip, r.lead_zip].map((v) => /\b(\d{5})\b/.exec(String(v ?? ""))?.[1]).find(Boolean) ?? null,
+    ourNumber: r.our_number ? String(r.our_number) : null,
     unanswered: Array.isArray(r.unanswered) ? (r.unanswered as unknown[]).map((t) => String(t ?? "")) : [],
   }));
 }
@@ -812,6 +815,9 @@ export type InboxThread = {
   bookingDoneAt: string | null;
   bookingDoneBy: string | null;
   customerNotes: Record<string, string>;
+  /** Session 8: the number of ours this customer texts with, and why (null = default number). */
+  ourNumber: string | null;
+  ourNumberReason: string | null;
   optOut: OptOut | null;
   consent: ConsentType[];
   /** Step 5: the newest lead form and the drip. */
@@ -842,6 +848,7 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
       v.handoff_resolved_by, v.lead_status, v.assigned_to, v.assigned_at, v.released_from, v.released_at, v.folder, v.folder_at, v.folder_by, v.revisit_at, v.booking_request, v.booking_done_at, v.booking_done_by,
       v.customer_notes, v.lead_at, v.lead_count, v.lead_info, v.drip_status, v.drip_step, v.drip_next_at, v.drip_started_at,
       v.drip_last_sent_at, v.drip_stop_reason, v.drip_stopped_at, v.drip_stopped_by, v.st_check, v.st_checked_at,
+      v.our_number, v.our_number_reason,
       c.first_name, c.last_name, c.time_zone
     FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone WHERE v.phone = ${phone}`;
   if (!rows.length) return null;
@@ -873,6 +880,8 @@ export async function inboxThread(phone: string, limit = 200): Promise<InboxThre
     bookingDoneAt: toIso(v.booking_done_at),
     bookingDoneBy: (v.booking_done_by as string) ?? null,
     customerNotes: notesFrom(v.customer_notes),
+    ourNumber: v.our_number ? String(v.our_number) : null,
+    ourNumberReason: (v.our_number_reason as string) ?? null,
     optOut: await findOptOut(phone),
     consent: await activeConsentTypes(phone),
     lead: {

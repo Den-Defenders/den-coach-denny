@@ -11,6 +11,8 @@ type Conversation = {
   phoneLabel: string;
   /** "Roseville, CA" from the ZIP on the card (2026-11-16). */
   place: string | null;
+  /** Session 8: the market (our number) this customer texts with, e.g. "Chico". */
+  market?: string;
   firstName: string | null;
   lastName: string | null;
   botStatus: "on" | "paused";
@@ -66,6 +68,8 @@ type Message = {
 type Thread = {
   phone: string;
   phoneLabel: string;
+  /** Session 8: which of our numbers this chat texts from. */
+  texting?: { number: string; numberLabel: string; market: string; reason: string | null };
   firstName: string | null;
   lastName: string | null;
   timeZone: string;
@@ -246,6 +250,9 @@ export default function TextingInbox() {
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  /** Session 8: show one market only ("" = all). */
+  const [market, setMarket] = useState("");
+  const [markets, setMarkets] = useState<string[]>([]);
   const [view, setView] = useState<View>("active");
   const [followOwner, setFollowOwner] = useState("");
   const [counts, setCounts] = useState<Partial<Record<View, number>>>({});
@@ -310,6 +317,7 @@ export default function TextingInbox() {
       setSeesEveryone(Boolean(json.seesEveryone));
       setFollowUpPeople(json.followUpPeople || []);
       setFollowUpCounts(json.followUpCounts || { mine: 0, took: 0 });
+      setMarkets(Array.isArray(json.markets) ? json.markets : []);
       setMe(json.me || null);
       setMyWaiting(json.myWaiting || null);
       setViewingAs(json.viewingAs || null);
@@ -485,7 +493,8 @@ export default function TextingInbox() {
   }
 
   // The usual filters work in the inbox; folder views show everything in the folder.
-  const visible = view === "active" ? conversations.filter((c) => matchesFilter(c, filter, me)) : conversations;
+  const visible = (view === "active" ? conversations.filter((c) => matchesFilter(c, filter, me)) : conversations)
+    .filter((c) => !market || c.market === market);
   const viewTabs: [View, string][] = [
     ["active", "💬 Inbox"],
     ["followups", `📋 Follow-ups${counts.followups ? ` (${counts.followups})` : ""}`],
@@ -539,6 +548,12 @@ export default function TextingInbox() {
             placeholder="Search name, number, text or team member"
             aria-label="Search conversations"
           />
+          {markets.length > 1 && (
+            <select className="inbox-owner-filter" aria-label="Market" value={market} onChange={(e) => setMarket(e.target.value)}>
+              <option value="">📱 All markets</option>
+              {markets.map((m) => <option key={m} value={m}>📱 {m}</option>)}
+            </select>
+          )}
           <div className="inbox-filters inbox-folders" role="tablist" aria-label="Folder">
             {viewTabs.map(([key, label]) => (
               <button key={key} role="tab" aria-selected={view === key} className={`inbox-filter${view === key ? " active" : ""}`} onClick={() => setView(key)}>{label}</button>
@@ -587,7 +602,7 @@ export default function TextingInbox() {
                     <strong>{displayName(c)}</strong>
                     <span className="inbox-when">{shortWhen(c.lastAt, now)}</span>
                   </span>
-                  {c.place && <span className="inbox-place">📍 {c.place}</span>}
+                  {(c.place || c.market) && <span className="inbox-place">{c.place ? `📍 ${c.place}` : ""}{c.place && c.market ? " · " : ""}{c.market ? `📱 ${c.market}` : ""}</span>}
                   <span className="inbox-badges">
                     {c.flag.needsCsr && <span className={`inbox-badge ${c.flag.pinned ? "green" : "red"}`}>{c.flag.pinned ? c.flag.reason : `Needs CSR · ${c.flag.reason}`}</span>}
                     {c.flag.fyi && <span className="inbox-badge gray" title="No reply needed. It doesn't count as waiting and won't be released.">💬 {c.flag.fyi}</span>}
@@ -696,6 +711,11 @@ export default function TextingInbox() {
                 : thread.botStatus === "paused" ? <span className="inbox-badge amber">AI paused: a person answers this customer</span>
                   : <span className="inbox-badge teal">AI is answering this customer</span>}
               {thread.leadStatus && <span className="inbox-badge gray">{thread.leadStatus.replace(/_/g, " ")}</span>}
+              {thread.texting && (
+                <span className="inbox-badge gray" title={thread.texting.reason ? `Why this number: ${thread.texting.reason}` : undefined}>
+                  📱 Texting from {thread.texting.market !== thread.texting.numberLabel ? `${thread.texting.market} · ` : ""}{thread.texting.numberLabel}
+                </span>
+              )}
               {thread.folder !== "active" && (
                 <span className="inbox-badge gray">
                   {thread.folder === "revisit" && thread.revisitAt ? `⏰ Follow up on ${dayLabel(thread.revisitAt)}` : `In ${thread.folderLabel}`}
@@ -849,6 +869,7 @@ export default function TextingInbox() {
               <div className="inbox-reply-bar">
                 <span className={`team-hint${tooLong ? " inbox-too-long" : ""}`}>
                   {draft.trim().length}/{MAX_CHARS} · {segments(draft.trim())} segment{segments(draft.trim()) === 1 ? "" : "s"} (≈ {(segments(draft.trim()) * 1.2).toFixed(1)}¢)
+                  {thread.texting ? ` · sends from ${thread.texting.numberLabel}` : ""}
                   {thread.botStatus === "on" && !thread.optOut ? " · sending pauses the AI for this customer" : ""}
                   {!thread.assignedTo && !thread.optOut ? " · replying makes this customer yours" : ""}
                 </span>
