@@ -32,7 +32,7 @@ import salesZipDirectory from "@/app/lib/salesZipDirectory.json";
 import { COMPANY_FACTS, NV_ASK_TEAM_CITIES, NV_SERVED_CITIES } from "@/lib/ai/companyFacts";
 import { CUSTOMER_POLICY_VERSION } from "@/lib/ai/customerPolicy";
 import { DOOR_PHOTO_CATEGORIES, doorPhotoName, isCategory, pickDoorPhotos } from "@/lib/doorPhotos";
-import { inboxLink, noteLineFor, ownerMention, pilotTag, postReadyToBookAlert, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
+import { inboxLink, marketTag, noteLineFor, ownerMention, pilotTag, postReadyToBookAlert, postSmsSlack, slackAlertsEnabled } from "@/lib/sms/alerts";
 import {
   CHECKING_TEXT,
   BACK_DOOR_QUESTION,
@@ -628,7 +628,7 @@ export async function postHandoffToSlack(phone: string, reason: string, summary:
   const mention = (await ownerMention(phone)) || (reason === "wants_call" ? "<!here> " : "");
   const head = reason === "wants_call" ? ":telephone_receiver: *Texting: Wants a call*" : ":raising_hand: *Texting: Needs CSR*";
   const text = [
-    `${pilotTag()}${mention}${head} - ${formatPhone(phone)}`,
+    `${pilotTag()}${await marketTag(phone)}${mention}${head} - ${formatPhone(phone)}`,
     `Reason: ${reason.replace(/_/g, " ")}`,
     summary,
     notesLine(notes),

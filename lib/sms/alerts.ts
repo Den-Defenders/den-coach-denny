@@ -10,6 +10,7 @@ import { formatPhone } from "@/lib/sms/rules";
 import { allowList } from "@/lib/sms/send";
 import { conversationAssignee, ensureContact } from "@/lib/sms/store";
 import { numberName } from "@/lib/sms/markets";
+import { defaultSendingNumber } from "@/lib/sms/numbers";
 import { latestNoteLine } from "@/lib/sms/notes";
 import { findTeamMember, teamDatabaseConfigured } from "@/lib/teamStore";
 
@@ -50,6 +51,21 @@ export function slackAlertsEnabled(): boolean {
 /** "[PILOT] " while the allow-list is on, so test alerts aren't mistaken for real leads. */
 export function pilotTag(): string {
   return allowList().everyone ? "" : "[PILOT] ";
+}
+
+/**
+ * Session 8: "[Chico] " = the market (our number) this customer texts with, so every alert names it.
+ * Uses the default number's name for chats without a number yet. Best effort: "" on any problem.
+ */
+export async function marketTag(phone: string): Promise<string> {
+  try {
+    const contact = await ensureContact(phone);
+    const name = await numberName(contact.ourNumber || defaultSendingNumber());
+    return name ? `[${name}] ` : "";
+  } catch (error) {
+    console.error("SMS market tag failed:", error instanceof Error ? error.message : error);
+    return "";
+  }
 }
 
 /**
@@ -96,13 +112,13 @@ export async function postCustomerWaitingAlert(phone: string, body: string, phot
   const mention = await ownerMention(phone);
   const text = opts.noReplyNeeded
     ? [
-        `${pilotTag()}${mention}:speech_balloon: *Texting: customer said "${preview}"* - ${formatPhone(phone)}`,
+        `${pilotTag()}${await marketTag(phone)}${mention}:speech_balloon: *Texting: customer said "${preview}"* - ${formatPhone(phone)}`,
         "No reply needed, so this doesn't start the 1-hour release. Reply if you want to.",
         await noteLineFor(phone),
         `<${inboxLink(phone)}|Open in the Texting inbox>`,
       ]
     : [
-        `${pilotTag()}${mention}:speech_balloon: *Texting: customer is waiting for a person* - ${formatPhone(phone)}`,
+        `${pilotTag()}${await marketTag(phone)}${mention}:speech_balloon: *Texting: customer is waiting for a person* - ${formatPhone(phone)}`,
         preview ? `"${preview}"${photos ? ` (+${photos} photo${photos === 1 ? "" : "s"})` : ""}` : photos ? `(${photos} photo${photos === 1 ? "" : "s"})` : "",
         "The AI is paused for this number, so nobody answers until someone replies.",
         await noteLineFor(phone),
@@ -125,7 +141,7 @@ export async function postReadyToBookAlert(phone: string, booking: BookingReques
     return at > 0 && at < 20 ? `*${line.slice(0, at)}:* ${line.slice(at + 2)}` : line;
   });
   const text = [
-    `${pilotTag()}${mention}:calendar: *Texting: Ready to book* - ${formatPhone(phone)}`,
+    `${pilotTag()}${await marketTag(phone)}${mention}:calendar: *Texting: Ready to book* - ${formatPhone(phone)}`,
     ...lines,
     "Book it in ServiceTitan, then click *Booked in ServiceTitan* in the inbox.",
     await noteLineFor(phone),
@@ -143,7 +159,7 @@ export async function postBookedCustomerTextedAlert(phone: string, body: string,
   const preview = body.replace(/\s+/g, " ").trim().slice(0, 200);
   const mention = await ownerMention(phone);
   const text = [
-    `${pilotTag()}${mention}:calendar: *Texting: a booked customer texted* - ${formatPhone(phone)}`,
+    `${pilotTag()}${await marketTag(phone)}${mention}:calendar: *Texting: a booked customer texted* - ${formatPhone(phone)}`,
     preview ? `"${preview}"${photos ? ` (+${photos} photo${photos === 1 ? "" : "s"})` : ""}` : photos ? `(${photos} photo${photos === 1 ? "" : "s"})` : "",
     "The AI is answering. The chat stays in Booked, so take a look if they need a person.",
     await noteLineFor(phone),
@@ -161,7 +177,7 @@ export async function postAutoReleaseAlert(phone: string, ownerName: string, cus
   const who = customerName ? `${customerName} (${formatPhone(phone)})` : formatPhone(phone);
   const since = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", hour: "numeric", minute: "2-digit" }).format(waitingSince);
   const text = [
-    `${pilotTag()}<!here> :alarm_clock: *Released:* ${ownerName} didn't reply within 1 hour. ${who} is still waiting (since ${since}). Open for anyone.`,
+    `${pilotTag()}${await marketTag(phone)}<!here> :alarm_clock: *Released:* ${ownerName} didn't reply within 1 hour. ${who} is still waiting (since ${since}). Open for anyone.`,
     await noteLineFor(phone),
     `<${inboxLink(phone)}|Open in the Texting inbox>`,
   ].filter(Boolean).join("\n");
@@ -198,7 +214,7 @@ export async function postInHatchAlert(phone: string, lastAt: string | null, wor
   }
   const when = lastAt ? new Date(lastAt).toLocaleDateString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric" }) : "recently";
   const text = [
-    `${pilotTag()}${mention}:warning: *Texting: new lead was already in Hatch* - ${formatPhone(phone)}`,
+    `${pilotTag()}${await marketTag(phone)}${mention}:warning: *Texting: new lead was already in Hatch* - ${formatPhone(phone)}`,
     `Hatch had them in the last 60 days (last activity ${when}${workspace ? `, ${workspace}` : ""}). Denny sent the "we switched" text${fromLine} and is holding its drip.`,
     "Stop them in Hatch, then click *Stopped in Hatch* in the inbox to start Denny's drip.",
     `<${inboxLink(phone)}|Open in the Texting inbox>`,

@@ -38,6 +38,8 @@ import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox,
 import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
 import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
 import { placeForZip } from "@/lib/sms/place";
+import { listNumbers, type SmsNumber } from "@/lib/sms/markets";
+import { defaultSendingNumber } from "@/lib/sms/numbers";
 import {
   TEAM_CLOCK_TEXT,
   capMessage,
@@ -82,6 +84,24 @@ import {
   takeOverConversation,
 } from "@/lib/sms/store";
 import { listTeamMembers, normalizeEmail, teamDatabaseConfigured, type TeamMember } from "@/lib/teamStore";
+
+/**
+ * Session 8: the market a chat texts from ("Chico" for (530) 456-4834). A chat with no number yet
+ * uses the default number. Never fails the inbox: without the numbers table it shows the number only.
+ */
+async function loadNumbers(): Promise<SmsNumber[]> {
+  try {
+    return await listNumbers();
+  } catch (error) {
+    console.error("SMS inbox numbers failed:", error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+function marketFor(ourNumber: string | null, numbers: SmsNumber[]): { number: string; numberLabel: string; market: string } {
+  const number = ourNumber || defaultSendingNumber();
+  const found = numbers.find((n) => n.number === number);
+  return { number, numberLabel: formatPhone(number), market: found?.name || formatPhone(number) };
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -247,6 +267,8 @@ export async function GET(request: Request) {
             ? `Customer waiting since ${pacificWhen(plan.waitingSince)}. If nobody replies, this chat goes back to the shared queue ${plan.releaseAt.getTime() <= now.getTime() ? "within 5 minutes" : `at ${pacificWhen(plan.releaseAt)}`} (1 hour of team time, ${TEAM_CLOCK_TEXT}).`
             : null,
           phoneLabel: formatPhone(phone),
+          // Session 8: "Texting from Chico · (530) 456-4834".
+          texting: { ...marketFor(thread.ourNumber, await loadNumbers()), reason: thread.ourNumberReason },
           folderLabel: FOLDER_LABELS[thread.folder],
           folderByName: thread.folderBy === "customer" ? "the customer's text" : nameFor(thread.folderBy, team),
           // Team notes (Steven, 2026-11-16): internal, shown between the texts.
@@ -322,6 +344,7 @@ export async function GET(request: Request) {
     }
     const taken = await takenOverInfo(rows);
     const latestNotes = await latestTeamNotes(rows.map((r) => r.phone));
+    const ourNumbers = await loadNumbers();
     const mapped = rows.map((row) => {
       const booking = bookingFrom(row.bookingRequest);
       return {
@@ -335,6 +358,8 @@ export async function GET(request: Request) {
         phoneLabel: formatPhone(row.phone),
         // "Roseville, CA" from the ZIP on the card (Steven, 2026-11-16).
         place: placeForZip(row.zip),
+        // Session 8: which of our numbers (market) this customer texts with.
+        market: marketFor(row.ourNumber, ourNumbers).market,
         folderLabel: row.folder === "active" ? null : FOLDER_LABELS[row.folder],
         followUp: followUpByPhone.get(row.phone)?.label ?? null,
         followUpReason: followUpByPhone.get(row.phone)?.reason ?? null,
@@ -363,6 +388,8 @@ export async function GET(request: Request) {
       // The Follow-ups person filter (everyone).
       followUpPeople: team.map((m) => ({ email: m.email.toLowerCase(), name: m.displayName || m.email.split("@")[0] })),
       needsCsr: conversations.filter((c) => c.flag.needsCsr).length,
+      // Session 8: market filter choices (names on the Texting numbers page, in page order).
+      markets: [...new Set(ourNumbers.map((n) => n.name))],
       me: access.email,
       viewingAs,
       // "👁 View as": owners and managers can pick anyone on the inbox team.
