@@ -9,3 +9,9 @@ export async function canViewOwner(): Promise<boolean> {
   const access = await getCurrentAccess();
   return access?.role === "owner";
 }
+
+/** Texting setup & test page and Lead results: owners and managers (Steven, 2026-11-18). */
+export async function textingAdminRole(): Promise<"owner" | "manager" | null> {
+  const access = await getCurrentAccess();
+  return access?.role === "owner" || access?.role === "manager" ? access.role : null;
+}
