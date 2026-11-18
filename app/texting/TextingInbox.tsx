@@ -271,6 +271,8 @@ export default function TextingInbox() {
   const [noteKind, setNoteKind] = useState<NoteKind | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteFollow, setNoteFollow] = useState("");
+  /** "🤖 Hand back to AI after saving" (2026-11-18): on by default for the 📞 call buttons when the AI is paused. */
+  const [noteHandBack, setNoteHandBack] = useState(false);
   const [noteDay, setNoteDay] = useState("");
   const [editingNote, setEditingNote] = useState<{ id: number; body: string } | null>(null);
   const [deletingNote, setDeletingNote] = useState<number | null>(null);
@@ -449,11 +451,13 @@ export default function TextingInbox() {
   async function saveNote() {
     if (!noteKind || busy) return;
     const followUp = noteFollow === "date" ? noteDay : noteFollow ? isoDay(Number(noteFollow)) : "";
-    const result = await act("add_note", { kind: noteKind, body: noteDraft.trim(), followUp: followUp || undefined });
+    const handBack = !followUp && noteHandBack && thread?.botStatus === "paused";
+    const result = await act("add_note", { kind: noteKind, body: noteDraft.trim(), followUp: followUp || undefined, handBack: handBack || undefined });
     if (result?.ok) {
       setNoteKind(null);
       setNoteDraft("");
       setNoteFollow("");
+      setNoteHandBack(false);
     }
   }
 
@@ -662,7 +666,12 @@ export default function TextingInbox() {
               <div className="inbox-actions">
                 {(flag.needsCsr || flag.waiting) && <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("mark_handled")}>Mark handled</button>}
                 {!thread.optOut && thread.botStatus === "on" && <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("take_over")}>Pause AI (I&apos;ll answer)</button>}
-                {!thread.optOut && thread.botStatus === "paused" && <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("resume_bot")}>Turn AI back on</button>}
+                {!thread.optOut && thread.botStatus === "paused" && (
+                  <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("hand_back")}
+                    title="After your call, voicemail or text: the AI answers their next text and its drip / follow-ups pick back up. You stay the owner and get tagged if the AI flags them again.">
+                    🤖 Hand back to AI
+                  </button>
+                )}
                 <select aria-label="Move to folder" className="inbox-move" value="" disabled={busy} onChange={(e) => moveTo(e.target.value)}>
                   <option value="">Move to…</option>
                   {MOVE_OPTIONS.filter(([f]) => f !== thread.folder || f === "revisit").map(([f, label]) => <option key={f} value={f}>{label}</option>)}
@@ -678,6 +687,7 @@ export default function TextingInbox() {
                 <input type="date" aria-label="Revisit on" value={revisitDay} min={isoDay(0)} onChange={(e) => setRevisitDay(e.target.value)} />
                 <button className="btn btn-teal btn-small" disabled={busy || !revisitDay} onClick={() => saveRevisit(revisitDay)}>Save date</button>
                 <button className="inbox-link" onClick={() => setRevisitOpen(false)}>Cancel</button>
+                <span className="team-hint">The AI takes the chat back and keeps following up; the date is your call reminder.</span>
               </div>
             )}
 
@@ -894,7 +904,8 @@ export default function TextingInbox() {
             <div className="inbox-notes-box" aria-label="Team notes">
               <div className="inbox-note-buttons">
                 {NOTE_BUTTONS.map(([kind, label]) => (
-                  <button key={kind} className={`btn btn-outline btn-small${noteKind === kind ? " active" : ""}`} disabled={busy} onClick={() => setNoteKind(noteKind === kind ? null : kind)}>{label}</button>
+                  <button key={kind} className={`btn btn-outline btn-small${noteKind === kind ? " active" : ""}`} disabled={busy}
+                    onClick={() => { setNoteKind(noteKind === kind ? null : kind); setNoteHandBack(kind !== "note"); }}>{label}</button>
                 ))}
               </div>
               {noteKind && (
@@ -914,10 +925,17 @@ export default function TextingInbox() {
                       </select>
                     </label>
                     {noteFollow === "date" && <input type="date" aria-label="Follow up on" value={noteDay} min={isoDay(0)} onChange={(e) => setNoteDay(e.target.value)} />}
+                    {thread.botStatus === "paused" && !thread.optOut && !noteFollow && (
+                      <label className="inbox-note-handback">
+                        <input type="checkbox" checked={noteHandBack} onChange={(e) => setNoteHandBack(e.target.checked)} /> 🤖 Hand back to AI after saving
+                      </label>
+                    )}
                     <button className="btn btn-teal btn-small" disabled={busy || (noteKind === "note" && !noteDraft.trim()) || (noteFollow === "date" && !noteDay)} onClick={saveNote}>Save note</button>
                     <button className="inbox-link" onClick={() => { setNoteKind(null); setNoteDraft(""); setNoteFollow(""); }}>Cancel</button>
                   </div>
-                  <div className="team-hint">Only your team sees notes; they&apos;re never texted. {noteFollow ? "A follow-up date puts this chat in Follow-ups → Later until that day." : ""}</div>
+                  <div className="team-hint">Only your team sees notes; they&apos;re never texted. {noteFollow
+                    ? "A follow-up date hands the chat back to the AI (it keeps following up) and puts it in Follow-ups → Later as your call reminder for that day."
+                    : thread.botStatus === "paused" && noteHandBack ? "Saving hands the chat back to the AI: it answers their next text and its follow-ups pick back up." : ""}</div>
                 </div>
               )}
             </div>

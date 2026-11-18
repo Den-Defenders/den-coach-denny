@@ -564,6 +564,7 @@ a { color: inherit; }
 .inbox-note-form { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .inbox-note-form textarea { width: 100%; background: #fffcf0; }
 .inbox-note-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; }
+.inbox-note-handback { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
 .inbox-note-preview { display: block; font-size: 12px; color: #8a6d00; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
 .inbox-booking-note { margin: 6px 0; padding: 6px 8px; background: #fff6d6; border-radius: 8px; font-size: 14px; }
 
