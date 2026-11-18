@@ -217,13 +217,13 @@ const ROUTE_RULES: Rule[] = [
   { prefix: "/texting", roles: TEXTING_INBOX_ROLES },
   { prefix: "/api/sms/inbox", roles: TEXTING_INBOX_ROLES },
   // Texting test page (pilot): owners only.
-  { prefix: "/sms-test", roles: ["owner"] },
-  { prefix: "/api/sms/test", roles: ["owner"] },
+  { prefix: "/sms-test", roles: ["owner", "manager"] },
+  { prefix: "/api/sms/test", roles: ["owner", "manager"] },
   // Session 8: Texting numbers page (our Twilio numbers + which ad sets use them): owners only.
   { prefix: "/sms-numbers", roles: ["owner"] },
-  // Lead results report (replies, calls, bookings by form choice / ad set): owners only.
-  { prefix: "/sms-results", roles: ["owner"] },
-  { prefix: "/api/sms/results", roles: ["owner"] },
+  // Lead results report (replies, calls, bookings by form choice / ad set): owners + managers (Steven, 2026-11-18).
+  { prefix: "/sms-results", roles: ["owner", "manager"] },
+  { prefix: "/api/sms/results", roles: ["owner", "manager"] },
   { prefix: "/api/sms/numbers", roles: ["owner"] },
   // Texting Simulator (pilot): owners only. Nothing is texted from it.
   { prefix: "/sms-sim", roles: ["owner"] },

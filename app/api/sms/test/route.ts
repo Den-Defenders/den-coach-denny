@@ -33,9 +33,10 @@ export const maxDuration = 120;
 
 const NO_STORE = { "Cache-Control": "private, no-store" };
 
+/** Owners and managers (Steven, 2026-11-18). Name kept so the checks below read the same. */
 async function requireOwner() {
   const access = await getCurrentAccess();
-  return access?.role === "owner" ? access : null;
+  return access?.role === "owner" || access?.role === "manager" ? access : null;
 }
 
 function settings() {
@@ -92,7 +93,7 @@ async function goLive() {
 }
 
 export async function GET() {
-  if (!await requireOwner()) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
+  if (!await requireOwner()) return NextResponse.json({ error: "Owners and managers only." }, { status: 403, headers: NO_STORE });
   if (!smsDatabaseConfigured()) return NextResponse.json({ settings: settings(), messages: [], optOuts: [], audit: [], handoffs: [], leads: [] }, { headers: NO_STORE });
   try {
     const leads = await recentLeads(25).catch((error) => {
@@ -110,7 +111,7 @@ const TEST_KINDS: SendKind[] = ["manual", "reply", "automated"];
 
 export async function POST(request: Request) {
   const access = await requireOwner();
-  if (!access) return NextResponse.json({ error: "Owners only." }, { status: 403, headers: NO_STORE });
+  if (!access) return NextResponse.json({ error: "Owners and managers only." }, { status: 403, headers: NO_STORE });
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body) return NextResponse.json({ error: "Invalid request." }, { status: 400, headers: NO_STORE });
 

@@ -80,7 +80,8 @@ export default function LeadResults() {
           {[7, 30, 90].map((d) => (
             <button key={d} className={d === days ? "btn btn-teal" : "btn btn-outline"} onClick={() => setDays(d)}>Last {d} days</button>
           ))}
-          <a className="btn btn-outline" href="/sms-test">Back to the test page</a>
+          <a className="btn btn-outline" href="/texting">Back to Texting</a>
+          <a className="btn btn-outline" href="/sms-test">Texting setup &amp; test page</a>
         </div>
         {error && <div className="notice" style={{ marginTop: 12 }}>{error}</div>}
         {data && <p className="team-hint" style={{ marginTop: 8 }}>Since {new Date(data.since).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.</p>}
