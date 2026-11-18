@@ -1498,6 +1498,8 @@ export type FollowUpInput = {
   daysSinceLast: number;
   /** They never answered any text (the sheet drip ran out). */
   neverReplied: boolean;
+  /** The team's newest notes (calls, voicemails), oldest first. Context only (2026-11-18). */
+  teamNotes?: string[];
 };
 
 function followUpInstruction(input: FollowUpInput): string {
@@ -1525,6 +1527,7 @@ export async function composeFollowUp(input: FollowUpInput): Promise<{ text: str
     priceAlreadyGiven: priceAlreadyGiven(input.thread),
     inclusionsAlreadyGiven: inclusionsAlreadyGiven(input.thread),
     linksSent: linksSent(input.thread),
+    teamNotes: input.teamNotes?.length ? input.teamNotes : undefined,
   };
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: smsBotSystemPrompt(todayPacific(input.now), known) },

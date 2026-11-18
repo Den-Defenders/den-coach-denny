@@ -555,9 +555,9 @@ export async function POST(request: Request) {
         }
         const note = await addTeamNote(phone, kind, text, who, now);
         await audit({ phone, action: "note_added", reason: kind, detail: { noteId: note.id, followUp: followAt ? followAt.toISOString() : null }, actor: who });
-        if (followAt) await moveChat(phone, "revisit", who, now, { revisitAt: followAt, from: thread.folder });
+        const handBack = followAt ? await moveChat(phone, "revisit", who, now, { revisitAt: followAt, from: thread.folder }) : null;
         const day = followAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(followAt) : "";
-        return json({ ok: true, message: `${NOTE_LABELS[kind]} saved (only your team sees it).${followAt ? ` Follow up ${day}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups.` : ""}${claimed ? " This customer is yours now." : ""}` });
+        return json({ ok: true, message: `${NOTE_LABELS[kind]} saved (only your team sees it).${followAt ? ` Follow up ${day}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups.` : ""}${claimed ? " This customer is yours now." : ""}${handBack?.ok ? ` ${handBack.message}` : ""}` });
       }
       case "edit_note":
       case "delete_note": {
@@ -594,12 +594,12 @@ export async function POST(request: Request) {
           await audit({ phone, action: "assigned", reason: "follow_up_later", detail: { from: null }, actor: who });
           claimed = true;
         }
-        await moveChat(phone, to, who, now, { revisitAt, from: thread.folder });
+        const handBack = await moveChat(phone, to, who, now, { revisitAt, from: thread.folder });
         const messages: Record<ChatFolder, string> = {
           active: "Back in the inbox.",
           booked: "Moved to 📅 Booked. No more automatic texts, and it's never auto-released. If the customer texts, the owner is tagged in Slack (with the AI on, the AI answers too).",
           not_interested: "Moved to 🚫 Not interested. No more automatic texts. It comes back to the inbox if the customer texts.",
-          revisit: `Follow up ${revisitAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(revisitAt) : "on that date"}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups and moves up to Due that day (back to the inbox sooner if the customer texts).${claimed ? " This customer is yours now." : ""}`,
+          revisit: `Follow up ${revisitAt ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" }).format(revisitAt) : "on that date"}: it's under Later in ${thread.assignedTo && thread.assignedTo !== access.email ? "the owner's" : "your"} Follow-ups and moves up to Due that day (back to the inbox sooner if the customer texts).${claimed ? " This customer is yours now." : ""}${handBack?.ok ? ` ${handBack.message}` : ""}`,
           spam: "Moved to 🗑️ Spam. The AI, alerts and automatic texts are off for this number, even if it texts again.",
           test: "Moved to 🧪 Test. Hidden from the inbox; the AI and alerts still work.",
         };

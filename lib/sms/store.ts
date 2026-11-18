@@ -138,6 +138,9 @@ async function createTables(sql: Sql) {
   // Step 5 PR 3: AI follow-ups when the AI is left on read ("Stop auto texts" turns them off for good).
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS followups_off BOOLEAN NOT NULL DEFAULT false`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS followup_lock_until TIMESTAMPTZ`;
+  // 2026-11-18: "Hand back to AI" (after a call / voicemail / text): when and who. Counts as our last touch for AI follow-ups.
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS ai_handback_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS ai_handback_by TEXT`;
   // Session 8 (Nor-Cal numbers): which of our Twilio numbers this customer texts with (sticky).
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS our_number TEXT`;
   await sql`ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS our_number_at TIMESTAMPTZ`;
@@ -564,6 +567,39 @@ export async function resumeBot(phone: string): Promise<boolean> {
       handoff_at = NULL, handoff_resolved_at = NULL, handoff_resolved_by = NULL, updated_at = now()
     WHERE phone = ${phone} RETURNING id`;
   return rows.length > 0;
+}
+
+/**
+ * "Hand back to AI" (Steven, 2026-11-18): the AI answers again and the hand-back time counts
+ * as our last touch. Clears Needs CSR flags (a person dealt with them), except an open
+ * "Was in Hatch" flag, which stays until Melanie clicks "Stopped in Hatch".
+ */
+export async function handBackBot(phone: string, by: string, at: Date): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations SET bot_status = 'on',
+      handoff_reason = CASE WHEN handoff_reason = 'in_hatch' AND handoff_resolved_at IS NULL THEN handoff_reason ELSE NULL END,
+      handoff_summary = CASE WHEN handoff_reason = 'in_hatch' AND handoff_resolved_at IS NULL THEN handoff_summary ELSE NULL END,
+      handoff_at = CASE WHEN handoff_reason = 'in_hatch' AND handoff_resolved_at IS NULL THEN handoff_at ELSE NULL END,
+      handoff_resolved_at = NULL, handoff_resolved_by = NULL,
+      ai_handback_at = ${iso(at)}::timestamptz, ai_handback_by = ${by.slice(0, 120)}, updated_at = now()
+    WHERE phone = ${phone} RETURNING id`;
+  return rows.length > 0;
+}
+
+/** Turn AI follow-ups back on. Only the caller decides when that's allowed (lib/sms/handback.ts). */
+export async function followUpsOn(phone: string): Promise<boolean> {
+  const sql = await db();
+  const rows = await sql`UPDATE sms_conversations SET followups_off = false, followup_lock_until = NULL, updated_at = now()
+    WHERE phone = ${phone} AND followups_off = true RETURNING id`;
+  return rows.length > 0;
+}
+
+/** The newest "followups_stopped" audit for this phone (Stop auto texts, ServiceTitan, a blocked send), if any. */
+export async function lastFollowUpsStop(phone: string): Promise<{ reason: string; at: string } | null> {
+  const sql = await db();
+  const rows = await sql`SELECT reason, created_at FROM sms_audit WHERE phone = ${phone} AND action = 'followups_stopped'
+    ORDER BY created_at DESC, id DESC LIMIT 1`;
+  return rows[0] ? { reason: String(rows[0].reason || ""), at: toIso(rows[0].created_at) || "" } : null;
 }
 
 /** Clear an old outcome (step 4a: a customer who picks a consultation time is interested again). */
