@@ -572,3 +572,16 @@ a { color: inherit; }
 .inbox-viewas { display: block; font-size: 13px; margin: 2px 0 6px; color: #5b6b7a; }
 .inbox-viewas select { margin-left: 4px; }
 .inbox-viewas-banner { margin: 4px 0 8px; padding: 6px 10px; border-radius: 10px; background: #ece6ff; color: #3b2a80; font-size: 13px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* 2026-11-18: door photos attached to a person's text. */
+.inbox-gallery { border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin: 8px 0; max-height: 300px; overflow-y: auto; background: #fff; }
+.inbox-gallery-group { margin-bottom: 10px; }
+.inbox-gallery-label { font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+.inbox-gallery-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.inbox-gallery-row button, .inbox-photo-picked button { position: relative; padding: 0; border: 2px solid transparent; border-radius: 10px; background: none; cursor: pointer; }
+.inbox-gallery-row button.on { border-color: var(--teal); }
+.inbox-gallery-row button:disabled { opacity: .4; cursor: not-allowed; }
+.inbox-gallery-row img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; display: block; }
+.inbox-photo-picked { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+.inbox-photo-picked img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; display: block; }
+.inbox-photo-picked span:not(.team-hint) { position: absolute; top: -6px; right: -6px; background: var(--ink); color: #fff; border-radius: 50%; width: 18px; height: 18px; font-size: 11px; line-height: 18px; text-align: center; }

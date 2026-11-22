@@ -246,7 +246,10 @@ function phoneFromUrl(): string | null {
   return new URLSearchParams(window.location.search).get("phone");
 }
 
-export default function TextingInbox() {
+type GalleryPhoto = { url: string; name: string; category: string; categoryLabel: string; variantLabel: string };
+
+/** myRole = the signed-in person's real role (page links below the inbox follow "View as"). */
+export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [listError, setListError] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -280,6 +283,11 @@ export default function TextingInbox() {
   const [data, setData] = useState<ThreadResponse | null>(null);
   const [threadError, setThreadError] = useState("");
   const [draft, setDraft] = useState("");
+  // Door photos attached to the next text (2026-11-18): up to 2 from the gallery.
+  const [gallery, setGallery] = useState<GalleryPhoto[] | null>(null);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [galleryError, setGalleryError] = useState("");
+  const [photoPick, setPhotoPick] = useState<GalleryPhoto[]>([]);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
@@ -409,6 +417,8 @@ export default function TextingInbox() {
     if (phone !== selected) {
       setData(null);
       setDraft("");
+      setPhotoPick([]);
+      setGalleryOpen(false);
       setNotice("");
       setEditingName(false);
       setRevisitOpen(false);
@@ -464,8 +474,33 @@ export default function TextingInbox() {
   async function send() {
     const text = draft.trim();
     if (!text || busy) return;
-    const result = await act("send", { body: text });
-    if (result?.ok) setDraft("");
+    const result = await act("send", { body: text, mediaUrls: photoPick.map((p) => p.url) });
+    if (result?.ok) {
+      setDraft("");
+      setPhotoPick([]);
+      setGalleryOpen(false);
+    }
+  }
+
+  async function openGallery() {
+    setGalleryOpen((v) => !v);
+    if (gallery) return;
+    setGalleryError("");
+    const res = await fetch("/api/sms/inbox?photos=1", { cache: "no-store" }).catch(() => null);
+    const json = res ? await res.json().catch(() => ({})) : {};
+    if (!res?.ok) { setGalleryError(json.error || "Couldn't load the door photos."); return; }
+    setGallery(Array.isArray(json.photos) ? json.photos : []);
+  }
+
+  function togglePhoto(p: GalleryPhoto) {
+    setPhotoPick((list) => {
+      if (list.some((x) => x.url === p.url)) return list.filter((x) => x.url !== p.url);
+      if (list.length >= 2) return list;
+      const next = [...list, p];
+      // An empty text box gets a starter line (a text can't be photos only).
+      if (!draft.trim()) setDraft(`Here are a couple of ${p.categoryLabel} doors we've installed.`);
+      return next;
+    });
   }
 
   async function copyBooking(lines: string[]) {
@@ -522,7 +557,11 @@ export default function TextingInbox() {
   const notes = Object.entries(thread?.customerNotes || {}).filter(([k]) => !k.startsWith("_") && k !== "lead_form" && k !== "form_zip");
   const tooLong = draft.trim().length > MAX_CHARS;
 
+  // Links under the inbox follow "View as": what the person you're viewing as would see.
+  const linkRole = viewingAs?.role || myRole;
+  const linkAdmin = linkRole === "owner" || linkRole === "manager";
   return (
+    <>
     <div className={`inbox${selected || showScoreboard ? " has-thread" : ""}`}>
       <section className="surface inbox-list" aria-label="Conversations">
         <div className="inbox-list-head">
@@ -889,7 +928,46 @@ export default function TextingInbox() {
                 placeholder={reply.canSend ? "Type your text… (Ctrl+Enter sends)" : "Can't text this customer."}
                 onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }}
               />
+              {photoPick.length > 0 && (
+                <div className="inbox-photo-picked">
+                  {photoPick.map((p) => (
+                    <button key={p.url} type="button" title="Remove this photo" onClick={() => togglePhoto(p)}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={p.url} alt={p.categoryLabel} />
+                      <span>✕</span>
+                    </button>
+                  ))}
+                  <span className="team-hint">Picture text ≈ 2–3¢. The photos go with this text.</span>
+                </div>
+              )}
+              {galleryOpen && (
+                <div className="inbox-gallery">
+                  {galleryError && <div className="team-hint">{galleryError}</div>}
+                  {!gallery && !galleryError && <div className="team-hint">Loading door photos…</div>}
+                  {gallery && gallery.length === 0 && <div className="team-hint">No door photos yet.</div>}
+                  {gallery && [...new Set(gallery.map((g) => `${g.categoryLabel} · ${g.variantLabel}`))].map((group) => (
+                    <div key={group} className="inbox-gallery-group">
+                      <div className="inbox-gallery-label">{group}</div>
+                      <div className="inbox-gallery-row">
+                        {gallery.filter((g) => `${g.categoryLabel} · ${g.variantLabel}` === group).map((g) => {
+                          const on = photoPick.some((x) => x.url === g.url);
+                          return (
+                            <button key={g.url} type="button" className={on ? "on" : ""} disabled={!on && photoPick.length >= 2} onClick={() => togglePhoto(g)} title={on ? "Remove" : "Add to this text"}>
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img src={g.url} alt={g.categoryLabel} loading="lazy" />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="team-hint">Pick up to 2 photos per text.</div>
+                </div>
+              )}
               <div className="inbox-reply-bar">
+                <button type="button" className="btn btn-outline btn-small" disabled={!reply.canSend || Boolean(viewingAs)} onClick={() => void openGallery()}>
+                  📎 Door photos{photoPick.length ? ` (${photoPick.length})` : ""}
+                </button>
                 <span className={`team-hint${tooLong ? " inbox-too-long" : ""}`}>
                   {draft.trim().length}/{MAX_CHARS} · {segments(draft.trim())} segment{segments(draft.trim()) === 1 ? "" : "s"} (≈ {(segments(draft.trim()) * 1.2).toFixed(1)}¢)
                   {thread.texting ? ` · sends from ${thread.texting.numberLabel}` : ""}
@@ -944,5 +1022,14 @@ export default function TextingInbox() {
       </section>
       )}
     </div>
+    {linkAdmin && (
+      <div className="hero-actions inbox-owner-links">
+        <a className="btn btn-outline btn-small" href="/sms-results">📊 Lead results</a>
+        <a className="btn btn-outline btn-small" href="/sms-test">Texting setup &amp; test page</a>
+        {linkRole === "owner" && <a className="btn btn-outline btn-small" href="/sms-numbers">Texting numbers</a>}
+        {linkRole === "owner" && <a className="btn btn-outline btn-small" href="/door-photos">Door photos for the AI</a>}
+      </div>
+    )}
+    </>
   );
 }

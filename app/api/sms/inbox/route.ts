@@ -40,6 +40,7 @@ import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
 import { placeForZip } from "@/lib/sms/place";
 import { handBackToAi } from "@/lib/sms/handback";
 import { callsFor } from "@/lib/sms/calls";
+import { DOOR_PHOTO_CATEGORIES, DOOR_PHOTO_VARIANTS, doorPhotoName, listDoorPhotos } from "@/lib/doorPhotos";
 import { listNumbers, type SmsNumber } from "@/lib/sms/markets";
 import { defaultSendingNumber } from "@/lib/sms/numbers";
 import {
@@ -80,6 +81,7 @@ import {
   type ChatFolder,
   markBookingDone,
   markHandoffHandled,
+  saveCustomerNotes,
   setContactName,
   smsDatabaseConfigured,
   takeOverConversation,
@@ -230,6 +232,20 @@ export async function GET(request: Request) {
   const { access, viewingAs } = await viewAsAccess(real, url);
 
   try {
+    // 2026-11-18 (Steven): the door photo gallery, so a person can attach photos to a text.
+    if (url.searchParams.get("photos") === "1") {
+      const photos = await listDoorPhotos();
+      return json({
+        photos: photos.map((p) => ({
+          url: p.url,
+          name: doorPhotoName(p.pathname),
+          category: p.category,
+          categoryLabel: DOOR_PHOTO_CATEGORIES.find((c) => c.key === p.category)?.label || p.category,
+          variantLabel: DOOR_PHOTO_VARIANTS.find((v) => v.key === p.variant)?.label || p.variant,
+        })),
+      });
+    }
+
     const phoneParam = url.searchParams.get("phone");
     if (phoneParam !== null) {
       const phone = normalizePhone(phoneParam);
@@ -434,12 +450,34 @@ export async function POST(request: Request) {
       case "send": {
         const text = String(body.body || "").trim();
         if (!text) return json({ ok: false, message: "Type a message first." }, 400);
-        const result = await sendSms({ to: phone, body: text, kind: "manual", purpose: "care", sentBy: who });
+        // Door photos from the gallery (2026-11-18): up to 2 per text, only photos from our own library.
+        const wanted = Array.isArray(body.mediaUrls) ? body.mediaUrls.map(String).filter(Boolean) : [];
+        let picked: { url: string; pathname: string; category: string; variant: string }[] = [];
+        if (wanted.length) {
+          if (wanted.length > 2) return json({ ok: false, message: "Pick up to 2 photos per text." }, 400);
+          const library = await listDoorPhotos();
+          picked = wanted.map((u: string) => library.find((p) => p.url === u)).filter((p): p is NonNullable<typeof p> => Boolean(p));
+          if (picked.length !== wanted.length) return json({ ok: false, message: "One of those photos isn't in the door photo gallery anymore. Pick again." }, 400);
+        }
+        const result = await sendSms({ to: phone, body: text, kind: "manual", purpose: "care", sentBy: who, mediaUrls: picked.map((p) => p.url) });
         if (!result.ok) return json(result, 422);
+        if (picked.length) {
+          // Same notes the AI keeps, so it won't resend these photos and knows what they've seen.
+          const notes = thread.customerNotes || {};
+          const sentBefore = String(notes._photos_sent || "").split(",").map((x) => x.trim()).filter(Boolean);
+          const labels = [...new Set(picked.map((p) => {
+            const c = DOOR_PHOTO_CATEGORIES.find((x) => x.key === p.category)?.label || p.category;
+            return `${c} (${p.variant})`;
+          }))];
+          await saveCustomerNotes(phone, {
+            _photos_sent: [...sentBefore, ...picked.map((p) => doorPhotoName(p.pathname))].slice(-20).join(","),
+            photos_sent: [notes.photos_sent, ...labels].filter(Boolean).join("; ").slice(0, 200),
+          });
+        }
         // A person is now texting this customer: the AI stops answering this number.
         await takeOverConversation(phone, who, now);
-        await audit({ phone, action: "csr_reply", reason: thread.botStatus === "on" ? "ai_paused" : null, detail: { messageId: result.messageId }, actor: who });
-        return json({ ...result, message: "Sent. The AI is paused for this number." });
+        await audit({ phone, action: "csr_reply", reason: thread.botStatus === "on" ? "ai_paused" : null, detail: { messageId: result.messageId, ...(picked.length ? { photos: picked.length } : {}) }, actor: who });
+        return json({ ...result, message: picked.length ? `Sent with ${picked.length} photo${picked.length === 1 ? "" : "s"}. The AI is paused for this number.` : "Sent. The AI is paused for this number." });
       }
       case "stop_drip": {
         const dripStopped = await stopDrip(phone, `stopped by ${who}`, who, now);
