@@ -23,7 +23,8 @@ const navItems = [
   { key: "talk", href: "/talk", label: "Talk with Coach Denny", theme: "talk", icon: "mic" },
   { key: "owner", href: "/owner", label: "Owner Dashboard", theme: "owner", icon: "owner" },
   { key: "team", href: "/team", label: "Team", theme: "team", icon: "team" },
-  { key: "texting", href: "/texting", label: "Texting", theme: "texting", icon: "sms" },
+  // Steven, 2026-11-22: the Texting tile is called "The Fox Hole".
+  { key: "texting", href: "/texting", label: "The Fox Hole", theme: "texting", icon: "sms" },
   // Pilot-only tile; remove (here and in lib/access.ts navFor) when testing is over.
   { key: "simulator", href: "/sms-sim", label: "Simulator", theme: "simulator", icon: "sim" },
 ] as const satisfies readonly { key: NavKey; href: string; label: string; theme: string; icon: string }[];
