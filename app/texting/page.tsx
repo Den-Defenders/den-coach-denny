@@ -13,7 +13,7 @@ export default async function TextingPage() {
   // Owners + managers see Lead results and the setup & test page under the inbox (numbers + photos: owners).
   // The links live in TextingInbox so they follow "View as".
   return (
-    <DenShell title="Texting" subtitle="Customer texts, Needs CSR first" theme="texting">
+    <DenShell title="The Fox Hole" subtitle="Customer texts, Needs CSR first" theme="texting">
       <TextingInbox myRole={access.role} />
     </DenShell>
   );

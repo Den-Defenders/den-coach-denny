@@ -568,7 +568,7 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
     <div className={`inbox${selected || showScoreboard ? " has-thread" : ""}`}>
       <section className="surface inbox-list" aria-label="Conversations">
         <div className="inbox-list-head">
-          <h2>Texting {needsCount > 0 && <span className="inbox-count">{needsCount} need a person</span>}</h2>
+          <h2>The Fox Hole {needsCount > 0 && <span className="inbox-count">{needsCount} need a person</span>}</h2>
           {viewAsOptions.length > 0 && (
             <label className="inbox-viewas">
               👁 View as{" "}
@@ -611,13 +611,16 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
               {markets.map((m) => <option key={m} value={m}>📱 {m}</option>)}
             </select>
           )}
+          {/* Folders, then a line, then the "Zero in" filters for that folder (Steven, 2026-11-22). */}
+          <div className="inbox-section-label">🗂️ Folders</div>
           <div className="inbox-filters inbox-folders" role="tablist" aria-label="Folder">
             {viewTabs.map(([key, label]) => (
               <button key={key} role="tab" aria-selected={view === key} className={`inbox-filter${view === key ? " active" : ""}`} onClick={() => setView(key)}>{label}</button>
             ))}
           </div>
+          {(view === "followups" || view === "active") && <div className="inbox-subfilters"><div className="inbox-section-label">🎯 Zero in</div></div>}
           {view === "followups" && (
-            <div className="inbox-filters" role="tablist" aria-label="Whose follow-ups">
+            <div className="inbox-filters inbox-zero-in" role="tablist" aria-label="Whose follow-ups">
               {([["", "All"], [me || "", `Mine${followUpCounts.mine ? ` (${followUpCounts.mine})` : ""}`], ["took", `🔁 Took over${followUpCounts.took ? ` (${followUpCounts.took})` : ""}`]] as [string, string][])
                 .filter(([key], i) => i !== 1 || key)
                 .map(([key, label]) => (
@@ -634,7 +637,7 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
           {view === "followups" && <div className="team-hint inbox-folder-hint">{followOwner === "took"
             ? "Customers you took over from someone else's follow-ups (or a manager handed you). Newest first."
             : "Everyone's customers who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later. Tip: type a team member's name in the search to see their customers."}</div>}
-          {view === "active" && <div className="inbox-filters" role="tablist" aria-label="Filter">
+          {view === "active" && <div className="inbox-filters inbox-zero-in" role="tablist" aria-label="Filter">
             {/* Mine / Unassigned moved to the 👤 menu (2026-11-22). */}
             {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>

@@ -520,6 +520,10 @@ a { color: inherit; }
 
 /* Session 7 PR 3: chat folders + follow-ups */
 .inbox-folders { margin-bottom: 4px; }
+/* 2026-11-22: "🗂️ Folders" over the folder tabs, a line, then "🎯 Zero in" over that folder's filters. */
+.inbox-section-label { margin: 10px 0 -4px; font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.inbox-subfilters { margin-top: 10px; padding-top: 2px; border-top: 1px solid var(--line); }
+.inbox-zero-in { margin-top: 8px; }
 .inbox-owner-filter { margin: 4px 0; max-width: 100%; }
 .inbox-folder-hint { margin: 2px 0 6px; font-size: 12px; }
 .inbox-move { max-width: 170px; }
