@@ -22,6 +22,7 @@
  *   POST {action:"mark_booked", phone}  -> "Booked in ServiceTitan" (step 4a): clears the "📅 Ready to book"
  *                                          flag; an unowned customer becomes the booker's
  *   POST {action:"stop_drip", phone}    -> step 5 "Stop auto texts": no more drip texts or AI follow-ups, for good
+ *   POST {action:"wait_until", phone, date? | clear?} -> 2026-11-22 "📅 Wait until": no AI follow-up before that date
  *   POST {action:"hatch_stopped", phone} -> Session 8 PR 2b: "Stopped in Hatch": start Denny's drip held by the Hatch guard
  *   POST {action:"move", phone, folder, revisit?} -> Session 7 PR 3: file the chat (revisit = 2w | 1m | 3m | YYYY-MM-DD)
  *   POST {action:"add_note", phone, kind, body, followUp?} -> team note (never texted); followUp files it in Follow-ups → Later
@@ -44,6 +45,7 @@ import { callsFor } from "@/lib/sms/calls";
 import { DOOR_PHOTO_CATEGORIES, DOOR_PHOTO_VARIANTS, doorPhotoName, listDoorPhotos } from "@/lib/doorPhotos";
 import { listNumbers, type SmsNumber } from "@/lib/sms/markets";
 import { defaultSendingNumber } from "@/lib/sms/numbers";
+import { checkWaitDate, waitDateFrom, waitLabel, waitNotes, waitSaidFrom } from "@/lib/sms/waitUntil";
 import {
   TEAM_CLOCK_TEXT,
   activeProtection,
@@ -324,6 +326,18 @@ export async function GET(request: Request) {
                 followUpsOff: Boolean(followUp && "none" in followUp && followUp.none.startsWith("Auto texts stopped")),
                 canStop: thread.lead.drip.status === "active" || thread.lead.drip.status === "hatch_hold" || Boolean(followUp && !("none" in followUp)),
                 onHatchHold: thread.lead.drip.status === "hatch_hold",
+                // "Check back later" (2026-11-22): the date AI follow-ups wait for, if it's still ahead.
+                wait: (() => {
+                  const date = waitDateFrom(thread.customerNotes);
+                  if (!date || !checkWaitDate(date, now).ok) return null;
+                  const by = String(thread.customerNotes?._wait_by || "");
+                  return {
+                    date,
+                    label: waitLabel(date),
+                    said: waitSaidFrom(thread.customerNotes),
+                    by: by === "ai" || by === "code" ? "the AI" : nameFor(by, team) || by,
+                  };
+                })(),
               }
             : null,
           handoffLabel: thread.handoffReason
@@ -484,6 +498,19 @@ export async function POST(request: Request) {
         const followUpsStopped = await stopFollowUps(phone, who);
         const any = dripStopped || followUpsStopped;
         return json({ ok: any, message: any ? "Auto texts stopped for this customer: no more drip texts or AI follow-ups." : "This customer has no auto texts running." });
+      }
+      case "wait_until": {
+        if (body.clear === true) {
+          if (!waitDateFrom(thread.customerNotes)) return json({ ok: false, message: "No wait date to clear." }, 409);
+          await saveCustomerNotes(phone, waitNotes(null, "", who));
+          await audit({ phone, action: "wait_until", reason: "cleared", actor: who });
+          return json({ ok: true, message: "Wait date cleared. AI follow-ups are back on their normal schedule." });
+        }
+        const checked = checkWaitDate(body.date, now);
+        if (!checked.ok) return json({ ok: false, message: checked.message }, 400);
+        await saveCustomerNotes(phone, waitNotes(checked.date, "set by the team", who));
+        await audit({ phone, action: "wait_until", reason: checked.date, actor: who });
+        return json({ ok: true, message: `No AI follow-up before ${waitLabel(checked.date)} (9 AM their time).` });
       }
       case "hatch_stopped": {
         const outcome = await releaseHatchHold(phone, who, now);

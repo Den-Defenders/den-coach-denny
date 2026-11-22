@@ -113,6 +113,8 @@ type Thread = {
     canStop: boolean;
     /** Session 8 PR 2b: the drip waits until someone stops them in Hatch. */
     onHatchHold?: boolean;
+    /** 2026-11-22: they asked us to check back later; no AI follow-up before this date. */
+    wait?: { date: string; label: string; said: string; by: string } | null;
   } | null;
   optOut: { optedOutAt: string; source: string; keyword: string | null } | null;
   messages: Message[];
@@ -272,6 +274,8 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
   /** "Revisit later…" picked in Move to: show the date choices. */
   const [revisitOpen, setRevisitOpen] = useState(false);
   const [revisitDay, setRevisitDay] = useState("");
+  // "📅 Wait until" (2026-11-22): the date picked for this chat (cleared when another chat opens).
+  const [waitPick, setWaitPick] = useState<{ phone: string | null; day: string }>({ phone: null, day: "" });
   /** Team notes: the note being written (kind picked with the buttons), and one being edited. */
   const [noteKind, setNoteKind] = useState<NoteKind | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -282,6 +286,7 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
   const [editingNote, setEditingNote] = useState<{ id: number; body: string } | null>(null);
   const [deletingNote, setDeletingNote] = useState<number | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const waitDay = waitPick.phone === selected ? waitPick.day : "";
   const [data, setData] = useState<ThreadResponse | null>(null);
   const [threadError, setThreadError] = useState("");
   const [draft, setDraft] = useState("");
@@ -848,6 +853,26 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
                 {thread.lead.dripLabel && <div className="inbox-lead-drip">📨 {thread.lead.dripLabel}</div>}
                 {thread.lead.followUp && <div className="inbox-lead-drip">🤖 {thread.lead.followUp}</div>}
                 {thread.lead.followUpsOff && <div className="team-hint">Auto texts stopped for this customer (no drip, no AI follow-ups).</div>}
+                {thread.lead.at && !thread.optOut && !thread.lead.followUpsOff && (
+                  <div className="inbox-wait">
+                    {thread.lead.wait ? (
+                      <span>
+                        📅 Waiting until <b>{thread.lead.wait.label}</b>
+                        {thread.lead.wait.said && thread.lead.wait.said !== "set by the team" ? <> · they said “{thread.lead.wait.said}”</> : null}
+                        {thread.lead.wait.by ? <> · set by {thread.lead.wait.by}</> : null}
+                      </span>
+                    ) : (
+                      <span className="team-hint">Customer asked us to check back later? Pick the day:</span>
+                    )}
+                    <input type="date" aria-label="No AI follow-up before" min={isoDay(1)} max={isoDay(180)} value={waitDay} onChange={(e) => setWaitPick({ phone: selected, day: e.target.value })} />
+                    <button className="btn btn-outline btn-small" disabled={busy || !waitDay} onClick={() => act("wait_until", { date: waitDay })}>
+                      {thread.lead.wait ? "Change date" : "📅 Wait until"}
+                    </button>
+                    {thread.lead.wait && (
+                      <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("wait_until", { clear: true })}>Clear</button>
+                    )}
+                  </div>
+                )}
                 {thread.lead.stCheck && <div className="team-hint">{thread.lead.stCheck}</div>}
                 {thread.lead.canStop && (
                   <div className="inbox-booking-actions">

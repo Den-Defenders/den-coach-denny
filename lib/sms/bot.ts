@@ -85,6 +85,7 @@ import {
   askedFollowUp, followUpFromText, isFollowUpQuestion, looksLikeAnswer, nextQualifier, pendingQualifier, qualifierAck,
 } from "@/lib/sms/qualify";
 import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
+import { checkWaitDate, dateHints, waitDateFrom, waitFromText, waitLabel, waitNotes, waitSaidFrom } from "@/lib/sms/waitUntil";
 import { DEFAULT_TIME_ZONE, MAX_BODY_CHARS, TEAM_HOURS_TEXT, formatPhone, localTime, teamIsTexting, withinSendingHours } from "@/lib/sms/rules";
 import { allowList, checkCaps, sendOptOutConfirmation, sendSms, sendingEnabled, smsNow, type SendResult } from "@/lib/sms/send";
 import {
@@ -353,6 +354,22 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           follow_up: { type: "string", enum: ["call", "text"], description: "Only after they answered: a quick call from a rep, or keep texting" },
         },
         required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "check_back_later",
+      description:
+        "The customer asked us to reach out later instead of now (after a holiday, next month, after a trip, when their spouse is home...). Saves the date so our automatic follow-up texts wait until then. Use the DATE HINTS when one fits. Not for the day or time they'd like a visit (use find_open_times for that). If they now want to go ahead sooner, call it with clear true.",
+      parameters: {
+        type: "object",
+        properties: {
+          date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "YYYY-MM-DD: the first day we may text them again" },
+          their_words: { type: "string", description: "What they said, short (\"after the holiday\", \"in January\")" },
+          clear: { type: "boolean", description: "true = they no longer want us to wait" },
+        },
       },
     },
   },
@@ -675,6 +692,15 @@ function cleanArg(value: unknown, max: number): string {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
 }
 
+/** "Mon, Nov 30 (they said: Ok after holiday)" while the wait is still ahead; else undefined. */
+function waitText(notes: Record<string, string>, now: Date): string | undefined {
+  const date = waitDateFrom(notes);
+  const check = date ? checkWaitDate(date, now) : null;
+  if (!date || !check?.ok) return undefined;
+  const said = waitSaidFrom(notes);
+  return `${waitLabel(date)}${said ? ` (they said: "${said.slice(0, 80)}")` : ""}`;
+}
+
 /** Step 4a: a ready_to_book flag WITHOUT a picked time keeps the AI on (a customer can still pick a weekday). */
 export function isSoftHandoff(reason: string, booking?: BookingRequest): boolean {
   return reason === "ready_to_book" && !booking;
@@ -720,6 +746,17 @@ export async function composeBotReply(
   const offered = openTimesFrom(notes);
   const lastInboundAt = thread.map((m) => m.direction).lastIndexOf("inbound");
   const theirLastText = thread[lastInboundAt]?.body || "";
+  // "Ok after holiday" (Steven, 2026-11-22): code saves the wait date itself, so AI follow-ups
+  // don't go out before then even if the AI forgets check_back_later.
+  if (lastInboundAt === thread.length - 1) {
+    const said = waitFromText(theirLastText, input.now);
+    if (said && waitDateFrom(notes) !== said.date) {
+      const save = waitNotes(said.date, said.said, "code");
+      Object.assign(notes, save);
+      await fx.saveNotes(save);
+      await fx.log("bot_wait_until", said.date, { said: said.said.slice(0, 80), by: "code" }, "system");
+    }
+  }
   // They picked an offered time in words ("Wednesday"): code saves it before the AI runs, so the AI
   // sees "Time they picked" and goes on to name + address (Simulator 2026-11-08: the AI skipped
   // choose_time, asked the door type again and repeated the price).
@@ -766,6 +803,8 @@ export async function composeBotReply(
     bookingName: notes[BOOKING_NAME_KEY] || undefined,
     bookingAddress: notes[BOOKING_ADDRESS_KEY] || undefined,
     teamNotes: input.teamNotes?.length ? input.teamNotes : undefined,
+    waitUntil: waitText(notes, input.now),
+    dateHints: dateHints(input.now),
     bookingStep: notes[FOLLOW_UP_KEY] === "text"
       ? (() => { const q = nextQualifier(notes, ourTexts); return q ? `they chose to keep texting; answer anything they asked, save any answer with save_customer_notes, then ask: "${q.ask}"` : "all questions answered; call request_booking with follow_up text"; })()
       : askedFollowUp(ourTexts) && !notes[FOLLOW_UP_KEY] ? "we asked if they'd like a call from a rep or to keep texting; when they answer, call request_booking with follow_up" : undefined,
@@ -1246,6 +1285,25 @@ export async function composeBotReply(
         answer(dropped.length
           ? { ok: true, notSaved: dropped, message: `Saved, except ${dropped.join(" and ")}: the customer didn't say that. Never guess it; ask if you need it. Now write your reply.` }
           : { ok: true, message: "Saved. Now write your reply." });
+      } else if (name === "check_back_later") {
+        if (args.clear === true) {
+          const save = waitNotes(null, "", "ai");
+          Object.assign(notes, save);
+          await fx.saveNotes(save);
+          await fx.log("bot_wait_until", "cleared", { by: "ai" });
+          answer({ ok: true, message: "Cleared: normal follow-ups again. Now write your reply." });
+        } else {
+          const checked = checkWaitDate(args.date, input.now);
+          if (!checked.ok) {
+            answer({ ok: false, message: `${checked.message} Use the DATE HINTS.` });
+          } else {
+            const save = waitNotes(checked.date, cleanArg(args.their_words, 160) || theirLastText, "ai");
+            Object.assign(notes, save);
+            await fx.saveNotes(save);
+            await fx.log("bot_wait_until", checked.date, { said: cleanArg(args.their_words, 80), by: "ai" });
+            answer({ ok: true, message: `Saved: no automatic texts before ${waitLabel(checked.date)}. Now reply warmly in one or two short sentences: say we'll reach out then (no exact time) and don't push for a booking now. If they still ask about times or prices, help as usual.` });
+          }
+        }
       } else if (name === "record_outcome") {
         const outcome = args.outcome === "not_interested" ? "not_interested" : args.outcome === "price_accepted" ? "price_accepted" : null;
         if (outcome) await fx.outcome(outcome);
@@ -1302,7 +1360,8 @@ export async function composeBotReply(
     const lastTheirs = [...thread].reverse().find((m) => m.direction === "inbound")?.body || "";
     const ours = thread.slice(0, thread.map((m) => m.direction).lastIndexOf("inbound")).filter((m) => m.direction === "outbound");
     const lastOurs = ours[ours.length - 1]?.body || "";
-    if (!handedOff && asksAboutCall(lastOurs) && wantsCallReply(lastTheirs)) {
+    // "Ok after holiday" isn't a yes to a call now: they asked us to wait (2026-11-22).
+    if (!handedOff && asksAboutCall(lastOurs) && wantsCallReply(lastTheirs) && !waitFromText(lastTheirs, input.now)) {
       await fx.log("bot_call_by_code", "skipped_tool", {}, "system");
       await fx.handOff("wants_call", `Said yes to a quick call: "${lastTheirs.slice(0, 200)}". Call them${CALL_TIME.test(lastTheirs) ? " at the time they gave" : " ASAP"}.`, notes, true);
       handedOff = { reason: "wants_call" };
@@ -1500,6 +1559,8 @@ export type FollowUpInput = {
   neverReplied: boolean;
   /** The team's newest notes (calls, voicemails), oldest first. Context only (2026-11-18). */
   teamNotes?: string[];
+  /** They asked us to wait ("after the holiday"); this is the first text after that date. */
+  waitSaid?: string;
 };
 
 function followUpInstruction(input: FollowUpInput): string {
@@ -1513,6 +1574,9 @@ function followUpInstruction(input: FollowUpInput): string {
     "- never guilts or pressures them: no \"just checking in\", \"following up\", \"circling back\", \"haven't heard from you\" or \"last chance\";",
     "- never mentions discounts, the $400 offer or financing terms unless they asked about them earlier in the thread;",
     "- never says booked, scheduled or confirmed, never names an open time or an install timeline, never says photos are attached.",
+    input.waitSaid
+      ? `They asked us to reach out later (they said: "${input.waitSaid.slice(0, 80)}") and that time has come. Pick up from that naturally (for example "Hope you had a great Thanksgiving!" if it was about the holiday), then the question.`
+      : "",
     input.neverReplied
       ? "They have never replied to any of our texts, so keep it very light and offer to close their request if the timing isn't right."
       : "",
