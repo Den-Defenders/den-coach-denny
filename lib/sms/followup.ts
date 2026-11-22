@@ -17,6 +17,8 @@
  *     not opted out, nobody clicked "Stop auto texts"
  *   - our text is the last one (they left us on read)
  * Cadence (days after our last text): 2, 3, 5, 14, 21, 4, 6, 14, 30, 45, 60, then every 60.
+ * "Check back later" (2026-11-22, lib/sms/waitUntil.ts): when they asked us to wait ("after the
+ * holiday"), the next follow-up isn't due before 9 AM their time on that date.
  * A hand-back counts as our last touch (after a call there may be no text from us).
  * The AI reads the team's notes (calls, voicemails) when it writes them.
  * Every text: ServiceTitan check, 9 AM - 5 PM their time, no holidays, caps,
@@ -24,11 +26,12 @@
  * On/off: SMS_DRIP_ENABLED (same switch as the drip).
  */
 import { composeFollowUp } from "@/lib/sms/bot";
-import { RESUMABLE_DRIP_STOPS, bookingBlocksDrip, dripEnabled, intoWindow } from "@/lib/sms/drip";
+import { RESUMABLE_DRIP_STOPS, bookingBlocksDrip, dripEnabled, intoWindow, zonedTime } from "@/lib/sms/drip";
 import { notesForAi } from "@/lib/sms/notes";
 import { safeTimeZone } from "@/lib/sms/rules";
 import { sendSms, smsNow } from "@/lib/sms/send";
 import { stCheckFor, stCheckSummary } from "@/lib/sms/stCheck";
+import { waitDateFrom, waitLabel, waitSaidFrom } from "@/lib/sms/waitUntil";
 import { CHECKING_SENDER, HOLD_SENDER, audit, conversationState, setHandoff, smsDb, threadForBot } from "@/lib/sms/store";
 
 export const FOLLOWUP_SENDER = "denny-followup";
@@ -39,7 +42,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
 
 export type FollowUpPlan =
-  | { due: Date; number: number; neverReplied: boolean; lastOutAt: Date }
+  | { due: Date; number: number; neverReplied: boolean; lastOutAt: Date; waitUntil?: string; waitSaid?: string }
   | { none: string };
 
 type Row = Record<string, unknown>;
@@ -85,14 +88,22 @@ async function planFor(row: Row): Promise<FollowUpPlan> {
   const count = Number(sent[0]?.n || 0);
   const days = neverReplied ? NEVER_REPLIED_DAYS : FOLLOWUP_DAYS[Math.min(count, FOLLOWUP_DAYS.length - 1)];
   const timeZone = safeTimeZone(String(row.time_zone || ""));
-  return { due: intoWindow(new Date(lastOut.getTime() + days * DAY), "automated", timeZone), number: count + 1, neverReplied, lastOutAt: lastOut };
+  const due = intoWindow(new Date(lastOut.getTime() + days * DAY), "automated", timeZone);
+  // They asked us to wait: nothing before 9 AM their time on that date (only if it's after our last text).
+  const notes = (row.customer_notes && typeof row.customer_notes === "object" ? row.customer_notes : {}) as Record<string, unknown>;
+  const waitDate = waitDateFrom(notes);
+  const waitStart = waitDate ? intoWindow(zonedTime(waitDate, "09:00", timeZone), "automated", timeZone) : null;
+  if (waitDate && waitStart && waitStart > lastOut) {
+    return { due: waitStart > due ? waitStart : due, number: count + 1, neverReplied, lastOutAt: lastOut, waitUntil: waitDate, waitSaid: waitSaidFrom(notes) };
+  }
+  return { due, number: count + 1, neverReplied, lastOutAt: lastOut };
 }
 
 async function loadRows(where: { phone?: string; now?: Date; limit?: number }): Promise<Row[]> {
   const sql = await smsDb();
   if (where.phone) {
     return sql`SELECT v.id, v.phone, v.lead_at, v.drip_status, v.drip_stop_reason, v.booking_request, v.booking_done_at,
-        v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, v.folder, v.ai_handback_at, c.time_zone,
+        v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, v.folder, v.ai_handback_at, v.customer_notes, c.time_zone,
         EXISTS (SELECT 1 FROM sms_opt_outs o WHERE o.phone = v.phone) AS opted_out,
         (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'inbound') AS last_in,
         (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'outbound'
@@ -100,7 +111,7 @@ async function loadRows(where: { phone?: string; now?: Date; limit?: number }): 
       FROM sms_conversations v JOIN sms_contacts c ON c.phone = v.phone WHERE v.phone = ${where.phone}`;
   }
   return sql`SELECT v.id, v.phone, v.lead_at, v.drip_status, v.drip_stop_reason, v.booking_request, v.booking_done_at,
-      v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, v.folder, v.ai_handback_at, c.time_zone,
+      v.handoff_reason, v.handoff_resolved_at, v.lead_status, v.bot_status, v.followups_off, v.followup_lock_until, v.folder, v.ai_handback_at, v.customer_notes, c.time_zone,
       EXISTS (SELECT 1 FROM sms_opt_outs o WHERE o.phone = v.phone) AS opted_out,
       (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'inbound') AS last_in,
       (SELECT max(m.created_at) FROM sms_messages m WHERE m.conversation_id = v.id AND m.direction = 'outbound'
@@ -174,7 +185,7 @@ export async function processFollowUp(row: Row, now: Date): Promise<FollowUpOutc
   const daysSinceLast = Math.max(1, Math.round((now.getTime() - plan.lastOutAt.getTime()) / DAY));
   let written: { text: string; model: string } | null = null;
   for (let attempt = 0; attempt < 2 && !written; attempt++) {
-    written = await composeFollowUp({ thread, notes: state.customerNotes, now, number: plan.number, daysSinceLast, neverReplied: plan.neverReplied, teamNotes });
+    written = await composeFollowUp({ thread, notes: state.customerNotes, now, number: plan.number, daysSinceLast, neverReplied: plan.neverReplied, teamNotes, waitSaid: plan.waitUntil ? plan.waitSaid || "to check back later" : undefined });
   }
   if (!written) {
     await audit({ phone, action: "followup_skipped", reason: "no safe text from the AI", detail: { number: plan.number }, actor: FOLLOWUP_SENDER });
@@ -192,7 +203,7 @@ export async function processFollowUp(row: Row, now: Date): Promise<FollowUpOutc
 
   const result = await sendSms({ to: phone, body: written.text, kind: "automated", purpose: "care", sentBy: FOLLOWUP_SENDER });
   if (result.ok) {
-    await audit({ phone, action: "followup_sent", reason: `follow-up ${plan.number}`, detail: { messageId: result.messageId, model: written.model, neverReplied: plan.neverReplied }, actor: FOLLOWUP_SENDER });
+    await audit({ phone, action: "followup_sent", reason: `follow-up ${plan.number}`, detail: { messageId: result.messageId, model: written.model, neverReplied: plan.neverReplied, ...(plan.waitUntil ? { waitedUntil: plan.waitUntil } : {}) }, actor: FOLLOWUP_SENDER });
     await lock(row.id, null);
     return "sent";
   }
@@ -234,5 +245,8 @@ export async function runDueFollowUps(options: { now?: Date; budgetMs?: number }
 export function followUpLabel(plan: FollowUpPlan, timeZone: string): string {
   if ("none" in plan) return "";
   const when = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(plan.due);
-  return `AI follow-up ${plan.number} due ${when} their time${plan.neverReplied ? " (they never replied: every 60 days)" : ""}`;
+  const waited = plan.waitUntil
+    ? ` (waiting until ${waitLabel(plan.waitUntil)}${plan.waitSaid ? `: they said “${plan.waitSaid.slice(0, 60)}”` : ""})`
+    : "";
+  return `AI follow-up ${plan.number} due ${when} their time${waited}${plan.neverReplied ? " (they never replied: every 60 days)" : ""}`;
 }

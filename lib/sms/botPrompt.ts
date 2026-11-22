@@ -190,6 +190,10 @@ export type KnownAboutCustomer = {
   bookingAddress?: string;
   /** Team notes (Steven, 2026-11-16): internal notes from our CSRs, oldest first. */
   teamNotes?: string[];
+  /** They asked us to check back later (2026-11-22): "Mon, Nov 30 (they said: ...)". */
+  waitUntil?: string;
+  /** Dates for check_back_later, worked out by code ("After Thanksgiving: Mon, Nov 30 (2026-11-30)"). */
+  dateHints?: string[];
 };
 // Notes keys starting with "_" are for code only (e.g. which photo files were sent) and stay out of the prompt.
 
@@ -234,6 +238,7 @@ export function knownAboutCustomerText(known: KnownAboutCustomer): string {
     lines.push(`- Time they picked: ${known.chosenTime}. Next: ${haveBoth ? "call request_booking (you already have their name and address)" : "their full name and street address, then request_booking"}.`);
   }
   if (known.bookingStep) lines.push(`- Finishing the booking: ${known.bookingStep}.`);
+  if (known.waitUntil) lines.push(`- They asked us to reach out later: no automatic texts before ${known.waitUntil}. Don't push for a booking now. If they want to go ahead sooner, help as usual and call check_back_later with clear true.`);
   return lines.length ? lines.join("\n") : "- Nothing saved yet. Read the thread.";
 }
 
@@ -245,7 +250,12 @@ ${SMS_CHANNEL_RULES}
 
 ${companyFactsText()}
 
-TODAY (Pacific time): ${todayPacific}
+TODAY (Pacific time): ${todayPacific}${known?.dateHints?.length ? `
+
+CHECK BACK LATER
+If they ask us to reach out later instead of now ("after the holiday", "next month", "after my trip"), call check_back_later with the first day we may text again, then reply warmly that we'll reach out then (no exact time) and don't push. Enjoying the holiday is a fine thing to wish them. Not for the day they'd like a visit.
+DATE HINTS (use these instead of working out dates yourself):
+${known.dateHints.map((h) => `- ${h}`).join("\n")}` : ""}
 
 WHAT WE ALREADY KNOW ABOUT THIS CUSTOMER (from this thread; don't ask for any of it again)
 ${knownText}${known?.teamNotes?.length ? `
