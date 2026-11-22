@@ -34,6 +34,7 @@ import {
   HOLD_SENDER,
   audit,
   autoReleaseConversation,
+  lastOwnerTouch,
   messagesSince,
   ownedConversationsWithNewTexts,
   type OwnedConversation,
@@ -234,6 +235,24 @@ export function capMessage(count: number): string {
 /** "Thu 8:30 AM" in Pacific time, for Slack and the inbox. */
 export function pacificWhen(at: Date): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: TEAM_CLOCK_ZONE, weekday: "short", hour: "numeric", minute: "2-digit" }).format(at);
+}
+
+// ---------------------------------------------------------------------------
+// 2026-11-22: CSRs can take a teammate's chat, unless the owner is working it right now.
+// ---------------------------------------------------------------------------
+
+/** How long a chat stays protected after the owner texts the customer or logs a call (team minutes). */
+export const ACTIVE_PROTECT_MINUTES = 60;
+
+/**
+ * Is the owner working this customer right now? Protected for 1 team hour (Mon–Sat 8–4 clock)
+ * after the owner's last text to them or 📞 call they logged. Null = a teammate may take it.
+ */
+export async function activeProtection(phone: string, owner: string, now: Date): Promise<{ touchAt: Date; until: Date } | null> {
+  const touchAt = await lastOwnerTouch(phone, owner);
+  if (!touchAt) return null;
+  const until = addTeamMinutes(touchAt, ACTIVE_PROTECT_MINUTES);
+  return now.getTime() < until.getTime() ? { touchAt, until } : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -184,6 +184,31 @@ export async function postAutoReleaseAlert(phone: string, ownerName: string, cus
   return postSmsSlack(text);
 }
 
+/** "<@U…> " for this team member's Slack member ID (Team page), or "". */
+async function mentionFor(email: string): Promise<string> {
+  try {
+    if (!teamDatabaseConfigured()) return "";
+    const member = await findTeamMember(email);
+    return member?.active && member.slackMemberId ? `<@${member.slackMemberId}> ` : "";
+  } catch (error) {
+    console.error("SMS mention lookup failed:", error instanceof Error ? error.message : error);
+    return "";
+  }
+}
+
+/**
+ * 2026-11-22: a teammate took a customer the old owner had. Tags the old owner so it's no surprise.
+ */
+export async function postTakenOverAlert(phone: string, oldOwner: string, takerName: string, customerName: string | null): Promise<void> {
+  if (!slackAlertsEnabled()) return;
+  const who = customerName ? `${customerName} (${formatPhone(phone)})` : formatPhone(phone);
+  const text = [
+    `${pilotTag()}${await marketTag(phone)}${await mentionFor(oldOwner)}:repeat: *Texting: ${takerName} took ${who} from you.* They own this customer now.`,
+    `<${inboxLink(phone)}|Open in the Texting inbox>`,
+  ].join("\n");
+  return postSmsSlack(text);
+}
+
 /** Session 8 PR 2b: who stops "was in Hatch" leads in Hatch (Steven, 2026-11-17: Melanie). */
 export function hatchContactEmail(): string {
   return (process.env.SMS_HATCH_ALERT_EMAIL || "mfreeman@dendefenders.com").trim().toLowerCase();

@@ -38,6 +38,7 @@ import { READY_TO_BOOK_LABEL, handoffLabel, inboxFlag, replyBlockers, sortInbox,
 import { FOLDER_LABELS, followUpList, moveChat, revisitDate, type FollowUpItem } from "@/lib/sms/folders";
 import { NOTE_LABELS, noteText } from "@/lib/sms/notes";
 import { placeForZip } from "@/lib/sms/place";
+import { postTakenOverAlert } from "@/lib/sms/alerts";
 import { handBackToAi } from "@/lib/sms/handback";
 import { callsFor } from "@/lib/sms/calls";
 import { DOOR_PHOTO_CATEGORIES, DOOR_PHOTO_VARIANTS, doorPhotoName, listDoorPhotos } from "@/lib/doorPhotos";
@@ -45,6 +46,7 @@ import { listNumbers, type SmsNumber } from "@/lib/sms/markets";
 import { defaultSendingNumber } from "@/lib/sms/numbers";
 import {
   TEAM_CLOCK_TEXT,
+  activeProtection,
   capMessage,
   customerWaitingSince,
   isCappedRole,
@@ -364,11 +366,9 @@ export async function GET(request: Request) {
       const folders: ChatFolder[] = view === "spam" || view === "test"
         ? [view]
         : search ? CHAT_FOLDERS.filter((f) => !hidden.includes(f)) : [view];
+      // Everyone sees every chat (Steven, 2026-11-22; replaces "CSRs see only unowned + their own"):
+      // the 👤 filter on the page narrows it to one teammate, Mine or Unassigned.
       rows = await listInboxConversations({ search, folders, searchOwners });
-      // CSRs only see chats nobody owns plus their own (Steven, 2026-11-16): someone else's
-      // customer shows up again only after it's released or reassigned. A search still finds it
-      // (with the owner's badge) so a CSR can help a customer who calls in.
-      if (!seesEveryone && !search) rows = rows.filter((r) => !r.assignedTo || r.assignedTo === access.email);
     }
     const taken = await takenOverInfo(rows);
     const latestNotes = await latestTeamNotes(rows.map((r) => r.phone));
@@ -522,15 +522,16 @@ export async function POST(request: Request) {
       }
       case "claim": {
         if (!access.email) return json({ ok: false, message: "Your login has no email, so it can't own customers." }, 400);
-        // A CSR can take another CSR's customer only from the Follow-ups tab, and only while it's on
-        // the follow-up list (due or Later). Anywhere else it's the owner's (Steven, 2026-11-16).
-        let fromFollowUps = false;
-        if (thread.assignedTo && thread.assignedTo !== access.email && !canAssignOthers(access)) {
-          const onList = body.from === "followups" && (await followUpList(null, now)).some((f) => f.phone === phone);
-          if (!onList) {
-            return json({ ok: false, message: `${nameFor(thread.assignedTo, await inboxTeam())} already has this customer. You can take it from the Follow-ups tab when it's on the follow-up list, or ask a manager to reassign it.` }, 409);
+        // A CSR can take a teammate's customer from anywhere (Steven, 2026-11-22; replaces "only from
+        // Follow-ups"), unless the owner texted them or logged a call in the last team hour.
+        const oldOwner = thread.assignedTo && thread.assignedTo !== access.email ? thread.assignedTo : null;
+        const team = await inboxTeam();
+        if (oldOwner && !canAssignOthers(access)) {
+          const active = await activeProtection(phone, oldOwner, now);
+          if (active) {
+            await audit({ phone, action: "claim_blocked", reason: "owner_active", detail: { owner: oldOwner, touchAt: active.touchAt.toISOString() }, actor: who });
+            return json({ ok: false, message: `${nameFor(oldOwner, team)} is working with this customer right now (texted or called them ${pacificWhen(active.touchAt)}). You can take it after ${pacificWhen(active.until)} if they don't reach out again, or ask a manager.` }, 409);
           }
-          fromFollowUps = true;
         }
         if (thread.assignedTo !== access.email) {
           const blocked = await capBlock(access, phone);
@@ -540,8 +541,12 @@ export async function POST(request: Request) {
           }
         }
         await assignConversation(phone, access.email, now);
-        await audit({ phone, action: "assigned", reason: fromFollowUps ? "taken_from_followups" : "claimed", detail: { from: thread.assignedTo }, actor: who });
-        return json({ ok: true, message: fromFollowUps ? `This customer is yours now (taken from ${nameFor(thread.assignedTo, await inboxTeam())}'s follow-ups).` : "This customer is yours now." });
+        const reason = !oldOwner ? "claimed" : body.from === "followups" ? "taken_from_followups" : "taken_from_teammate";
+        await audit({ phone, action: "assigned", reason, detail: { from: thread.assignedTo }, actor: who });
+        if (!oldOwner) return json({ ok: true, message: "This customer is yours now." });
+        // Tell the old owner in Slack so it's no surprise.
+        await postTakenOverAlert(phone, oldOwner, nameFor(access.email, team) || access.email.split("@")[0], [thread.firstName, thread.lastName].filter(Boolean).join(" ") || null);
+        return json({ ok: true, message: `This customer is yours now (taken from ${nameFor(oldOwner, team)}). ${nameFor(oldOwner, team)} gets a Slack note.` });
       }
       case "release": {
         if (!thread.assignedTo) return json({ ok: true, message: "Nobody owns this customer." });

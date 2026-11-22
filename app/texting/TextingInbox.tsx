@@ -257,6 +257,8 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
   const [filter, setFilter] = useState<Filter>("all");
   /** Session 8: show one market only ("" = all). */
   const [market, setMarket] = useState("");
+  /** 👤 whose chats (2026-11-22): "" = everyone, "mine", "unassigned", or a teammate's email. */
+  const [person, setPerson] = useState("");
   const [markets, setMarkets] = useState<string[]>([]);
   const [view, setView] = useState<View>("active");
   const [followOwner, setFollowOwner] = useState("");
@@ -535,7 +537,8 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
 
   // The usual filters work in the inbox; folder views show everything in the folder.
   const visible = (view === "active" ? conversations.filter((c) => matchesFilter(c, filter, me)) : conversations)
-    .filter((c) => !market || c.market === market);
+    .filter((c) => !market || c.market === market)
+    .filter((c) => view === "followups" || !person || (person === "mine" ? Boolean(me) && c.assignedTo === me : person === "unassigned" ? !c.assignedTo : c.assignedTo === person));
   const viewTabs: [View, string][] = [
     ["active", "💬 Inbox"],
     ["followups", `📋 Follow-ups${counts.followups ? ` (${counts.followups})` : ""}`],
@@ -593,6 +596,15 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
             placeholder="Search name, number, text or team member"
             aria-label="Search conversations"
           />
+          {view !== "followups" && followUpPeople.length > 0 && (
+            <select className="inbox-owner-filter" aria-label="Whose chats" value={person} onChange={(e) => setPerson(e.target.value)}
+              title="See a teammate's chats. You can take one unless they texted or called that customer in the last hour.">
+              <option value="">👤 Everyone&apos;s chats</option>
+              <option value="mine">👤 Mine{myNeeds ? ` (${myNeeds} need you)` : ""}</option>
+              <option value="unassigned">👤 Unassigned</option>
+              {followUpPeople.filter((m) => m.email !== me).map((m) => <option key={m.email} value={m.email}>👤 {m.name}</option>)}
+            </select>
+          )}
           {markets.length > 1 && (
             <select className="inbox-owner-filter" aria-label="Market" value={market} onChange={(e) => setMarket(e.target.value)}>
               <option value="">📱 All markets</option>
@@ -621,9 +633,10 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
           )}
           {view === "followups" && <div className="team-hint inbox-folder-hint">{followOwner === "took"
             ? "Customers you took over from someone else's follow-ups (or a manager handed you). Newest first."
-            : "Everyone's customers who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later. This is the one place you can take over someone else's customer. Tip: type a team member's name in the search to see their customers."}</div>}
+            : "Everyone's customers who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later. Tip: type a team member's name in the search to see their customers."}</div>}
           {view === "active" && <div className="inbox-filters" role="tablist" aria-label="Filter">
-            {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["mine", `Mine${myNeeds ? ` (${myNeeds})` : ""}`], ["unassigned", "Unassigned"], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
+            {/* Mine / Unassigned moved to the 👤 menu (2026-11-22). */}
+            {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>
             ))}
           </div>}
@@ -735,9 +748,12 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
               {thread.assignedTo !== data.me && (!thread.assignedTo || data.canAssign) && (
                 <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("claim", view === "followups" ? { from: "followups" } : {})}>Take it</button>
               )}
-              {/* A CSR can take someone else's customer only from the Follow-ups tab (Steven, 2026-11-16). */}
-              {thread.assignedTo && thread.assignedTo !== data.me && !data.canAssign && view === "followups" && (
-                <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("claim", { from: "followups" })}>Take it over</button>
+              {/* A CSR can take a teammate's customer from anywhere, unless the owner texted or called them in the last hour (Steven, 2026-11-22). */}
+              {thread.assignedTo && thread.assignedTo !== data.me && !data.canAssign && (
+                <button className="btn btn-teal btn-small" disabled={busy} onClick={() => act("claim", view === "followups" ? { from: "followups" } : {})}
+                  title={`Take this customer from ${thread.assignedName}. Not allowed while they're working it (texted or called in the last hour). They get a Slack note.`}>
+                  Take it over
+                </button>
               )}
               {thread.assignedTo && (thread.assignedTo === data.me || data.canAssign) && (
                 <button className="btn btn-outline btn-small" disabled={busy} onClick={() => act("release")}>Release</button>
