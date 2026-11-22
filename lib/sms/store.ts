@@ -1317,7 +1317,7 @@ export type TakenOver = { phone: string; from: string; to: string; how: "followu
 function takenOverFrom(r: Record<string, unknown>, owner: string | null): TakenOver | null {
   const detail = (r.detail && typeof r.detail === "object" ? r.detail : {}) as Record<string, unknown>;
   const from = typeof detail.from === "string" ? detail.from.toLowerCase() : "";
-  const how = r.reason === "taken_from_followups" ? "followups" : r.reason === "assigned" ? "reassigned" : null;
+  const how = r.reason === "taken_from_followups" || r.reason === "taken_from_teammate" ? "followups" : r.reason === "assigned" ? "reassigned" : null;
   const to = String((how === "reassigned" ? detail.to : r.actor) || "").toLowerCase();
   if (!how || !from || !owner || from === to || to !== owner.toLowerCase()) return null;
   return { phone: String(r.phone), from, to, how, at: toIso(r.created_at) || "" };
@@ -1337,6 +1337,22 @@ export async function takenOverInfo(rows: { phone: string; assignedTo: string | 
     if (hit) out.set(hit.phone, hit);
   }
   return out;
+}
+
+/**
+ * The owner's last touch on this customer (2026-11-22): their newest text to them, or the newest
+ * 📞 call they logged. A teammate can't take the chat within 1 team hour of it (lib/sms/ownership.ts).
+ */
+export async function lastOwnerTouch(phone: string, owner: string): Promise<Date | null> {
+  const sql = await db();
+  const rows = await sql`SELECT GREATEST(
+      (SELECT max(created_at) FROM sms_messages WHERE phone = ${phone} AND direction = 'outbound'
+        AND status <> 'send_failed' AND lower(coalesce(sent_by, '')) = ${owner.toLowerCase()}),
+      (SELECT max(created_at) FROM sms_notes WHERE phone = ${phone} AND deleted_at IS NULL
+        AND kind LIKE 'call_%' AND lower(created_by) = ${owner.toLowerCase()})
+    ) AS at`;
+  const at = toIso(rows[0]?.at);
+  return at ? new Date(at) : null;
 }
 
 /** The chats this person owns because they took them over (or a manager handed them over), newest first. */
