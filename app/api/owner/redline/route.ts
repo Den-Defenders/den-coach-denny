@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
 import { canViewOwner } from "@/lib/ownerAccess";
-import { latestRedlineSnapshot, saveRedlineSnapshot } from "@/lib/ownerStore";
+import { latestRedlineSnapshot, liveRedlineSnapshot, saveRedlineSnapshot } from "@/lib/ownerStore";
 import { parseRedlineSnapshot } from "@/lib/ownerRedline";
 
 export const runtime = "nodejs";
@@ -13,9 +13,20 @@ function configured() {
 
 export async function GET() {
   if (!await canViewOwner()) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const headers = { "Cache-Control": "private, no-store" };
+  // Nightly ServiceTitan snapshots first (updates on its own every night).
+  // An imported snapshot is only the fallback when the live numbers can't be built.
+  let liveProblem: string | null = null;
   try {
-    return NextResponse.json({ snapshot: await latestRedlineSnapshot(), configured: configured() },
-      { headers: { "Cache-Control": "private, no-store" } });
+    const live = await liveRedlineSnapshot();
+    if (live) return NextResponse.json({ snapshot: live, live: true, configured: configured() }, { headers });
+    liveProblem = "No nightly snapshots were found.";
+  } catch (error) {
+    liveProblem = error instanceof Error ? error.message.slice(0, 300) : "The nightly numbers could not be built.";
+    console.error("[owner-redline] live build failed:", error);
+  }
+  try {
+    return NextResponse.json({ snapshot: await latestRedlineSnapshot(), live: false, liveProblem, configured: configured() }, { headers });
   } catch {
     return NextResponse.json({ error: "Redline storage unavailable." }, { status: 503 });
   }

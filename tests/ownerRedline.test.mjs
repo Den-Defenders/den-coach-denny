@@ -49,7 +49,7 @@ test("below the redline: crossing week and required cuts", () => {
 });
 
 test("rejects bad input instead of guessing", () => {
-  assert.throws(() => parseRedlineSnapshot({ ...example, snapshotDate: "2026-11-24" }), /Monday/);
+  assert.throws(() => parseRedlineSnapshot({ ...example, snapshotDate: "2026-11-31" }), /snapshotDate/);
   assert.throws(() => parseRedlineSnapshot({ ...example, backlog: -1 }), /backlog/);
   assert.throws(() => parseRedlineSnapshot({ ...example, backlog: undefined }), /backlog is required/);
   assert.throws(() => parseRedlineSnapshot({ ...example, targetDate: "2026-11-01" }), /targetDate/);
@@ -59,7 +59,7 @@ test("rejects bad input instead of guessing", () => {
 
 test("Monday Slack update uses Steven's format", () => {
   const text = mondaySlackUpdate(parseRedlineSnapshot(example));
-  assert.match(text, /^📅 \*Feb 1 Redline Update – week of Nov 23\*/);
+  assert.match(text, /^📅 \*Feb 1 Redline Update – Mon Nov 23\*/);
   assert.match(text, /⚠ Installs out-paced sales by \$70,000 \(37%\)/);
   assert.match(text, /Install allowance: \$71,333\/week/);
   assert.match(text, /NorCal: sold \$60,000, installed \$110,000/);

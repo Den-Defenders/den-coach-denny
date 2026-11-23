@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:owner": "node --test --experimental-strip-types --no-warnings tests/ownerRedline.test.mjs"
+    "test:owner": "node --test --experimental-strip-types --no-warnings tests/ownerRedline.test.mjs tests/ownerRedlineLive.test.mjs"
   },
   "dependencies": {
     "@auth0/nextjs-auth0": "^4.30.0",

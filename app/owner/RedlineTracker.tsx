@@ -74,6 +74,8 @@ function BacklogChart({ s, projection }: { s: RedlineSnapshot; projection: { dat
 export default function RedlineTracker() {
   const [snapshot, setSnapshot] = useState<RedlineSnapshot | null>(null);
   const [configured, setConfigured] = useState(false);
+  const [live, setLive] = useState(false);
+  const [liveProblem, setLiveProblem] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
   const [copied, setCopied] = useState(false);
@@ -85,6 +87,7 @@ export default function RedlineTracker() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not load the redline snapshot.");
       setSnapshot(data.snapshot); setConfigured(data.configured);
+      setLive(Boolean(data.live)); setLiveProblem(data.liveProblem || null);
     } catch (error) { setStatus(error instanceof Error ? error.message : "Could not load the redline snapshot."); }
     finally { setLoading(false); }
   }
@@ -111,19 +114,20 @@ export default function RedlineTracker() {
     catch { setStatus("Copy didn't work in this browser. Select the text and copy it instead."); }
   }
 
-  const importBox = <div className="owner-import owner-redline-import">
-    <label htmlFor="owner-redline-file">Import Monday snapshot</label>
+  const importBox = <details className="owner-method owner-redline-manual"><summary>Manual import (only needed if the nightly numbers stop)</summary><div className="owner-import owner-redline-import">
+    <label htmlFor="owner-redline-file">Import a redline snapshot</label>
     <input id="owner-redline-file" type="file" accept="application/json,.json" disabled={uploading || !configured}
       onChange={(e) => { const file = e.target.files?.[0]; if (file) void importFile(file); e.currentTarget.value = ""; }} />
-    <small>{configured ? "Owner only · the newest Monday is shown. Earlier snapshots stay saved." : "The private reporting database must be connected before snapshots can be saved."}</small>
-  </div>;
+    <small>{configured ? "Owner only · used only when the nightly numbers can't be built. Earlier imports stay saved." : "The private reporting database must be connected before snapshots can be saved."}</small>
+  </div></details>;
 
   if (!snapshot || !math) {
     return <section className="owner-redline owner-redline-empty surface" aria-label="Feb 1 redline tracker">
       <div>
-        <span className="owner-section-label">FEB 1 REDLINE · MONDAY SNAPSHOT</span>
-        <h2>{loading ? "Loading the redline…" : "Redline tracker is ready for its first Monday"}</h2>
-        <p>Shows sold backlog against the $350K redline, how far installs out-paced sales in the last 30 days, and the weekly install allowance that lands on the redline by Feb 1. No numbers are shown until a real ServiceTitan snapshot is imported.</p>
+        <span className="owner-section-label">FEB 1 REDLINE · UPDATES NIGHTLY</span>
+        <h2>{loading ? "Loading the redline…" : "Waiting for the nightly numbers"}</h2>
+        <p>Shows sold backlog against the $350K redline, how far installs out-paced sales in the last 30 days, and the weekly install allowance that lands on the redline by Feb 1. It fills in on its own from the nightly ServiceTitan snapshot (12:10 AM PT). No numbers are shown until real data is there.</p>
+        {liveProblem && !loading && <p className="notice">{liveProblem}</p>}
         {status && <p className="notice" role="status">{status}</p>}
       </div>
       {importBox}
@@ -138,13 +142,14 @@ export default function RedlineTracker() {
   return <section className="owner-redline surface" aria-label="Feb 1 redline tracker">
     <div className="owner-chart-heading">
       <div>
-        <span className="owner-section-label">FEB 1 REDLINE · MONDAY {day(s.snapshotDate).toUpperCase()} SNAPSHOT</span>
+        <span className="owner-section-label">FEB 1 REDLINE · {live ? "UPDATED" : "IMPORTED SNAPSHOT"} {new Date(`${s.snapshotDate}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" }).toUpperCase()}{live ? " · UPDATES EVERY NIGHT" : ""}</span>
         <h2>Redline tracker</h2>
         <p>Sold Security work not yet installed (Hold not counted), measured against the {usd(s.redline)} redline for {day(s.targetDate)}.</p>
       </div>
       <b className={`owner-redline-pill ${math.status}`}>{statusLabel}</b>
     </div>
     {status && <p className="notice" role="status">{status}</p>}
+    {!live && liveProblem && <p className="notice">Showing the last imported snapshot because the nightly numbers couldn&apos;t be built: {liveProblem}</p>}
 
     <div className="owner-redline-stats">
       <article><span>Sold backlog today</span><strong>{usd(s.backlog)}</strong><small>{math.backlogChange30 !== null ? `${math.backlogChange30 >= 0 ? "Up" : "Down"} ${usd(Math.abs(math.backlogChange30))} from ${usd(math.backlog30DaysAgo)} 30 days ago` : "30-day comparison not in this snapshot"}</small></article>
@@ -196,7 +201,7 @@ export default function RedlineTracker() {
     </table></div>}
 
     <div className="owner-redline-slack">
-      <div className="owner-redline-slack-head"><span className="owner-section-label">MONDAY UPDATE FOR MIKE</span>
+      <div className="owner-redline-slack-head"><span className="owner-section-label">UPDATE FOR MIKE · COPY ON MONDAYS</span>
         <button type="button" onClick={() => void copy()}>{copied ? "Copied" : "Copy for Slack"}</button></div>
       <pre>{slack}</pre>
     </div>
@@ -207,7 +212,7 @@ export default function RedlineTracker() {
         <li><strong>Projected {day(s.targetDate)}</strong> = backlog today + ({usd(math.salesPerWeek)} sold − {usd(math.installsPerWeek)} installed per week) × {math.weeksLeft.toFixed(1)} weeks. The paces come from the last {math.windowDays} days.</li>
         <li><strong>Install allowance</strong> = (backlog + expected sales − redline) ÷ weeks left. Installing more than this per week takes the backlog under the redline unless sales pick up.</li>
         <li><strong>Room left to book</strong> = total allowance before {day(s.targetDate)} minus install revenue already on the calendar before that date.</li>
-        <li>Cancellations, price changes and Hold releases also move the backlog, so the Monday measured number can differ from last week&apos;s projection.</li>
+        <li>Cancellations, price changes and Hold releases also move the backlog, so each night&apos;s measured number can differ from the last projection.</li>
         <li>Source: {s.source} · created {new Date(s.generatedAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles" })} PT{s.notes.map((n, i) => <span key={i}><br />{n}</span>)}</li>
       </ol>
     </details>
