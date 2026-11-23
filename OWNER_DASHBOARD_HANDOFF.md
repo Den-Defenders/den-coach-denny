@@ -59,7 +59,9 @@ Build a server-side collector with ServiceTitan credentials and an authorized jo
 
 ## Feb 1 redline tracker (added Nov 23, 2026)
 
-The first card on `/owner` tracks Mike's goal: keep at least **$350K** of sold, not-yet-installed Security work on the books on **Feb 1, 2027**, cut overtime, and keep installs from out-pacing sales. It is fed by a small Monday snapshot, separate from the report JSON above, and shows nothing until a real snapshot is imported.
+The first card on `/owner` tracks Mike's goal: keep at least **$350K** of sold, not-yet-installed Security work on the books on **Feb 1, 2027**, cut overtime, and keep installs from out-pacing sales.
+
+**It updates every night on its own.** `/api/owner/redline` builds it from the owner report collector's nightly job snapshots (`owner_snapshot_manifest`, `owner_snapshot_job`, `owner_st_record` in the same database, written by `servicetitan-mcp/owner_report` at 12:10 AM PT) plus the dashboard's daily Security sales (`lib/ownerRedlineLive.ts`). Installed = jobs that left the open backlog between two midnights and are now Completed in ServiceTitan. Canceled ones are listed separately. Region = the business unit name before " - ". It needs at least 7 nightly snapshots. An imported snapshot (below) is only used if the nightly numbers can't be built.
 
 - **Backlog** = full sold value of open RTI jobs (type 2054262) at the Monday 12:00 AM Pacific cutoff, same rules as the verified weekly installation pipeline: not completed, canceled, on Hold, RMA/remake or a non-sale visit. Hold goes in `holdBacklog` and is never added.
 - **Sold / installed (last 30 days)** = newly sold Security RTI value, and full sold value of RTI jobs completed, in the window.

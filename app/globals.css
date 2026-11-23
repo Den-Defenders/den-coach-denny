@@ -266,7 +266,7 @@ a { color: inherit; }
 .owner-redline { padding: 26px; display: grid; gap: 18px; border-top: 5px solid #e0393e; }
 .owner-redline h2 { margin: 7px 0; font-family: var(--display); text-transform: uppercase; font-size: clamp(26px,2.7vw,39px); letter-spacing: .02em; }
 .owner-redline h3 { margin: 6px 0 14px; font-family: var(--display); text-transform: uppercase; font-size: 24px; }
-.owner-redline-empty { grid-template-columns: 1fr 310px; align-items: start; }
+.owner-redline-empty { grid-template-columns: 1fr; align-items: start; }
 .owner-redline-empty p { color: var(--muted); line-height: 1.5; margin: 0; }
 .owner-redline-pill { align-self: start; border-radius: 30px; padding: 8px 14px; font-size: 13px !important; text-transform: uppercase; letter-spacing: .06em; }
 .owner-redline-pill.safe { background: #e5f6ef; color: #087445; }
@@ -294,7 +294,8 @@ a { color: inherit; }
 .owner-redline-slack-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
 .owner-redline-slack button { border: 0; border-radius: 9px; background: var(--navy); color: #fff; padding: 9px 16px; font-weight: 800; cursor: pointer; }
 .owner-redline-slack pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 13px; line-height: 1.6; }
-.owner-redline-import { max-width: 420px; }
+.owner-redline-import { max-width: 420px; margin-top: 12px; }
+.owner-redline-empty .owner-redline-manual { grid-column: 1 / -1; }
 
 .schedule-hero { display: grid; grid-template-columns: 1fr 280px; min-height: 260px; border-radius: 22px; overflow: hidden; color: #fff; background: radial-gradient(circle at 70% 30%, rgba(53,189,181,.38), transparent 30%), linear-gradient(115deg, var(--navy-deep), #07506a); box-shadow: var(--shadow); }
 .schedule-copy { padding: clamp(28px, 4vw, 52px); }

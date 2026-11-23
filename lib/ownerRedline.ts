@@ -4,7 +4,8 @@
 // Security work on the books on Feb 1, cut overtime, and keep installs from
 // out-pacing sales. This file holds the snapshot format and every number the
 // tracker shows, as plain functions with no app imports so they can be tested
-// directly with `npm run test:owner`.
+// directly with `npm run test:owner`. The numbers come from the nightly
+// ServiceTitan snapshots (lib/ownerRedlineLive.ts), or an imported snapshot.
 //
 // Definitions (match the verified weekly installation pipeline):
 // - Backlog: full sold value of open "Returning to Install Security Products"
@@ -92,8 +93,8 @@ export function parseRedlineSnapshot(input: unknown): RedlineSnapshot {
   if (raw.kind !== "owner-redline" || raw.schemaVersion !== 1) {
     throw new Error('Snapshot must have kind "owner-redline" and schemaVersion 1.');
   }
-  if (!validDay(raw.snapshotDate) || !isMonday(raw.snapshotDate)) {
-    throw new Error("snapshotDate must be a Monday (the 12:00 AM Pacific cutoff).");
+  if (!validDay(raw.snapshotDate)) {
+    throw new Error("snapshotDate must be a date (the 12:00 AM Pacific cutoff).");
   }
   const snapshotDate = raw.snapshotDate;
   if (typeof raw.generatedAt !== "string" || Number.isNaN(Date.parse(raw.generatedAt))) {
@@ -271,12 +272,13 @@ function closestBacklog(weeks: RedlineWeek[], day: string) {
 }
 
 const usd = (n: number) => `${n < 0 ? "-" : ""}$${Math.round(Math.abs(n)).toLocaleString("en-US")}`;
+const weekday = (day: string) => new Date(`${day}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
 const shortDay = (day: string) => new Date(`${day}T12:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 
 /** Ready-to-paste Monday update for Mike, in Steven's Slack format. */
 export function mondaySlackUpdate(s: RedlineSnapshot, m = redlineMath(s)) {
   const lines = [
-    `📅 *Feb 1 Redline Update – week of ${shortDay(s.snapshotDate)}*`,
+    `📅 *Feb 1 Redline Update – ${weekday(s.snapshotDate)} ${shortDay(s.snapshotDate)}*`,
     "",
     "*Where we stand*",
     `• Sold backlog today: ${usd(s.backlog)}${s.holdBacklog !== null ? ` (plus ${usd(s.holdBacklog)} on Hold, not counted)` : ""}`,
