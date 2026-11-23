@@ -71,6 +71,53 @@ function BacklogChart({ s, projection }: { s: RedlineSnapshot; projection: { dat
   </div>;
 }
 
+type Goal = { redline: number; targetDate: string; setAt: string | null; setBy: string | null };
+const longDay = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+function GoalEditor({ goal, today, configured, startOpen, onSaved }: { goal: Goal; today: string; configured: boolean; startOpen: boolean; onSaved: () => Promise<void> }) {
+  const [open, setOpen] = useState(startOpen);
+  const [amount, setAmount] = useState(String(goal.redline));
+  const [date, setDate] = useState(goal.targetDate > today ? goal.targetDate : "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const tomorrow = new Date(Date.parse(`${today}T12:00:00Z`) + 86400000).toISOString().slice(0, 10);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    const redline = Number(amount.replace(/[$,\s]/g, ""));
+    if (!Number.isFinite(redline) || redline < 1000) { setError("Enter a redline of at least $1,000."); return; }
+    if (!date) { setError("Pick a goal date."); return; }
+    if (date <= today) { setError("The goal date has to be after today."); return; }
+    setSaving(true); setError("");
+    try {
+      const res = await fetch("/api/owner/redline/goal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ redline, targetDate: date }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save the goal.");
+      setOpen(false);
+      await onSaved();
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not save the goal."); }
+    finally { setSaving(false); }
+  }
+
+  if (!open) {
+    return <div className="owner-redline-goal">
+      <span><b>Goal:</b> keep at least {usd(goal.redline)} of sold work by {longDay(goal.targetDate)}
+        {goal.setBy && <small> · set by {goal.setBy}{goal.setAt ? ` on ${new Date(goal.setAt).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/Los_Angeles" })}` : ""}</small>}</span>
+      <button type="button" onClick={() => { setAmount(String(goal.redline)); setDate(goal.targetDate > today ? goal.targetDate : ""); setError(""); setOpen(true); }}>Change goal</button>
+    </div>;
+  }
+  return <form className="owner-redline-goal owner-redline-goal-form" onSubmit={(e) => void save(e)}>
+    <label>Redline amount<input inputMode="numeric" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} placeholder="350000" /></label>
+    <label>Goal date<input type="date" min={tomorrow} value={date} onChange={(e) => { setDate(e.target.value); setError(""); }} /></label>
+    <div className="owner-redline-goal-actions">
+      <button type="submit" disabled={saving}>{saving ? "Saving…" : "Save goal"}</button>
+      {!startOpen && <button type="button" className="secondary" onClick={() => setOpen(false)}>Cancel</button>}
+    </div>
+    {!configured && <p className="owner-redline-goal-error">The private reporting database must be connected before a goal can be saved.</p>}
+    {error && <p className="owner-redline-goal-error" role="alert">{error}</p>}
+  </form>;
+}
+
 export default function RedlineTracker() {
   const [snapshot, setSnapshot] = useState<RedlineSnapshot | null>(null);
   const [configured, setConfigured] = useState(false);
@@ -80,6 +127,9 @@ export default function RedlineTracker() {
   const [status, setStatus] = useState("");
   const [copied, setCopied] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [goal, setGoal] = useState<Goal | null>(null);
+  const [goalPassed, setGoalPassed] = useState(false);
+  const [today, setToday] = useState("");
 
   async function refresh() {
     try {
@@ -88,6 +138,7 @@ export default function RedlineTracker() {
       if (!res.ok) throw new Error(data.error || "Could not load the redline snapshot.");
       setSnapshot(data.snapshot); setConfigured(data.configured);
       setLive(Boolean(data.live)); setLiveProblem(data.liveProblem || null);
+      setGoal(data.goal || null); setGoalPassed(Boolean(data.goalPassed)); setToday(data.today || "");
     } catch (error) { setStatus(error instanceof Error ? error.message : "Could not load the redline snapshot."); }
     finally { setLoading(false); }
   }
@@ -121,15 +172,32 @@ export default function RedlineTracker() {
     <small>{configured ? "Owner only · used only when the nightly numbers can't be built. Earlier imports stay saved." : "The private reporting database must be connected before snapshots can be saved."}</small>
   </div></details>;
 
-  if (!snapshot || !math) {
-    return <section className="owner-redline owner-redline-empty surface" aria-label="Feb 1 redline tracker">
+  const goalBox = goal && today
+    ? <GoalEditor key={`${goal.redline}-${goal.targetDate}-${goalPassed}`} goal={goal} today={today} configured={configured} startOpen={goalPassed} onSaved={refresh} />
+    : null;
+
+  if (goalPassed && goal) {
+    return <section className="owner-redline owner-redline-empty surface" aria-label="Redline tracker">
       <div>
-        <span className="owner-section-label">FEB 1 REDLINE · UPDATES NIGHTLY</span>
+        <span className="owner-section-label">REDLINE · GOAL DATE REACHED</span>
+        <h2>Set the next redline goal</h2>
+        <p>The last goal was {usd(goal.redline)} by {longDay(goal.targetDate)}, and that date has come. Enter the next amount and date, and the tracker picks up again right away from the nightly ServiceTitan numbers.</p>
+        {status && <p className="notice" role="status">{status}</p>}
+      </div>
+      {goalBox}
+    </section>;
+  }
+
+  if (!snapshot || !math) {
+    return <section className="owner-redline owner-redline-empty surface" aria-label="Redline tracker">
+      <div>
+        <span className="owner-section-label">{goal ? `${day(goal.targetDate).toUpperCase()} ` : ""}REDLINE · UPDATES NIGHTLY</span>
         <h2>{loading ? "Loading the redline…" : "Waiting for the nightly numbers"}</h2>
-        <p>Shows sold backlog against the $350K redline, how far installs out-paced sales in the last 30 days, and the weekly install allowance that lands on the redline by Feb 1. It fills in on its own from the nightly ServiceTitan snapshot (12:10 AM PT). No numbers are shown until real data is there.</p>
+        <p>Shows sold backlog against the {goal ? usd(goal.redline) : "goal"} redline, how far installs out-paced sales in the last 30 days, and the weekly install allowance that lands on the redline by {goal ? day(goal.targetDate) : "the goal date"}. It fills in on its own from the nightly ServiceTitan snapshot (12:10 AM PT). No numbers are shown until real data is there.</p>
         {liveProblem && !loading && <p className="notice">{liveProblem}</p>}
         {status && <p className="notice" role="status">{status}</p>}
       </div>
+      {goalBox}
       {importBox}
     </section>;
   }
@@ -139,16 +207,17 @@ export default function RedlineTracker() {
   const soldPct = Math.max(s.last30.sold, s.last30.installed) > 0 ? s.last30.sold / Math.max(s.last30.sold, s.last30.installed) * 100 : 0;
   const installedPct = Math.max(s.last30.sold, s.last30.installed) > 0 ? s.last30.installed / Math.max(s.last30.sold, s.last30.installed) * 100 : 0;
 
-  return <section className="owner-redline surface" aria-label="Feb 1 redline tracker">
+  return <section className="owner-redline surface" aria-label={`${day(s.targetDate)} redline tracker`}>
     <div className="owner-chart-heading">
       <div>
-        <span className="owner-section-label">FEB 1 REDLINE · {live ? "UPDATED" : "IMPORTED SNAPSHOT"} {new Date(`${s.snapshotDate}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" }).toUpperCase()}{live ? " · UPDATES EVERY NIGHT" : ""}</span>
+        <span className="owner-section-label">{day(s.targetDate).toUpperCase()} REDLINE · {live ? "UPDATED" : "IMPORTED SNAPSHOT"} {new Date(`${s.snapshotDate}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" }).toUpperCase()}{live ? " · UPDATES EVERY NIGHT" : ""}</span>
         <h2>Redline tracker</h2>
         <p>Sold Security work not yet installed (Hold not counted), measured against the {usd(s.redline)} redline for {day(s.targetDate)}.</p>
       </div>
       <b className={`owner-redline-pill ${math.status}`}>{statusLabel}</b>
     </div>
     {status && <p className="notice" role="status">{status}</p>}
+    {goalBox}
     {!live && liveProblem && <p className="notice">Showing the last imported snapshot because the nightly numbers couldn&apos;t be built: {liveProblem}</p>}
 
     <div className="owner-redline-stats">

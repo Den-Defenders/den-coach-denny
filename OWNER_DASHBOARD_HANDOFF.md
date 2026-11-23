@@ -66,6 +66,7 @@ The first card on `/owner` tracks Mike's goal: keep at least **$350K** of sold, 
 - **Backlog** = full sold value of open RTI jobs (type 2054262) at the Monday 12:00 AM Pacific cutoff, same rules as the verified weekly installation pipeline: not completed, canceled, on Hold, RMA/remake or a non-sale visit. Hold goes in `holdBacklog` and is never added.
 - **Sold / installed (last 30 days)** = newly sold Security RTI value, and full sold value of RTI jobs completed, in the window.
 - **scheduledThroughTarget** = install revenue whose final install appointment falls from the cutoff up to (not including) the target date, using the same final-appointment rule as the daily REV/CF post. `null` if not pulled.
-- Unknown numbers are `null`, never 0. `redline` and `targetDate` default to 350000 and 2027-02-01 and can be changed per snapshot.
+- Unknown numbers are `null`, never 0.
+- **The goal is set on the card.** An owner clicks **Change goal**, enters the redline amount and date, and saves (`/api/owner/redline/goal`, stored in `owner_redline_goal`, every change kept with who set it). With no saved goal, it is $350,000 by 2027-02-01. When the goal date arrives, the card asks for the next goal instead of breaking.
 
 The page works out the projection, install allowance, out-pace gap, sold-to-installed ratio, room left to book, and a copy-ready Slack update. The math is in `lib/ownerRedline.ts`, and `npm run test:owner` checks it. `docs/owner-redline-snapshot.example.json` shows the exact format with **example numbers only**. Snapshots are saved in the private `owner_redline_snapshots` table (`OWNER_DATABASE_URL`); every import is kept, and the newest Monday is displayed.

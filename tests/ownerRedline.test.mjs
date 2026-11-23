@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseRedlineSnapshot, redlineMath, mondaySlackUpdate } from "../lib/ownerRedline.ts";
+import { parseRedlineSnapshot, parseRedlineGoal, redlineMath, mondaySlackUpdate } from "../lib/ownerRedline.ts";
 
 const example = JSON.parse(readFileSync(new URL("../docs/owner-redline-snapshot.example.json", import.meta.url), "utf8"));
 const near = (a, b, tol = 0.5) => assert.ok(Math.abs(a - b) <= tol, `${a} != ${b}`);
@@ -65,4 +65,20 @@ test("Monday Slack update uses Steven's format", () => {
   assert.match(text, /NorCal: sold \$60,000, installed \$110,000/);
   assert.match(text, /plus \$225,000 on Hold, not counted/);
   assert.match(text, /MidCal: sold \$30,000, installed \$35,000 · 4 wk out/);
+});
+
+test("Slack update leaves out room-left-to-book unless already over", () => {
+  const ok = mondaySlackUpdate(parseRedlineSnapshot(example));
+  assert.doesNotMatch(ok, /Room left to book/);
+  const over = mondaySlackUpdate(parseRedlineSnapshot({ ...example, scheduledThroughTarget: 900000 }));
+  assert.match(over, /⚠ Already booked \$186,667 more install work before Feb 1 than the allowance/);
+});
+
+test("goal typed on the dashboard is checked", () => {
+  assert.deepEqual(parseRedlineGoal({ redline: "$400,000", targetDate: "2027-05-01" }, "2026-11-23"), { redline: 400000, targetDate: "2027-05-01" });
+  assert.deepEqual(parseRedlineGoal({ redline: 350000.4, targetDate: "2026-11-24" }, "2026-11-23"), { redline: 350000, targetDate: "2026-11-24" });
+  assert.throws(() => parseRedlineGoal({ redline: 400000, targetDate: "2026-11-23" }, "2026-11-23"), /after today/);
+  assert.throws(() => parseRedlineGoal({ redline: 400000, targetDate: "2029-01-01" }, "2026-11-23"), /two years/);
+  assert.throws(() => parseRedlineGoal({ redline: "abc", targetDate: "2027-05-01" }, "2026-11-23"), /redline/);
+  assert.throws(() => parseRedlineGoal({ redline: 400000, targetDate: "2027-02-30" }, "2026-11-23"), /goal date/);
 });

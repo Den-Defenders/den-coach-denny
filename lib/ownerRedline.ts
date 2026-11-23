@@ -176,6 +176,21 @@ export function parseRedlineSnapshot(input: unknown): RedlineSnapshot {
   };
 }
 
+export type RedlineGoal = { redline: number; targetDate: string };
+
+/** Validates a goal typed on the dashboard. The date must still be ahead (Pacific). */
+export function parseRedlineGoal(input: unknown, todayPacific: string): RedlineGoal {
+  const raw = (input || {}) as Record<string, unknown>;
+  const redline = typeof raw.redline === "string" ? Number(raw.redline.replace(/[$,\s]/g, "")) : raw.redline;
+  if (typeof redline !== "number" || !Number.isFinite(redline) || redline < 1000 || redline > 100_000_000) {
+    throw new Error("Enter a redline between $1,000 and $100,000,000.");
+  }
+  if (!validDay(raw.targetDate)) throw new Error("Enter a goal date.");
+  if (raw.targetDate <= todayPacific) throw new Error("The goal date has to be after today.");
+  if (daysBetween(todayPacific, raw.targetDate) > 730) throw new Error("Pick a goal date within the next two years.");
+  return { redline: Math.round(redline), targetDate: raw.targetDate };
+}
+
 export type RedlineStatus = "safe" | "close" | "below";
 
 export type RedlineMath = {
@@ -303,10 +318,10 @@ export function mondaySlackUpdate(s: RedlineSnapshot, m = redlineMath(s)) {
     `• Install allowance: ${usd(m.allowancePerWeek)}/week (now running ${usd(m.installsPerWeek)}/week)`,
   );
   if (m.installCutPerWeek > 0) lines.push(`• Bring installs down about ${usd(m.installCutPerWeek)}/week, or sell ${usd(m.salesNeededPerWeek)}/week (now ${usd(m.salesPerWeek)}/week)`);
-  if (m.roomLeftToBook !== null) {
-    lines.push(m.roomLeftToBook >= 0
-      ? `• Room left to book before ${shortDay(s.targetDate)}: ${usd(m.roomLeftToBook)}`
-      : `• ⚠ Already booked ${usd(-m.roomLeftToBook)} more than the room before ${shortDay(s.targetDate)}`);
+  // "Room left to book" stays on the card only: it assumes sales hold at full
+  // speed and read like "we can schedule this much more" (Steven, 2026-11-23).
+  if (m.roomLeftToBook !== null && m.roomLeftToBook < 0) {
+    lines.push(`• ⚠ Already booked ${usd(-m.roomLeftToBook)} more install work before ${shortDay(s.targetDate)} than the allowance`);
   }
   const outpaced = s.regions.filter((r) => r.sold30 !== null && r.installed30 !== null && r.installed30 > r.sold30);
   if (outpaced.length) {

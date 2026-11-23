@@ -1,7 +1,7 @@
 import { neon } from "@neondatabase/serverless";
 import { parseOwnerReport, type OwnerReport } from "@/lib/ownerReport";
 import initialReport from "@/data/owner-dashboard-report.json";
-import { DEFAULT_REDLINE, DEFAULT_TARGET_DATE, addDays, parseRedlineSnapshot, type RedlineSnapshot } from "@/lib/ownerRedline";
+import { DEFAULT_REDLINE, DEFAULT_TARGET_DATE, addDays, parseRedlineSnapshot, type RedlineGoal, type RedlineSnapshot } from "@/lib/ownerRedline";
 import { assembleRedline, findDepartures, pacificDay, type JobInfo, type NightlyCutoff, type SnapshotJob } from "@/lib/ownerRedlineLive";
 
 function sqlClient() {
@@ -84,7 +84,7 @@ export async function saveRedlineSnapshot(snapshot: RedlineSnapshot, importedBy:
 // updates on its own after the 12:10 AM PT run. Cached per newest snapshot.
 let liveCache: { key: string; snapshot: RedlineSnapshot } | null = null;
 
-export async function liveRedlineSnapshot(): Promise<RedlineSnapshot | null> {
+export async function liveRedlineSnapshot(goal: RedlineGoal): Promise<RedlineSnapshot | null> {
   const sql = sqlClient();
   if (!sql) return null;
   const exists = await sql`SELECT to_regclass('public.owner_snapshot_manifest') AS table_name`;
@@ -108,7 +108,7 @@ export async function liveRedlineSnapshot(): Promise<RedlineSnapshot | null> {
         summary: typeof m.summary === "string" ? JSON.parse(m.summary || "{}") : (m.summary || {}) });
     }
   }
-  const key = [...best.entries()].map(([c, b]) => `${c}:${b.revision}`).join("|") + `|${DEFAULT_REDLINE}|${DEFAULT_TARGET_DATE}`;
+  const key = [...best.entries()].map(([c, b]) => `${c}:${b.revision}`).join("|") + `|${goal.redline}|${goal.targetDate}`;
   if (liveCache?.key === key) return liveCache.snapshot;
 
   const rows = await sql`SELECT cutoff_utc, revision, job_id,
@@ -158,8 +158,41 @@ export async function liveRedlineSnapshot(): Promise<RedlineSnapshot | null> {
 
   const snapshot = assembleRedline({
     cutoffs: ordered, jobInfo, dailySales, generatedAt: new Date().toISOString(),
-    redline: DEFAULT_REDLINE, targetDate: DEFAULT_TARGET_DATE,
+    redline: goal.redline, targetDate: goal.targetDate,
   });
   liveCache = { key, snapshot };
   return snapshot;
+}
+
+// ---------------------------------------------------------------------------
+// Redline goal, set by an owner on the dashboard. Every change is kept; the
+// newest row is the goal. With no row yet, the original goal applies.
+async function ensureGoalTable(sql: NonNullable<ReturnType<typeof sqlClient>>) {
+  await sql`CREATE TABLE IF NOT EXISTS owner_redline_goal (
+    id BIGSERIAL PRIMARY KEY,
+    set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    set_by TEXT NOT NULL,
+    redline NUMERIC NOT NULL,
+    target_date DATE NOT NULL
+  )`;
+}
+
+export async function currentRedlineGoal(): Promise<RedlineGoal & { setAt: string | null; setBy: string | null }> {
+  const fallback = { redline: DEFAULT_REDLINE, targetDate: DEFAULT_TARGET_DATE, setAt: null, setBy: null };
+  const sql = sqlClient();
+  if (!sql) return fallback;
+  await ensureGoalTable(sql);
+  const rows = await sql`SELECT redline, to_char(target_date, 'YYYY-MM-DD') AS target_date, set_at, set_by
+    FROM owner_redline_goal ORDER BY id DESC LIMIT 1`;
+  if (!rows.length) return fallback;
+  return { redline: Number(rows[0].redline), targetDate: String(rows[0].target_date),
+    setAt: new Date(rows[0].set_at as string).toISOString(), setBy: String(rows[0].set_by) };
+}
+
+export async function saveRedlineGoal(goal: RedlineGoal, setBy: string) {
+  const sql = sqlClient();
+  if (!sql) throw new Error("Owner reporting database is not configured.");
+  await ensureGoalTable(sql);
+  await sql`INSERT INTO owner_redline_goal (set_by, redline, target_date) VALUES (${setBy}, ${goal.redline}, ${goal.targetDate})`;
+  liveCache = null;
 }
