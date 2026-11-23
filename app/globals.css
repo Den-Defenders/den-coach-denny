@@ -263,6 +263,38 @@ a { color: inherit; }
 .owner-import label { font-weight: 900; }
 .owner-import input { width: 100%; }
 .owner-import small { color: var(--muted); line-height: 1.4; }
+.owner-redline { padding: 26px; display: grid; gap: 18px; border-top: 5px solid #e0393e; }
+.owner-redline h2 { margin: 7px 0; font-family: var(--display); text-transform: uppercase; font-size: clamp(26px,2.7vw,39px); letter-spacing: .02em; }
+.owner-redline h3 { margin: 6px 0 14px; font-family: var(--display); text-transform: uppercase; font-size: 24px; }
+.owner-redline-empty { grid-template-columns: 1fr 310px; align-items: start; }
+.owner-redline-empty p { color: var(--muted); line-height: 1.5; margin: 0; }
+.owner-redline-pill { align-self: start; border-radius: 30px; padding: 8px 14px; font-size: 13px !important; text-transform: uppercase; letter-spacing: .06em; }
+.owner-redline-pill.safe { background: #e5f6ef; color: #087445; }
+.owner-redline-pill.close { background: #fff1cd; color: #71540b; }
+.owner-redline-pill.below { background: #ffe4e4; color: #a3171b; }
+.owner-redline-stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
+.owner-redline-stats article { display: grid; gap: 6px; padding: 18px; border-radius: 14px; background: #f3f7f8; }
+.owner-redline-stats span { color: var(--muted); font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: .08em; }
+.owner-redline-stats strong { font-size: clamp(24px,2.2vw,34px); letter-spacing: -.03em; }
+.owner-redline-stats strong em { font-style: normal; font-size: 16px; color: var(--muted); }
+.owner-redline-stats small { color: var(--muted); line-height: 1.35; }
+.owner-redline .bad { color: #c4161c; }
+.owner-redline .good { color: #087445; }
+.owner-redline-ruler { display: block; width: 100%; height: auto; }
+.owner-redline-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.owner-redline-split .owner-detail { border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+.owner-redline-bars { display: grid; grid-template-columns: 80px 1fr auto; gap: 12px; align-items: center; font-weight: 800; }
+.owner-redline-bars div { height: 22px; background: #edf3f4; border-radius: 6px; overflow: hidden; }
+.owner-redline-bars i { display: block; height: 100%; border-radius: 6px; }
+.owner-redline-callout { margin: 16px 0 0; padding: 12px 14px; border-radius: 10px; line-height: 1.5; }
+.owner-redline-callout.bad { background: #fff1f1; color: #8f1d20; }
+.owner-redline-callout.good { background: #effaf6; color: #0b5e3b; }
+.owner-redline-regions { margin-top: 0; }
+.owner-redline-slack { border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; background: #fbfcfc; }
+.owner-redline-slack-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+.owner-redline-slack button { border: 0; border-radius: 9px; background: var(--navy); color: #fff; padding: 9px 16px; font-weight: 800; cursor: pointer; }
+.owner-redline-slack pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 13px; line-height: 1.6; }
+.owner-redline-import { max-width: 420px; }
 
 .schedule-hero { display: grid; grid-template-columns: 1fr 280px; min-height: 260px; border-radius: 22px; overflow: hidden; color: #fff; background: radial-gradient(circle at 70% 30%, rgba(53,189,181,.38), transparent 30%), linear-gradient(115deg, var(--navy-deep), #07506a); box-shadow: var(--shadow); }
 .schedule-copy { padding: clamp(28px, 4vw, 52px); }
@@ -313,6 +345,8 @@ a { color: inherit; }
 @media (max-width: 1100px) {
   .owner-stats { grid-template-columns: repeat(2,1fr); }
   .owner-charts { grid-template-columns: 1fr; }
+  .owner-redline-stats { grid-template-columns: repeat(2,1fr); }
+  .owner-redline-split { grid-template-columns: 1fr; }
   .den-nav { grid-template-columns: repeat(2,1fr); }
   .feature-grid { grid-template-columns: repeat(2,1fr); }
   .chat-layout { grid-template-columns: 240px 1fr; }
@@ -327,6 +361,8 @@ a { color: inherit; }
   .owner-controls { align-items: start; }
   .owner-scope { margin-left: 0; width: 100%; }
   .owner-stats, .owner-split, .owner-notes, .owner-reference { grid-template-columns: 1fr; }
+  .owner-redline-stats, .owner-redline-empty { grid-template-columns: 1fr; }
+  .owner-redline { padding: 19px; }
   .owner-chart-card, .owner-detail, .owner-table-card, .owner-setup, .owner-forecast, .owner-followup, .owner-notes { padding: 19px; }
   .owner-chart-heading { display: block; }
   .den-bg { padding: 8px; }
