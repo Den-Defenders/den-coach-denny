@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { OwnerReport, PeriodRow } from "@/lib/ownerReport";
+import RedlineTracker from "./RedlineTracker";
 
 type View = "weekly" | "daily";
 type Metric = "revenuePipeline" | "cashflowPipeline" | "netCash" | "sales" | "deposits" | "installPayments";
@@ -131,6 +132,8 @@ export default function OwnerDashboard() {
         <p>What we sold, what cash came in, and what is still on the calendar. All dollars are shown in plain English.</p></div>
       <div className="owner-hero-icon" aria-hidden="true">↗<span>2024 · 2025 · 2026 · 2027</span></div>
     </section>
+
+    <RedlineTracker />
 
     <section className="owner-controls surface" aria-label="Dashboard filters">
       <div className="owner-segment" role="group" aria-label="Time view">

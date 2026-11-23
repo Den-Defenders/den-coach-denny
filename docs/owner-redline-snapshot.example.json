@@ -1,0 +1,27 @@
+{
+  "kind": "owner-redline",
+  "schemaVersion": 1,
+  "snapshotDate": "2026-11-23",
+  "generatedAt": "2026-11-23T16:00:00Z",
+  "source": "EXAMPLE NUMBERS ONLY - not ServiceTitan data",
+  "notes": ["Example file for testing the redline tracker. Do not import as real data."],
+  "redline": 350000,
+  "targetDate": "2027-02-01",
+  "backlog": 620000,
+  "holdBacklog": 225000,
+  "scheduledThroughTarget": 410000,
+  "last30": { "start": "2026-10-24", "end": "2026-11-22", "sold": 190000, "installed": 260000, "backlogAtStart": 690000 },
+  "weeks": [
+    { "weekStart": "2026-10-26", "sold": 48000, "installed": 66000, "backlogAtStart": 690000 },
+    { "weekStart": "2026-11-02", "sold": 45000, "installed": 62000, "backlogAtStart": 672000 },
+    { "weekStart": "2026-11-09", "sold": 47000, "installed": 62000, "backlogAtStart": 655000 },
+    { "weekStart": "2026-11-16", "sold": 44000, "installed": 64000, "backlogAtStart": 640000 },
+    { "weekStart": "2026-11-23", "sold": null, "installed": null, "backlogAtStart": 620000 }
+  ],
+  "regions": [
+    { "name": "NorCal", "backlog": 180000, "sold30": 60000, "installed30": 110000, "weeksOut": 1.5 },
+    { "name": "MidCal", "backlog": 90000, "sold30": 30000, "installed30": 35000, "weeksOut": 4 },
+    { "name": "SoCal", "backlog": 300000, "sold30": 90000, "installed30": 100000, "weeksOut": 5 },
+    { "name": "Washington", "backlog": 50000, "sold30": 10000, "installed30": 15000, "weeksOut": null }
+  ]
+}
