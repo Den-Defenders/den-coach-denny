@@ -557,6 +557,8 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
   const firstLater = view === "followups" && followOwner !== "took" ? visible.findIndex((c) => c.followUpReason === "scheduled") : -1;
   const needsCount = conversations.filter((c) => c.flag.needsCsr).length;
   const myNeeds = conversations.filter((c) => c.flag.needsCsr && me && c.assignedTo === me).length;
+  /** Chats nobody owns yet (Zero in → Unowned, Steven 2026-11-24). */
+  const unownedCount = conversations.filter((c) => !c.assignedTo && !c.optedOut).length;
   const thread = data?.thread;
   const flag = data?.flag;
   const reply = data?.reply;
@@ -643,8 +645,8 @@ export default function TextingInbox({ myRole = "" }: { myRole?: string } = {}) 
             ? "Customers you took over from someone else's follow-ups (or a manager handed you). Newest first."
             : "Everyone's customers who went quiet for 1+ work day after the last text, and follow-up dates. Due first (oldest first), then Later. Tip: type a team member's name in the search to see their customers."}</div>}
           {view === "active" && <div className="inbox-filters inbox-zero-in" role="tablist" aria-label="Filter">
-            {/* Mine / Unassigned moved to the 👤 menu (2026-11-22). */}
-            {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
+            {/* Mine moved to the 👤 menu (2026-11-22); Unowned is back here too (Steven, 2026-11-24). */}
+            {([["all", "All"], ["needs", `Needs CSR${needsCount ? ` (${needsCount})` : ""}`], ["unassigned", `Unowned${unownedCount ? ` (${unownedCount})` : ""}`], ["ai", "AI on"], ["paused", "AI paused"], ["optout", "Opted out"]] as [Filter, string][]).map(([key, label]) => (
               <button key={key} role="tab" aria-selected={filter === key} className={`inbox-filter${filter === key ? " active" : ""}`} onClick={() => setFilter(key)}>{label}</button>
             ))}
           </div>}
