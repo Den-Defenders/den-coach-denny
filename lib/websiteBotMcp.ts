@@ -40,6 +40,8 @@ export const TEXTING_READ_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "hatch_stored_search_messages",
   // Session 8 PR 2b: Hatch guard, was this lead in Hatch in the last 60 days? (lib/sms/hatchGuard.ts).
   "hatch_stored_search_contacts",
+  // Hatch watch (2026-11-25): how far the stored Hatch copy reaches (lib/sms/hatchWatch.ts).
+  "hatch_database_status",
 ]);
 
 export const WEBSITE_BOT_WRITE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([

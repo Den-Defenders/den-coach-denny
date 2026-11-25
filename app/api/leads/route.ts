@@ -9,9 +9,14 @@
  *   live               - one conversation per phone (re-submits join it), consent saved,
  *                        the lead shows in the Texting inbox, and the drip starts
  *                        (welcome sent right after we answer Zapier; lib/sms/drip.ts).
+ *
+ * ?watch=hatch (2026-11-25, Hatch watch): the Zaps that send leads to HATCH post a copy here.
+ * Denny only saves it for the daily "did Hatch miss it?" check (lib/sms/hatchWatch.ts).
+ * No texts, no conversation, not in Lead results, whatever SMS_LEADS_MODE says.
  */
 import { NextResponse } from "next/server";
 import { dripEnabled, scheduleWelcome } from "@/lib/sms/drip";
+import { saveWatchLead } from "@/lib/sms/hatchWatch";
 import {
   leadsMode,
   leadsSecretConfigured,
@@ -60,8 +65,27 @@ export async function POST(request: Request) {
   }
 
   const lead = parseLead(raw);
-  const mode = leadsMode();
   const now = smsNow();
+
+  // Hatch-bound lead: save for the daily Hatch check only. Never texted by Denny.
+  if (new URL(request.url).searchParams.get("watch") === "hatch") {
+    try {
+      const watchId = await saveWatchLead(lead, now);
+      return NextResponse.json({
+        ok: true,
+        watch: "hatch",
+        watchId,
+        message: "Saved for the daily Hatch check. Denny sends no texts for this lead.",
+        understood: { first_name: lead.fields.firstName, last_name: lead.fields.lastName, phone: lead.fields.phone, zip: lead.fields.zip, email: lead.fields.email, ad_set: lead.fields.adSet },
+        warnings: lead.warnings,
+      }, { headers: NO_STORE });
+    } catch (error) {
+      console.error("Hatch watch intake failed:", error);
+      return NextResponse.json({ ok: false, error: "Could not save the lead." }, { status: 500, headers: NO_STORE });
+    }
+  }
+
+  const mode = leadsMode();
   try {
     const leadId = await saveLead(lead, { mode, result: mode === "live" ? "received" : "logged_only", userAgent: request.headers.get("user-agent"), at: now });
     await audit({

@@ -25,6 +25,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Hatch watch (GitHub Actions). No login; the route rejects any request
+  // without SMS_TIMER_SECRET.
+  if (pathname === "/api/hatch-watch") {
+    return NextResponse.next();
+  }
+
   // Twilio texting webhooks. No login, but each route rejects any request
   // without a valid X-Twilio-Signature (lib/sms/twilio.ts).
   if (pathname === "/api/sms/inbound" || pathname === "/api/sms/status") {
