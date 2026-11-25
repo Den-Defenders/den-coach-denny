@@ -1,0 +1,32 @@
+# Den Coach Denny "Hatch watch" (lib/sms/hatchWatch.ts).
+# Every 30 minutes from 7 AM to about 1 PM Pacific, asks Denny to check yesterday's
+# Hatch-bound leads against the stored Hatch copy (which syncs around 7 AM) and post
+# one Slack summary of any lead Hatch never put in a campaign.
+# GitHub may start a scheduled run 5-20 minutes late; that's fine here.
+# Uses the same repository secret as the texting timer: DENNY_TIMER_SECRET.
+name: Hatch watch
+
+on:
+  schedule:
+    - cron: "*/30 15-21 * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: hatch-watch
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check for leads Hatch missed
+        env:
+          TIMER_SECRET: ${{ secrets.DENNY_TIMER_SECRET }}
+        run: |
+          if [ -z "$TIMER_SECRET" ]; then echo "DENNY_TIMER_SECRET is not set"; exit 1; fi
+          curl -sS --fail-with-body --max-time 90 -X POST \
+            -H "Authorization: Bearer $TIMER_SECRET" \
+            https://den-coach-denny.vercel.app/api/hatch-watch
